@@ -37,8 +37,15 @@
   // bookmarklet on a page that already has a panel now always tears down
   // the old instance and rebuilds from the freshly-fetched script, instead
   // of just toggling stale, already-executed code back into view).
-  var VERSION = 'v9-2026-08-05';
+  var VERSION = 'v10-2026-08-05';
   console.log('[link-gen-tool] loaded ' + VERSION);
+
+  // document.currentScript is only reliable synchronously during this
+  // script's own initial execution (it's the <script> tag the bookmarklet
+  // created), so capture its src right here at the top - attemptAutoLogin
+  // needs this later to inject the same script into a new same-origin tab
+  // it opens for the login page, instead of hardcoding a URL.
+  var SELF_SCRIPT_SRC = (document.currentScript && document.currentScript.src) || null;
 
   if (window.__lgtPanelInstance) {
     window.__lgtPanelInstance.destroy();
@@ -552,6 +559,47 @@
 
   var RESUME_KEY = '__lgtAutoLoginResume';
 
+  // Polls a same-origin window handle (opened via window.open below) until
+  // it has finished navigating to a page whose pathname contains
+  // expectedPath, or gives up after timeoutMs. Wrapped in try/catch
+  // throughout because some sites send a Cross-Origin-Opener-Policy header
+  // that isolates the popup's browsing context group even though it's
+  // same-origin - every property read below throws in that case, which is
+  // indistinguishable from "not ready yet" until the timeout hits (then
+  // it's treated as "give up, fall back to manual").
+  function waitForWindowReady(win, expectedPath, timeoutMs) {
+    return new Promise(function (resolve) {
+      var start = Date.now();
+      var iv = setInterval(function () {
+        var closed = true;
+        try { closed = !win || win.closed; } catch (e) { closed = true; }
+        if (closed) { clearInterval(iv); resolve(false); return; }
+        var ready = false;
+        try {
+          ready = win.document && win.document.readyState === 'complete' &&
+            win.location.pathname.indexOf(expectedPath) !== -1;
+        } catch (e) { ready = false; }
+        if (ready) { clearInterval(iv); resolve(true); return; }
+        if (Date.now() - start > timeoutMs) { clearInterval(iv); resolve(false); }
+      }, 200);
+    });
+  }
+
+  // Injects the exact same <script src=...> tag the bookmarklet itself
+  // creates (see index.html) into a same-origin window handle, so the tool
+  // starts running there exactly as if the user had clicked the bookmarklet
+  // a second time themselves. Returns false if that isn't possible (no
+  // captured script URL, or the window's document isn't reachable).
+  function injectScriptInto(win) {
+    if (!SELF_SCRIPT_SRC) return false;
+    try {
+      var s = win.document.createElement('script');
+      s.src = SELF_SCRIPT_SRC.split('?')[0] + '?t=' + Date.now();
+      win.document.body.appendChild(s);
+      return true;
+    } catch (e) { return false; }
+  }
+
   function attemptAutoLogin(brandKey, username, password, log) {
     var sel = LOGIN_SELECTORS[brandKey];
     if (!sel) {
@@ -559,18 +607,40 @@
       return Promise.resolve(false);
     }
     if (location.pathname.indexOf(sel.loginPath) === -1) {
-      log('Navigating to login page: ' + sel.loginPath);
-      // The navigation below tears down this whole script instance (panel
-      // included) - a bookmarklet has no way to keep running across a hard
-      // page load. Leave a short-lived breadcrumb so that when the panel
-      // is re-injected on the login page, it can resume automatically
-      // instead of silently doing nothing until the user manually reopens
-      // the Live Login tab and clicks Auto-login a second time.
+      // Leave a short-lived breadcrumb before going anywhere - a
+      // same-origin popup opened via window.open() below inherits a copy
+      // of this tab's sessionStorage at creation time (per spec), so
+      // resumeAutoLoginIfPending() picks this up automatically no matter
+      // how the script ends up running on the login page (auto-injected
+      // below, or manually re-clicked as a fallback).
       try {
         sessionStorage.setItem(RESUME_KEY, JSON.stringify({ brand: brandKey, ts: Date.now() }));
       } catch (e) {}
-      location.href = location.origin + sel.loginPath;
-      return Promise.resolve(false); // page will reload; resumes automatically on next injection
+
+      var targetUrl = location.origin + sel.loginPath;
+      var win;
+      try { win = window.open(targetUrl, '_blank'); } catch (e) { win = null; }
+
+      if (!win) {
+        // Popup blocked (or window.open unavailable here) - fall back to
+        // the old behaviour: navigate this tab. That tears down this
+        // script instance, but the breadcrumb above still lets it
+        // auto-resume once the user re-clicks the bookmarklet on the
+        // login page.
+        log('Could not open a new tab (popup blocked?) - navigating this tab instead. Re-click the bookmarklet once on the login page; it will then resume automatically.');
+        location.href = targetUrl;
+        return Promise.resolve(false);
+      }
+
+      log('Opened login page in a new tab - attempting to continue automatically there...');
+      return waitForWindowReady(win, sel.loginPath, 15000).then(function (ready) {
+        if (ready && injectScriptInto(win)) {
+          log('Started auto-login in the new tab - switch to it to watch progress.');
+          return false; // this tab's job is done; the new tab's own panel takes over
+        }
+        log('Could not continue automatically in the new tab (it may be isolated from this page) - switch to it and click the bookmarklet there once; it will then resume automatically.');
+        return false;
+      });
     }
     log('Looking for username field...');
     return fillField(sel.usernameSelector, username, 6000, 'Username', log).then(function (userResult) {

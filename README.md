@@ -93,18 +93,25 @@ running.
 ## Known limitations
 
 - Clicking "Auto-login" when the current page isn't the brand's login path
-  navigates there (`location.href = ...`), which tears down this whole
-  script instance - including the panel - since a bookmarklet can't survive
-  a hard page load. Before navigating, a short-lived breadcrumb is left in
-  `sessionStorage` (`__lgtAutoLoginResume`); when the panel is re-injected
-  on the login page (re-click the bookmarklet), it checks for that
-  breadcrumb and - if found, fresh (<30s old), and the current path matches
-  - automatically switches to the Live Login tab and resumes the fill/
-  submit flow, instead of silently doing nothing until manually retriggered.
-  You still have to re-click the bookmarklet once after the redirect (a
-  bookmarklet has no way to run without being clicked), but you no longer
-  have to reopen the Live Login tab and click Auto-login a second time by
-  hand.
+  no longer navigates the current tab away. Instead it opens the login page
+  in a **new same-origin tab** (`window.open(...)`) and - since it's
+  same-origin - reaches directly into that tab's `document` to inject the
+  exact same `<script src=...>` tag the bookmarklet itself creates, so the
+  whole tool starts running there automatically, with no extra click. The
+  original tab's script/panel is left completely alone (it never navigates,
+  so nothing is torn down there). A short-lived breadcrumb is still left in
+  `sessionStorage` (`__lgtAutoLoginResume`) before opening the new tab -
+  same-origin popups inherit a copy of the opener's `sessionStorage` at
+  creation time, so `resumeAutoLoginIfPending()` in the new tab picks it up
+  and auto-switches to the Live Login tab + resumes the fill/submit flow
+  there, exactly as before.
+  - **Fallback (rare)**: if the new tab can't be opened (popup blocked) or
+    the site isolates it from this page (e.g. via a
+    `Cross-Origin-Opener-Policy` header, which can prevent reaching into
+    even a same-origin popup's `document`), this falls back to the old
+    behaviour - navigating the current tab - and you'll need to re-click
+    the bookmarklet once on the login page yourself; the breadcrumb above
+    still lets it resume automatically from there, same as always.
 - Username/password fields are cleared before typing into them
   (`simulateTyping` in `link-gen-tool.js`), not just appended to - browser
   or site autofill can pre-populate a field (e.g. a remembered username)
