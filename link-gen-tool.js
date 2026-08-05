@@ -37,7 +37,7 @@
   // bookmarklet on a page that already has a panel now always tears down
   // the old instance and rebuilds from the freshly-fetched script, instead
   // of just toggling stale, already-executed code back into view).
-  var VERSION = 'v12-2026-08-05';
+  var VERSION = 'v13-2026-08-05';
   console.log('[link-gen-tool] loaded ' + VERSION);
 
   // document.currentScript is only reliable synchronously during this
@@ -605,6 +605,13 @@
   }
 
   var RESUME_KEY = '__lgtAutoLoginResume';
+  // Separate, simpler breadcrumb from RESUME_KEY above: RESUME_KEY only
+  // triggers when we're still ON the login path (it re-attempts the
+  // fill/submit flow), so it deliberately does NOT fire once the user has
+  // navigated past login - otherwise a freshly re-injected panel there
+  // would default back to the "Generate" tab, hiding the very capture
+  // status the user needs to see right after a successful auto-login.
+  var POST_LOGIN_KEY = '__lgtPostLoginReinject';
 
   // Polls a same-origin window handle (opened via window.open below) until
   // it has finished navigating to a page whose pathname contains
@@ -647,6 +654,52 @@
     } catch (e) { return false; }
   }
 
+  // Getting the tool running on the *login* page (above) is only half of
+  // this problem. If the site's login-success handler does a *hard*
+  // full-page navigation (a real reload/redirect, not an in-place SPA
+  // route change) once the user actually logs in, that instantly destroys
+  // the new tab's script/panel/Capture instance - with zero chance for
+  // anything running there to log a message, auto-resume, or keep
+  // passively capturing stc/ctx on whatever page loads next. This was the
+  // actual, unaddressed cause of "auto/manual login succeeds, but Build
+  // final link from capture still says nothing was captured": the user has
+  // to know to manually re-click the bookmarklet on the fresh post-login
+  // page for capture to have any chance at all, and any request that fires
+  // before they do so is missed.
+  //
+  // This ORIGINAL tab's own script is untouched by any of that (it never
+  // navigated), so it can watch the popup from the outside and re-inject
+  // there the moment it notices the login page has been left behind -
+  // exactly the same trick used to get the tool running on the login page
+  // in the first place, just applied on the way back out. If it turns out
+  // to have been an in-place SPA route change instead (nothing torn down),
+  // the new tab's own panel is still alive and already handled it via
+  // watchForSubmitOutcome below - __lgtPanelInstance is checked first so
+  // this never double-injects on top of a still-running instance.
+  function watchForLoginSuccessAndReinject(win, loginPath, log) {
+    var start = Date.now();
+    var timeoutMs = 3 * 60 * 1000; // generous - covers the "click Log In yourself" fallback window too
+    var iv = setInterval(function () {
+      var closed = true;
+      try { closed = !win || win.closed; } catch (e) { closed = true; }
+      if (closed) { clearInterval(iv); return; }
+      if (Date.now() - start > timeoutMs) { clearInterval(iv); return; }
+      var pastLogin = false, complete = false, alreadyLive = false;
+      try {
+        pastLogin = win.location.pathname.indexOf(loginPath) === -1;
+        complete = win.document && win.document.readyState === 'complete';
+        alreadyLive = !!win.__lgtPanelInstance;
+      } catch (e) { return; } // COOP-isolated or not ready yet - keep polling
+      if (!pastLogin || !complete) return;
+      clearInterval(iv);
+      if (alreadyLive) return; // SPA route change - its own panel is already alive and handling this
+      try { win.sessionStorage.setItem(POST_LOGIN_KEY, '1'); } catch (e) {}
+      if (injectScriptInto(win)) {
+        log('Login succeeded - the new tab navigated away from the login page, and its tool was re-injected automatically so passive capture keeps running there.');
+      }
+    }, 500);
+  }
+
   function attemptAutoLogin(brandKey, username, password, log) {
     var sel = LOGIN_SELECTORS[brandKey];
     if (!sel) {
@@ -683,6 +736,13 @@
       return waitForWindowReady(win, sel.loginPath, 15000).then(function (ready) {
         if (ready && injectScriptInto(win)) {
           log('Started auto-login in the new tab - switch to it to watch progress.');
+          // Keep watching from here (this tab was never navigated, so it's
+          // unaffected either way) so that IF login succeeds via a hard
+          // page navigation there - which would otherwise silently destroy
+          // the new tab's tool with no chance to auto-resume - it gets
+          // re-injected automatically instead of requiring the user to
+          // notice and re-click the bookmarklet themselves.
+          watchForLoginSuccessAndReinject(win, sel.loginPath, log);
           return false; // this tab's job is done; the new tab's own panel takes over
         }
         log('Could not continue automatically in the new tab (it may be isolated from this page) - switch to it and click the bookmarklet there once; it will then resume automatically.');
@@ -1082,6 +1142,20 @@
     if (!cred) return; // nothing to resume with (shouldn't normally happen - it was there before navigating)
     panelEl.__lgtSwitchToLiveLogin();
     if (panelEl.__lgtAutoLoginBtn) panelEl.__lgtAutoLoginBtn.click();
+  })();
+
+  // Companion to the above: fires when this fresh instance was re-injected
+  // by watchForLoginSuccessAndReinject right after a hard post-login
+  // navigation destroyed the previous instance. Just surfaces the Live
+  // Login tab (capture status / seen-count) - never re-attempts login here,
+  // since by construction this only runs once we're already past the
+  // login path.
+  (function showLiveLoginIfJustPastLogin() {
+    var flag;
+    try { flag = sessionStorage.getItem(POST_LOGIN_KEY); } catch (e) { return; }
+    if (!flag) return;
+    try { sessionStorage.removeItem(POST_LOGIN_KEY); } catch (e) {}
+    panelEl.__lgtSwitchToLiveLogin();
   })();
 
   window.__lgtPanelInstance = {

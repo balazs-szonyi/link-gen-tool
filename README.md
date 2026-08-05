@@ -180,6 +180,26 @@ running.
   all (worth checking whether the login flow's account/session-loading
   calls happen on a different tab/subdomain, or before this script was
   injected).
+- **The real cause behind "auto/manual login succeeds via the new-tab flow,
+  but Build final link from capture still says nothing was captured"
+  (v13)**: v10 got the tool running automatically on the *login* page, but
+  a successful login is very often a *hard* full-page navigation away from
+  it (not an in-place SPA route change) - which instantly destroys that new
+  tab's script/panel/Capture instance, with zero chance for it to log
+  anything, keep listening, or auto-resume on whatever page loads next. The
+  user had to notice this and manually re-click the bookmarklet themselves,
+  and any request that fired before they did so was missed regardless of
+  v12's persistence (there was nothing to persist yet). The *original* tab
+  that opened the login popup is untouched by any of this, so it now keeps
+  watching the popup from the outside (`watchForLoginSuccessAndReinject`)
+  and, the moment the popup's location moves past the login path with a
+  freshly-completed page load and no live panel of its own already there,
+  re-injects the tool automatically - restarting passive capture there with
+  no user action needed. The re-injected panel also auto-switches to the
+  Live Login tab so its status (captured, or the seen-count diagnostic
+  above) is immediately visible. If it turns out to have been an SPA route
+  change instead (script never actually died), the existing panel there is
+  left alone - this only acts when nothing is running to react on its own.
 - Behavioral bot-detection (keystroke/mouse timing) on the submit action is
   reduced but not eliminated by the simulated-typing approach — this differs
   from the network/browser-fingerprint-level blocks that stop headless
