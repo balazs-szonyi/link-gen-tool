@@ -40,6 +40,14 @@ brand page you're already logged into — no CLI, no headless automation.
    once it's deployed.
 2. Drag the shown `javascript:...` snippet to your bookmarks bar.
 3. On any Betsson brand page, click the bookmark to open the panel.
+4. The panel title bar and the browser console (`[link-gen-tool] loaded
+   vX...`) show the version of the code that's actually running. Clicking
+   the bookmark again on the same page (no reload) now always tears down
+   the old panel and rebuilds it from a freshly-fetched copy of
+   `link-gen-tool.js` - so re-clicking is a reliable way to pick up a new
+   deploy without needing a full page reload. If you ever suspect you're
+   testing a stale build, check the version shown against the latest
+   commit before assuming a fix didn't work.
 
 ## Local development
 
@@ -66,6 +74,21 @@ dropping the iframe and storing credentials directly in each page's own
 first-party `localStorage`, plus an explicit Export/Import sync code in
 the Credentials tab for moving a credential between brand domains. Manual,
 but it can't be silently broken by a storage policy.
+
+## Versioning
+
+`link-gen-tool.js` has a `VERSION` constant near the top, shown in the
+panel title and logged to the console on every load. Bump it with every
+change. This exists because of a real bug (2026-08): re-clicking the
+bookmarklet on a page that already had a panel used to just toggle the
+*existing, already-executed* panel back into view instead of running the
+newly-fetched script - so a user who fixed/deployed code and then
+re-clicked the bookmarklet without a full page reload would keep seeing
+the old, pre-fix behavior indefinitely, even though the deploy itself had
+succeeded. The bookmarklet click now always destroys any existing panel
+and rebuilds fresh from whatever code was just fetched; the visible
+version number is the easiest way to confirm which build is actually
+running.
 
 ## Known limitations
 

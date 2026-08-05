@@ -1,1 +1,4 @@
 snap*.txt
+node_modules/
+debug-*.mjs
+*.png

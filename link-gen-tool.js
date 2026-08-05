@@ -31,9 +31,17 @@
 (function () {
   'use strict';
 
+  // Bump on every change so the loaded version is visible in the panel
+  // title and the console - makes it obvious whether a fresh reload
+  // actually picked up the latest deployed code (see below: re-running the
+  // bookmarklet on a page that already has a panel now always tears down
+  // the old instance and rebuilds from the freshly-fetched script, instead
+  // of just toggling stale, already-executed code back into view).
+  var VERSION = 'v6-2026-08-05';
+  console.log('[link-gen-tool] loaded ' + VERSION);
+
   if (window.__lgtPanelInstance) {
-    window.__lgtPanelInstance.toggle();
-    return;
+    window.__lgtPanelInstance.destroy();
   }
 
   // ---------------------------------------------------------------------
@@ -310,10 +318,22 @@
   // ---------------------------------------------------------------------
 
   var Capture = (function () {
-    var captured = { stc: null, ctx: null, source: null };
-    var listeners = [];
+    // State lives on `window`, not in this closure. The bookmarklet's
+    // fetch/XHR monkey-patch below only ever applies once per page (it's
+    // guarded by __lgtPatched), so if the panel is re-injected later
+    // (bookmarklet clicked again without a full page reload), a *new*
+    // Capture closure is created here but the *original* patched
+    // fetch/XHR still calls the *original* considerHeaders/notify. Keeping
+    // captured/listeners on a shared window-level object means every
+    // Capture instance - old or freshly re-injected - reads and writes the
+    // same state, so re-injection can never silently stop receiving
+    // capture events.
+    var state = window.__lgtCaptureState = window.__lgtCaptureState || {
+      captured: { stc: null, ctx: null, source: null },
+      listeners: []
+    };
 
-    function notify() { listeners.forEach(function (l) { l(captured); }); }
+    function notify() { state.listeners.forEach(function (l) { l(state.captured); }); }
 
     function considerHeaders(headers, url) {
       if (!/sb\/fe-api\//.test(url || '')) return;
@@ -323,9 +343,9 @@
       var stc = normalized['x-sb-static-context-id'];
       var ctx = normalized['x-sb-user-context-id'];
       if (stc && ctx) {
-        captured.stc = stc;
-        captured.ctx = ctx;
-        captured.source = url;
+        state.captured.stc = stc;
+        state.captured.ctx = ctx;
+        state.captured.source = url;
         notify();
       }
     }
@@ -370,9 +390,9 @@
 
     return {
       start: function () { patchFetch(); patchXHR(); },
-      onCapture: function (cb) { listeners.push(cb); },
-      get: function () { return captured; },
-      reset: function () { captured = { stc: null, ctx: null, source: null }; }
+      onCapture: function (cb) { state.listeners.push(cb); },
+      get: function () { return state.captured; },
+      reset: function () { state.captured = { stc: null, ctx: null, source: null }; }
     };
   })();
 
@@ -495,6 +515,7 @@
 
   function buildPanel() {
     var style = document.createElement('style');
+    style.id = 'lgt-panel-style';
     style.textContent = [
       '#lgt-panel{position:fixed;top:20px;right:20px;width:360px;max-height:88vh;overflow:auto;',
       'background:#101320;color:#f6f7fb;font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;',
@@ -519,7 +540,8 @@
     document.head.appendChild(style);
 
     var panel = el('div', { id: 'lgt-panel' });
-    var title = el('h3', {}, ['Link Gen Tool', el('span', { class: 'lgt-close', onclick: function () { panel.style.display = 'none'; } }, ['x'])]);
+    var titleText = el('span', {}, ['Link Gen Tool ', el('span', { style: 'opacity:.5;font-weight:400;font-size:10px' }, [VERSION])]);
+    var title = el('h3', {}, [titleText, el('span', { class: 'lgt-close', onclick: function () { panel.style.display = 'none'; } }, ['x'])]);
     var tabs = el('div', { class: 'lgt-tabs' });
     var tabA = el('div', { class: 'lgt-tab active' }, ['Generate']);
     var tabB = el('div', { class: 'lgt-tab' }, ['Live Login']);
@@ -768,6 +790,11 @@
   var panelEl = buildPanel();
 
   window.__lgtPanelInstance = {
-    toggle: function () { panelEl.style.display = panelEl.style.display === 'none' ? '' : 'none'; }
+    toggle: function () { panelEl.style.display = panelEl.style.display === 'none' ? '' : 'none'; },
+    destroy: function () {
+      if (panelEl && panelEl.parentNode) panelEl.parentNode.removeChild(panelEl);
+      var oldStyle = document.getElementById('lgt-panel-style');
+      if (oldStyle && oldStyle.parentNode) oldStyle.parentNode.removeChild(oldStyle);
+    }
   };
 })();
