@@ -37,7 +37,7 @@
   // bookmarklet on a page that already has a panel now always tears down
   // the old instance and rebuilds from the freshly-fetched script, instead
   // of just toggling stale, already-executed code back into view).
-  var VERSION = 'v8-2026-08-05';
+  var VERSION = 'v9-2026-08-05';
   console.log('[link-gen-tool] loaded ' + VERSION);
 
   if (window.__lgtPanelInstance) {
@@ -466,32 +466,57 @@
   // (Closed shadow roots remain unreachable from page-injected JS by design;
   // if a brand uses those, auto-login genuinely cannot find the fields and
   // passive capture - which doesn't need to find anything - is the fallback.)
-  function deepQuerySelector(selector, root) {
+  function deepQuerySelectorAll(selector, root, results) {
     root = root || document;
-    var found = root.querySelector(selector);
-    if (found) return found;
+    results = results || [];
+    var found = root.querySelectorAll(selector);
+    for (var j = 0; j < found.length; j++) results.push(found[j]);
     var all = root.querySelectorAll('*');
     for (var i = 0; i < all.length; i++) {
-      if (all[i].shadowRoot) {
-        found = deepQuerySelector(selector, all[i].shadowRoot);
-        if (found) return found;
-      }
+      if (all[i].shadowRoot) deepQuerySelectorAll(selector, all[i].shadowRoot, results);
     }
-    return null;
+    return results;
+  }
+
+  function isVisible(elem) {
+    if (!elem || !elem.isConnected) return false;
+    var rect = elem.getBoundingClientRect();
+    if (rect.width <= 0 && rect.height <= 0) return false;
+    var style = window.getComputedStyle(elem);
+    if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity) === 0) return false;
+    return true;
+  }
+
+  // Some brand sites place a hidden decoy input matching the same
+  // selector right next to the real one (a common anti-autofill / anti-
+  // bot technique, since browsers and naive scripts alike tend to grab
+  // the first DOM match). Prefer a visible match; only fall back to the
+  // first match overall if none of them look visible.
+  function deepQuerySelector(selector, root) {
+    var matches = deepQuerySelectorAll(selector, root);
+    if (matches.length === 0) return null;
+    if (matches.length === 1) return matches[0];
+    var visible = matches.filter(isVisible);
+    return visible[0] || matches[0];
   }
 
   // Poll for an element rather than querying once - login forms on these
   // brand sites are client-rendered (React/etc.) and can take a moment to
   // appear/re-render after navigation or after an adjacent field changes.
   // Always returns a FRESH, currently-connected element (never a stale
-  // reference captured before a re-render swapped the node out).
+  // reference captured before a re-render swapped the node out). Prefers
+  // a visible match over a hidden decoy field, but if only a hidden match
+  // ever appears before the timeout, returns that rather than nothing -
+  // still better than failing outright.
   function waitForElement(selector, timeoutMs) {
     return new Promise(function (resolve) {
       var start = Date.now();
+      var lastSeen = null;
       (function poll() {
         var el = deepQuerySelector(selector);
-        if (el && el.isConnected) return resolve(el);
-        if (Date.now() - start > timeoutMs) return resolve(null);
+        if (el) lastSeen = el;
+        if (el && isVisible(el)) return resolve(el);
+        if (Date.now() - start > timeoutMs) return resolve(lastSeen);
         setTimeout(poll, 150);
       })();
     });
@@ -507,6 +532,13 @@
     function attempt(attemptsLeft) {
       return waitForElement(selector, findTimeoutMs).then(function (el) {
         if (!el) return fieldLabel + ' field not found';
+        var allMatches = deepQuerySelectorAll(selector);
+        if (allMatches.length > 1) {
+          log(fieldLabel + ' selector matched ' + allMatches.length + ' elements' +
+            (isVisible(el) ? ' - using the visible one.' : ' - none looked visible, using the first match (may be a hidden decoy field).'));
+        } else if (!isVisible(el)) {
+          log(fieldLabel + ' field found but not visible - filling it anyway, may not be the real field.');
+        }
         return simulateTyping(el, text).then(function (result) {
           if (result === 'ok') return 'ok';
           log(fieldLabel + ' field ' + result + ' while typing' + (attemptsLeft > 0 ? ' - retrying...' : ' - giving up.'));

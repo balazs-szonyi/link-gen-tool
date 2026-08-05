@@ -110,6 +110,19 @@ running.
   or site autofill can pre-populate a field (e.g. a remembered username)
   before the script gets to it, and typing on top of that without clearing
   first silently corrupts the value instead of replacing it.
+- **Confirmed on NordicBet (2026-08): the password selector matches two
+  elements on the real login page** - a genuine visible field plus a
+  hidden one (a decoy input some sites add specifically to confuse
+  browser/script autofill, since a naive script or autofill heuristic
+  tends to grab the first DOM match). The earlier plain `querySelector`
+  had no way to tell them apart and could silently fill the hidden decoy
+  instead of the real field - which would explain a filled email but an
+  always-empty-looking password even though the script's own log reached
+  "Submitting...". `deepQuerySelector` now collects every match (including
+  through shadow roots) and prefers a visible one; if more than one match
+  is found, the panel logs it (e.g. "Password selector matched 2 elements
+  - using the visible one.") so this is directly diagnosable instead of a
+  silent guess.
 - Auto-login selectors (`LOGIN_SELECTORS` in `link-gen-tool.js`) are
   experimental/best-effort. NordicBet's real login fields (`input[name=
   "email"]` / `input[name="password"]`) are plain light-DOM inputs (an
