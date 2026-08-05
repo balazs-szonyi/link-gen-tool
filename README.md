@@ -203,6 +203,36 @@ running.
 - Behavioral bot-detection (keystroke/mouse timing) on the submit action is
   reduced but not eliminated by the simulated-typing approach — this differs
   from the network/browser-fingerprint-level blocks that stop headless
+- **v14 - a manual paste fallback that never depends on the automatic
+  capture working at all.** After v13 still didn't resolve a persistent
+  "Nothing captured yet." report, the more likely explanation is a
+  structural timing race rather than anything the navigation-lifecycle
+  fixes above (v10-v13) could address: this tool's `Capture` module patches
+  `window.fetch`/`XMLHttpRequest.prototype.*` from a bookmarklet, which by
+  definition only runs *after* the page has already loaded and the user has
+  clicked it. Many bundled SPAs' own HTTP client code captures a local
+  reference to the *native* `fetch` at module-init time (e.g.
+  `const _fetch = window.fetch.bind(window)`), which happens within
+  milliseconds of page load - long before a human can click a bookmarklet.
+  Reassigning `window.fetch` afterwards has no effect on a reference the
+  site already captured earlier, so the patch can structurally see **zero**
+  matching requests on such a site even though the real headers are being
+  sent over the wire the whole time. (`XMLHttpRequest.prototype.open` is
+  patched too and may still work if the site calls `xhr.open()` normally
+  rather than also caching that reference early - results likely differ by
+  brand/bundler.) The Live Login tab now has two plain text inputs to paste
+  `stc`/`ctx` values manually - captured via the browser's own DevTools
+  Network tab (filter `fe-api`, click any matching request while logged in,
+  read `x-sb-static-context-id`/`x-sb-user-context-id` from its Request
+  Headers) - which inspects real wire traffic and is unaffected by any of
+  the above. "Build final link from capture" uses these manual values
+  first if both are filled, falling back to whatever the passive capture
+  recorded otherwise. The "Nothing captured yet" message on that button
+  also now always includes the concrete `sb/fe-api/*` seen-count, since
+  previously it showed an identical generic message regardless of what was
+  actually happening, making every prior real-world failure report
+  indistinguishable from any other.
+
   automation outright (e.g. Kasada on Mobilbahis QA).
 - The panel only auto-detects brand/environment from `location.hostname`
   (`BRAND_DOMAINS`) — brands without a known public domain (firestorm,

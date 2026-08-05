@@ -37,7 +37,7 @@
   // bookmarklet on a page that already has a panel now always tears down
   // the old instance and rebuilds from the freshly-fetched script, instead
   // of just toggling stale, already-executed code back into view).
-  var VERSION = 'v13-2026-08-05';
+  var VERSION = 'v14-2026-08-05';
   console.log('[link-gen-tool] loaded ' + VERSION);
 
   // document.currentScript is only reliable synchronously during this
@@ -1004,11 +1004,42 @@
     // this tab and click the button again by hand.
     wrap.__lgtAutoLoginBtn = autoBtn;
 
+    var manualLabel = el('label', {}, ['Or paste manually (DevTools > Network, filter "fe-api", any request > Headers)']);
+    var manualStc = el('input', { placeholder: 'x-sb-static-context-id value' });
+    var manualCtx = el('input', { placeholder: 'x-sb-user-context-id value' });
+
     var buildBtn = el('button', {
       class: 'secondary',
       onclick: function () {
-        var c = Capture.get();
-        if (!c.stc || !c.ctx) { status.textContent = 'Nothing captured yet.'; return; }
+        // Manual fields take priority when filled - this path never
+        // depends on the in-page fetch/XHR patch actually seeing the
+        // relevant request, which real-world reports suggest can fail
+        // structurally on some sites (see README: a bundled SPA's HTTP
+        // client commonly grabs its own reference to the native fetch at
+        // module-init time, long before this bookmarklet gets a chance to
+        // run and patch window.fetch - reassigning window.fetch afterwards
+        // has no effect on a reference the site already captured earlier).
+        // DevTools' Network tab inspects real wire traffic regardless of
+        // any of that, so it always works as a fallback.
+        var manualStcVal = manualStc.value.trim();
+        var manualCtxVal = manualCtx.value.trim();
+        var c = (manualStcVal && manualCtxVal) ? { stc: manualStcVal, ctx: manualCtxVal } : Capture.get();
+        if (!c.stc || !c.ctx) {
+          // Previously this always showed a generic static message no
+          // matter what - so every real-world failure report looked
+          // identical, and we could never tell from it whether ANY
+          // relevant network traffic was even being observed, or the
+          // problem was something else entirely (headers present but not
+          // matching, wrong tab, etc.). Always include the concrete
+          // seen-count here (not just in the passive-polling status,
+          // which this click immediately overwrites) so this exact
+          // message is diagnostic on its own, every single time.
+          var n = Capture.getSeenCount();
+          status.textContent = n > 0
+            ? 'Nothing captured yet - ' + n + ' sb/fe-api call(s) observed so far, but none had both required headers.'
+            : 'Nothing captured yet - zero sb/fe-api calls observed in this tab so far. Passive capture may not be active here, or the relevant request happens elsewhere (different tab, iframe, or before the tool was injected). Try pasting the values manually above instead (DevTools Network tab).';
+          return;
+        }
         if (!detected.brand) { status.textContent = 'Brand not recognized - cannot build base link.'; return; }
         status.textContent = 'Building link...';
         generateLink({ brand: detected.brand, environment: detected.environment, loggedIn: false }).then(function (links) {
@@ -1023,6 +1054,9 @@
 
     wrap.appendChild(info);
     wrap.appendChild(autoBtn);
+    wrap.appendChild(manualLabel);
+    wrap.appendChild(manualStc);
+    wrap.appendChild(manualCtx);
     wrap.appendChild(buildBtn);
     wrap.appendChild(status);
     wrap.appendChild(result);
