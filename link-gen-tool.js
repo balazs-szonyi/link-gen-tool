@@ -126,7 +126,7 @@
   var LOGIN_SELECTORS = {
     nordicbet: {
       loginPath: '/en/login',
-      usernameSelector: 'input[name="username"], input[type="email"]',
+      usernameSelector: 'input[name="email"], input#email-input, input[name="username"], input[type="email"]',
       passwordSelector: 'input[name="password"], input[type="password"]',
       submitSelector: '[data-test-id="account-login-btn-1-button"], button[type="submit"]',
       sportsbookNavText: /sportsbook/i
