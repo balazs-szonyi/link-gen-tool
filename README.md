@@ -161,6 +161,25 @@ running.
   login page... click Log In yourself to finish") instead of leaving the
   status stuck on "Submitting..." forever with no way to tell whether it's
   still working or has silently stalled.
+- **Capture data (`stc`/`ctx`) is persisted to `sessionStorage`** as soon as
+  it's captured (`link-gen-tool.js`'s `Capture` module, v12) and restored on
+  a fresh script instance if none is already in memory - a same-origin
+  full-page navigation (e.g. a login form that redirects to the logged-in
+  homepage rather than an in-place SPA route change) otherwise wipes
+  `window.__lgtCaptureState` entirely, discarding a capture that succeeded
+  moments earlier if the user hadn't yet clicked "Build final link". The
+  panel also now reflects an already-captured value immediately when it's
+  (re-)built, instead of only updating on the next new capture event.
+- **If nothing has been captured yet, the status line now shows a running
+  count of `sb/fe-api/*` calls observed (even ones missing one of the two
+  needed headers)**, e.g. "3 sb/fe-api call(s) observed, none with both
+  headers yet." - previously this said a static "Passive capture running"
+  no matter what was actually happening, giving no signal about whether any
+  relevant traffic was occurring at all. If this count never leaves zero
+  after a real login, no relevant request is being observed on this tab at
+  all (worth checking whether the login flow's account/session-loading
+  calls happen on a different tab/subdomain, or before this script was
+  injected).
 - Behavioral bot-detection (keystroke/mouse timing) on the submit action is
   reduced but not eliminated by the simulated-typing approach — this differs
   from the network/browser-fingerprint-level blocks that stop headless

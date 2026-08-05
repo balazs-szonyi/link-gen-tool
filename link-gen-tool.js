@@ -37,7 +37,7 @@
   // bookmarklet on a page that already has a panel now always tears down
   // the old instance and rebuilds from the freshly-fetched script, instead
   // of just toggling stale, already-executed code back into view).
-  var VERSION = 'v11-2026-08-05';
+  var VERSION = 'v12-2026-08-05';
   console.log('[link-gen-tool] loaded ' + VERSION);
 
   // document.currentScript is only reliable synchronously during this
@@ -335,8 +335,25 @@
     // Capture instance - old or freshly re-injected - reads and writes the
     // same state, so re-injection can never silently stop receiving
     // capture events.
+    var CAPTURE_STORAGE_KEY = '__lgtCaptureData';
+
+    // A same-origin full-page navigation (e.g. a login form that redirects
+    // to the logged-in homepage instead of an in-place SPA route change)
+    // wipes window.__lgtCaptureState entirely, along with whatever the
+    // fetch/XHR patch below already captured - even if the capture
+    // succeeded moments before the reload. Restore from sessionStorage on
+    // a fresh instance so a capture made just before such a navigation
+    // isn't silently lost.
+    var restored = null;
+    if (!window.__lgtCaptureState) {
+      try {
+        var rawRestore = sessionStorage.getItem(CAPTURE_STORAGE_KEY);
+        if (rawRestore) restored = JSON.parse(rawRestore);
+      } catch (e) {}
+    }
     var state = window.__lgtCaptureState = window.__lgtCaptureState || {
-      captured: { stc: null, ctx: null, source: null },
+      captured: restored || { stc: null, ctx: null, source: null },
+      seenCount: 0,
       listeners: []
     };
 
@@ -344,6 +361,11 @@
 
     function considerHeaders(headers, url) {
       if (!/sb\/fe-api\//.test(url || '')) return;
+      // Counts every sb/fe-api call seen, even ones missing the headers we
+      // need - exposed via getSeenCount() so the panel can show concrete
+      // progress ("N calls observed") instead of a static "still waiting"
+      // message that gives no signal about whether anything is happening.
+      state.seenCount = (state.seenCount || 0) + 1;
       // Header casing varies by call site - normalize to lowercase before lookup.
       var normalized = {};
       Object.keys(headers || {}).forEach(function (k) { normalized[k.toLowerCase()] = headers[k]; });
@@ -353,6 +375,7 @@
         state.captured.stc = stc;
         state.captured.ctx = ctx;
         state.captured.source = url;
+        try { sessionStorage.setItem(CAPTURE_STORAGE_KEY, JSON.stringify(state.captured)); } catch (e) {}
         notify();
       }
     }
@@ -399,7 +422,12 @@
       start: function () { patchFetch(); patchXHR(); },
       onCapture: function (cb) { state.listeners.push(cb); },
       get: function () { return state.captured; },
-      reset: function () { state.captured = { stc: null, ctx: null, source: null }; }
+      getSeenCount: function () { return state.seenCount || 0; },
+      reset: function () {
+        state.captured = { stc: null, ctx: null, source: null };
+        state.seenCount = 0;
+        try { sessionStorage.removeItem(CAPTURE_STORAGE_KEY); } catch (e) {}
+      }
     };
   })();
 
@@ -869,9 +897,39 @@
     var status = el('div', { class: 'lgt-log' }, ['Passive capture running. Log in normally, or use Auto-login below.']);
     var result = el('div', { class: 'lgt-result', style: 'display:none' });
 
-    Capture.onCapture(function (c) {
+    function renderCapturedStatus(c) {
       status.textContent = 'Captured! stc=' + c.stc + ' ctx=' + c.ctx;
-    });
+    }
+
+    // If this is a fresh script instance but a capture already happened
+    // (restored from sessionStorage after a same-origin navigation, or
+    // already sitting in window.__lgtCaptureState from an earlier
+    // re-injection on this same page) - reflect that immediately instead
+    // of showing the generic "still waiting" message until the next new
+    // capture event fires.
+    var already = Capture.get();
+    if (already.stc && already.ctx) {
+      renderCapturedStatus(already);
+    } else {
+      // No full capture yet - poll the seen-count of sb/fe-api calls that
+      // DID fire but were missing one of the two headers we need, so it's
+      // visible whether passive capture is seeing any relevant traffic at
+      // all instead of a static message giving zero signal either way.
+      var seenPoll = setInterval(function () {
+        if (Capture.get().stc) { clearInterval(seenPoll); return; }
+        var n = Capture.getSeenCount();
+        if (n > 0) {
+          status.textContent = 'Passive capture running - ' + n + ' sb/fe-api call(s) observed, none with both headers yet.';
+        }
+      }, 1000);
+      // Stop polling after 10 minutes regardless - avoids leaving a timer
+      // running forever against a detached panel if the user closes the
+      // panel or the bookmarklet gets re-clicked (a fresh instance takes
+      // over) without this one ever seeing a full capture.
+      setTimeout(function () { clearInterval(seenPoll); }, 10 * 60 * 1000);
+    }
+
+    Capture.onCapture(renderCapturedStatus);
 
     var autoBtn = el('button', {
       onclick: function () {
