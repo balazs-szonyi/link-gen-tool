@@ -96,9 +96,17 @@ running.
   experimental/best-effort. NordicBet's real login fields (`input[name=
   "email"]` / `input[name="password"]`) are plain light-DOM inputs (an
   earlier "shadow-DOM" diagnosis was wrong - the actual bug was just a
-  stale username selector, fixed 2026-08); with the corrected selector the
-  script reliably finds and fills both fields and clicks submit. However,
-  the submit step was observed to not reliably complete a real login in
+  stale username selector, fixed 2026-08). Filling in the fields re-queries
+  each field fresh (`waitForElement`/`fillField` in `link-gen-tool.js`)
+  right before typing into it, with a retry if the field detaches or the
+  typed value doesn't stick, instead of resolving username/password/submit
+  once up front and reusing those references across the whole (multi-
+  second) typing sequence - the earlier upfront-resolve approach could fail
+  silently if the site re-renders the password field after the username
+  field is interacted with. Each step (looking for a field / filled /
+  submitting / stopped-and-why) is logged in the panel so a failure is
+  diagnosable from the log text instead of just "it stopped." However, the
+  submit step was observed to not reliably complete a real login in
   testing - no login API call ever fired, and the form appeared to reset
   shortly after the click - most likely NordicBet's GroupIB fraud-detection
   (confirmed present via console logs) rejecting the non-human interaction,

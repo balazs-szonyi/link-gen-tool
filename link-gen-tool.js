@@ -37,7 +37,7 @@
   // bookmarklet on a page that already has a panel now always tears down
   // the old instance and rebuilds from the freshly-fetched script, instead
   // of just toggling stale, already-executed code back into view).
-  var VERSION = 'v6-2026-08-05';
+  var VERSION = 'v7-2026-08-05';
   console.log('[link-gen-tool] loaded ' + VERSION);
 
   if (window.__lgtPanelInstance) {
@@ -427,7 +427,12 @@
       el.focus();
       var i = 0;
       (function step() {
-        if (i >= text.length) { el.dispatchEvent(new Event('change', { bubbles: true })); resolve(); return; }
+        if (!el.isConnected) { resolve('detached'); return; }
+        if (i >= text.length) {
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          resolve(el.value === text ? 'ok' : 'value-mismatch');
+          return;
+        }
         var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
         nativeSetter.call(el, el.value + text[i]);
         el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -466,6 +471,44 @@
     return null;
   }
 
+  // Poll for an element rather than querying once - login forms on these
+  // brand sites are client-rendered (React/etc.) and can take a moment to
+  // appear/re-render after navigation or after an adjacent field changes.
+  // Always returns a FRESH, currently-connected element (never a stale
+  // reference captured before a re-render swapped the node out).
+  function waitForElement(selector, timeoutMs) {
+    return new Promise(function (resolve) {
+      var start = Date.now();
+      (function poll() {
+        var el = deepQuerySelector(selector);
+        if (el && el.isConnected) return resolve(el);
+        if (Date.now() - start > timeoutMs) return resolve(null);
+        setTimeout(poll, 150);
+      })();
+    });
+  }
+
+  // Type into `selector` fresh each time (not a reference resolved earlier),
+  // retrying once against a freshly re-queried element if the field
+  // detaches mid-type or the typed value doesn't stick (both observed
+  // symptoms of the form re-rendering the password field shortly after the
+  // username field is interacted with). Returns a short status string for
+  // logging, never throws.
+  function fillField(selector, text, findTimeoutMs, fieldLabel, log) {
+    function attempt(attemptsLeft) {
+      return waitForElement(selector, findTimeoutMs).then(function (el) {
+        if (!el) return fieldLabel + ' field not found';
+        return simulateTyping(el, text).then(function (result) {
+          if (result === 'ok') return 'ok';
+          log(fieldLabel + ' field ' + result + ' while typing' + (attemptsLeft > 0 ? ' - retrying...' : ' - giving up.'));
+          if (attemptsLeft > 0) return attempt(attemptsLeft - 1);
+          return fieldLabel + ' field ' + result;
+        });
+      });
+    }
+    return attempt(1);
+  }
+
   function attemptAutoLogin(brandKey, username, password, log) {
     var sel = LOGIN_SELECTORS[brandKey];
     if (!sel) {
@@ -477,22 +520,34 @@
       location.href = location.origin + sel.loginPath;
       return Promise.resolve(false); // page will reload; user re-opens panel / re-runs after nav
     }
-    var userEl = deepQuerySelector(sel.usernameSelector);
-    var passEl = deepQuerySelector(sel.passwordSelector);
-    var submitEl = deepQuerySelector(sel.submitSelector);
-    if (!userEl || !passEl || !submitEl) {
-      log('Login form fields not found (still rendering, or behind a closed shadow root/iframe this script cannot reach). ' +
-        'Log in manually instead - capture stays passive and automatic either way.');
-      return Promise.resolve(false);
-    }
-    log('Filling credentials (simulated typing)...');
-    return simulateTyping(userEl, username)
-      .then(function () { return simulateTyping(passEl, password); })
-      .then(function () {
-        log('Submitting...');
-        simulateClick(submitEl);
-        return true;
+    log('Looking for username field...');
+    return fillField(sel.usernameSelector, username, 6000, 'Username', log).then(function (userResult) {
+      if (userResult !== 'ok') {
+        log('Stopped: ' + userResult + '. Log in manually - capture stays passive and automatic either way.');
+        return false;
+      }
+      log('Username filled. Looking for password field...');
+      // Re-query for the password field from scratch here (not resolved
+      // together with username up front) - if the form re-renders/enables
+      // the password field only after the username interaction, this is
+      // what actually finds the live one instead of a stale/detached node.
+      return fillField(sel.passwordSelector, password, 4000, 'Password', log).then(function (passResult) {
+        if (passResult !== 'ok') {
+          log('Stopped: ' + passResult + '. Log in manually - capture stays passive and automatic either way.');
+          return false;
+        }
+        log('Password filled. Looking for submit button...');
+        return waitForElement(sel.submitSelector, 3000).then(function (submitEl) {
+          if (!submitEl) {
+            log('Stopped: submit button not found. Log in manually - both fields are filled, just click Log In.');
+            return false;
+          }
+          log('Submitting...');
+          simulateClick(submitEl);
+          return true;
+        });
       });
+    });
   }
 
   // ---------------------------------------------------------------------
