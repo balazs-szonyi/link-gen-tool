@@ -113,14 +113,23 @@
   };
 
   // Brand-specific login form + post-login sportsbook-nav selectors.
-  // Only brands actually reverse-engineered so far are listed; unmapped
+  // EXPERIMENTAL / best-effort: unlike the passive capture mechanism (which
+  // needs no selectors at all and is fully validated), these CSS selectors
+  // are unverified guesses for brands whose login form lives behind a
+  // shadow-DOM-based web-component stack (confirmed on NordicBet, whose
+  // real login form was NOT reachable even via a shadow-root-piercing
+  // querySelector in testing on 2026-08 - it may only render after further
+  // client-side hydration, or behind a closed shadow root, which is
+  // fundamentally unreachable from page-injected JS). Auto-login may
+  // silently fail to find fields on such brands; when it does, log in
+  // manually - the passive capture keeps working regardless. Unmapped
   // brands still get passive header capture, just no auto-fill/auto-submit.
   var LOGIN_SELECTORS = {
     nordicbet: {
       loginPath: '/en/login',
       usernameSelector: 'input[name="username"], input[type="email"]',
       passwordSelector: 'input[name="password"], input[type="password"]',
-      submitSelector: 'button[type="submit"]',
+      submitSelector: '[data-test-id="account-login-btn-1-button"], button[type="submit"]',
       sportsbookNavText: /sportsbook/i
     },
     mobilbahis: {
@@ -400,6 +409,26 @@
     });
   }
 
+  // Many brand sites (e.g. NordicBet) build their login form out of web
+  // components with open shadow roots - a plain document.querySelector
+  // can't see inside those. Recurse into any open shadowRoot as a fallback.
+  // (Closed shadow roots remain unreachable from page-injected JS by design;
+  // if a brand uses those, auto-login genuinely cannot find the fields and
+  // passive capture - which doesn't need to find anything - is the fallback.)
+  function deepQuerySelector(selector, root) {
+    root = root || document;
+    var found = root.querySelector(selector);
+    if (found) return found;
+    var all = root.querySelectorAll('*');
+    for (var i = 0; i < all.length; i++) {
+      if (all[i].shadowRoot) {
+        found = deepQuerySelector(selector, all[i].shadowRoot);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
   function attemptAutoLogin(brandKey, username, password, log) {
     var sel = LOGIN_SELECTORS[brandKey];
     if (!sel) {
@@ -411,11 +440,12 @@
       location.href = location.origin + sel.loginPath;
       return Promise.resolve(false); // page will reload; user re-opens panel / re-runs after nav
     }
-    var userEl = document.querySelector(sel.usernameSelector);
-    var passEl = document.querySelector(sel.passwordSelector);
-    var submitEl = document.querySelector(sel.submitSelector);
+    var userEl = deepQuerySelector(sel.usernameSelector);
+    var passEl = deepQuerySelector(sel.passwordSelector);
+    var submitEl = deepQuerySelector(sel.submitSelector);
     if (!userEl || !passEl || !submitEl) {
-      log('Login form fields not found on page yet (still rendering?). Try again in a moment.');
+      log('Login form fields not found (still rendering, or behind a closed shadow root/iframe this script cannot reach). ' +
+        'Log in manually instead - capture stays passive and automatic either way.');
       return Promise.resolve(false);
     }
     log('Filling credentials (simulated typing)...');

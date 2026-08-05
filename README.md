@@ -14,11 +14,16 @@ brand page you're already logged into — no CLI, no headless automation.
   directly (those endpoints have open CORS).
 - **Live Login** tab: passively sniffs `sb/fe-api/*` requests for
   `x-sb-static-context-id` / `x-sb-user-context-id` headers while you browse
-  a brand site normally, already logged in via your own real session. Also
-  offers an "Auto-login" button (simulated typing, not headless automation)
-  for brands with a known selector map entry — currently NordicBet and
-  Mobilbahis. Unmapped brands still get passive capture; just log in
-  manually and the panel picks up the headers automatically.
+  a brand site normally, already logged in via your own real session. This
+  passive capture needs no per-brand code and is fully verified end-to-end
+  (2026-08, NordicBet/test). Also offers an **experimental** "Auto-login"
+  button (simulated typing, not headless automation) for brands with a
+  `LOGIN_SELECTORS` entry — this part is unverified/best-effort, since some
+  brands (confirmed: NordicBet) build their login form with shadow-DOM web
+  components that a plain (or even shadow-piercing) `querySelector` may not
+  reach. When auto-login can't find the fields, just log in manually — the
+  passive capture keeps working regardless. Unmapped brands get passive
+  capture only, no auto-fill attempt.
 - **Credentials** tab: manage one or more shared test user/pass pairs,
   stored in a cross-origin vault (`vault.html`, hosted on this same GitHub
   Pages origin) so the same credential works regardless of which brand's
@@ -54,10 +59,13 @@ pattern used by ad-tech ID-sync iframes.
 
 ## Known limitations
 
-- Auto-login selectors are only defined for brands that have been manually
-  reverse-engineered so far (see `LOGIN_SELECTORS` in `link-gen-tool.js`).
-  Adding a new brand means inspecting its login form once (e.g. via
-  chrome-devtools MCP) and adding an entry.
+- Auto-login selectors (`LOGIN_SELECTORS` in `link-gen-tool.js`) are
+  experimental/best-effort, not verified working. Confirmed issue: NordicBet
+  builds its login form with shadow-DOM web components that weren't
+  reachable even via a shadow-piercing `querySelector` in testing (2026-08).
+  The **passive capture** mechanism (no selectors needed) is what's actually
+  validated and reliable — auto-login is a bonus that may or may not work
+  per brand; log in manually when it doesn't.
 - Behavioral bot-detection (keystroke/mouse timing) on the submit action is
   reduced but not eliminated by the simulated-typing approach — this differs
   from the network/browser-fingerprint-level blocks that stop headless
