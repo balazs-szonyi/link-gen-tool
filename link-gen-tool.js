@@ -148,7 +148,7 @@
       iframe = document.createElement('iframe');
       iframe.style.display = 'none';
       iframe.src = VAULT_URL;
-      document.documentElement.appendChild(iframe);
+      (document.body || document.documentElement).appendChild(iframe);
 
       window.addEventListener('message', function (ev) {
         if (!ev.data || ev.data.type !== 'lgt-vault-data') return;
@@ -481,7 +481,7 @@
     panel.appendChild(bodyA);
     panel.appendChild(bodyB);
     panel.appendChild(bodyC);
-    document.documentElement.appendChild(panel);
+    (document.body || document.documentElement).appendChild(panel);
     return panel;
   }
 
