@@ -1,7 +1,7 @@
 // Link Gen Tool — tiny local static server
-// Serves link-gen-tool.js and vault.html on http://localhost:PORT so the
-// bookmarklet can load them instantly during local development (mirrors the
-// timeline-qa-tool local-dev pattern).
+// Serves link-gen-tool.js (and any other file in this folder) on
+// http://localhost:PORT so the bookmarklet can load it instantly during
+// local development (mirrors the timeline-qa-tool local-dev pattern).
 const http = require('http');
 const fs = require('fs');
 const path = require('path');

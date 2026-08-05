@@ -14,9 +14,19 @@
  *      attempt an automated in-page login (simulated typing, not headless)
  *      for brands with a known selector map entry.
  *
- * Shared test credentials live in a cross-origin vault (vault.html, hosted
- * on this same GitHub Pages origin) so one username/password pair works
- * across every brand domain. See vault.html for the storage protocol.
+ * Credentials are stored in the CURRENT page's own localStorage (first-
+ * party, so it always works regardless of third-party storage/cookie
+ * policies). An earlier version tried to share one vault across every
+ * brand domain via a cross-origin iframe (vault.html) + postMessage +
+ * localStorage - that broke under Chrome's third-party storage
+ * partitioning (and stricter still under managed/corporate Chrome
+ * profiles that block third-party storage outright), so a credential
+ * saved on one brand domain silently failed to appear on another. Fixed
+ * by dropping the iframe entirely and adding an explicit Export/Import
+ * code in the Credentials tab: copy a code on brand A, paste it on
+ * brand B, and its credential list merges in. Manual, but 100% reliable
+ * regardless of browser storage policy - matches the same copy/paste
+ * workflow already used for stc/ctx context transplanting.
  */
 (function () {
   'use strict';
@@ -29,17 +39,6 @@
   // ---------------------------------------------------------------------
   // Config / data (kept in sync with BRANDS.md / BRAND_DOMAINS.md)
   // ---------------------------------------------------------------------
-
-  var TOOL_ORIGIN = (function () {
-    var s = document.currentScript;
-    try {
-      if (s && s.src) return new URL(s.src).origin;
-    } catch (e) {}
-    return 'https://balazs-szonyi.github.io'; // fallback if injected without currentScript (e.g. eval)
-  })();
-  var VAULT_URL = TOOL_ORIGIN.indexOf('github.io') !== -1
-    ? 'https://balazs-szonyi.github.io/link-gen-tool/vault.html'
-    : TOOL_ORIGIN + '/vault.html';
 
   var BRANDS = {
     arcticbet: 'fb047cd8-72db-49b8-912a-d413e7ff5111',
@@ -144,62 +143,77 @@
   var ENV_LABELS = ['test', 'qa', 'alpha', 'prod'];
 
   // ---------------------------------------------------------------------
-  // Vault client (cross-origin credential store via hidden iframe)
+  // Vault client - first-party localStorage on the CURRENT page's own
+  // origin. A cross-brand-shared credential requires manual Export/Import
+  // (see Credentials tab) since cross-origin storage sharing does not
+  // survive Chrome's third-party storage partitioning (or stricter
+  // corporate policies that block third-party storage outright).
   // ---------------------------------------------------------------------
 
+  var VAULT_KEY = 'lgt-credentials-v1';
+
   var Vault = (function () {
-    var iframe = null;
-    var ready = false;
-    var pendingCallbacks = [];
-    var lastData = [];
+    function uid() { return 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
 
-    function init() {
-      iframe = document.createElement('iframe');
-      iframe.style.display = 'none';
-      iframe.src = VAULT_URL;
-      (document.body || document.documentElement).appendChild(iframe);
-
-      window.addEventListener('message', function (ev) {
-        if (!ev.data || ev.data.type !== 'lgt-vault-data') return;
-        lastData = ev.data.credentials || [];
-        var cbs = pendingCallbacks;
-        pendingCallbacks = [];
-        cbs.forEach(function (cb) { cb(lastData); });
-      });
-
-      iframe.addEventListener('load', function () {
-        ready = true;
-        send({ type: 'lgt-vault-get' });
-      });
-    }
-
-    function send(msg, cb) {
-      if (cb) pendingCallbacks.push(cb);
-      if (!ready) {
-        // queue: iframe load handler will fire the initial get; retry shortly
-        setTimeout(function () { if (ready) postNow(msg); else send(msg, null); }, 150);
-        return;
-      }
-      postNow(msg);
-    }
-
-    function postNow(msg) {
+    function readAll() {
       try {
-        var targetOrigin = new URL(VAULT_URL).origin;
-        iframe.contentWindow.postMessage(msg, targetOrigin);
-      } catch (e) {}
+        var raw = localStorage.getItem(VAULT_KEY);
+        return raw ? JSON.parse(raw) : [];
+      } catch (e) { return []; }
+    }
+
+    function writeAll(list) {
+      try { localStorage.setItem(VAULT_KEY, JSON.stringify(list)); } catch (e) {}
     }
 
     return {
-      init: init,
-      getAll: function (cb) { send({ type: 'lgt-vault-get' }, cb); },
+      init: function () {}, // no-op, kept for API stability
+      getAll: function (cb) { var list = readAll(); if (cb) cb(list); return list; },
       save: function (label, username, password, cb) {
-        send({ type: 'lgt-vault-save', credential: { label: label, username: username, password: password } }, cb);
+        var list = readAll();
+        list.push({ id: uid(), label: label, username: username, password: password, isDefault: list.length === 0 });
+        writeAll(list);
+        if (cb) cb(list);
       },
-      setDefault: function (id, cb) { send({ type: 'lgt-vault-set-default', id: id }, cb); },
-      remove: function (id, cb) { send({ type: 'lgt-vault-delete', id: id }, cb); },
-      getDefault: function () { return lastData.find(function (c) { return c.isDefault; }) || lastData[0] || null; },
-      getCached: function () { return lastData; }
+      setDefault: function (id, cb) {
+        var list = readAll();
+        list.forEach(function (c) { c.isDefault = (c.id === id); });
+        writeAll(list);
+        if (cb) cb(list);
+      },
+      remove: function (id, cb) {
+        var list = readAll().filter(function (c) { return c.id !== id; });
+        if (list.length && !list.some(function (c) { return c.isDefault; })) list[0].isDefault = true;
+        writeAll(list);
+        if (cb) cb(list);
+      },
+      getDefault: function () { var list = readAll(); return list.find(function (c) { return c.isDefault; }) || list[0] || null; },
+      getCached: function () { return readAll(); },
+      // Cross-brand sync: base64-encoded JSON snapshot the user copies from
+      // one brand domain's Credentials tab and pastes into another's.
+      exportCode: function () {
+        try { return btoa(unescape(encodeURIComponent(JSON.stringify(readAll())))); }
+        catch (e) { return ''; }
+      },
+      importCode: function (code, cb) {
+        var list = readAll();
+        try {
+          var incoming = JSON.parse(decodeURIComponent(escape(atob(String(code || '').trim()))));
+          if (!Array.isArray(incoming)) throw new Error('bad format');
+          var seen = list.map(function (c) { return c.username + '|' + c.password; });
+          incoming.forEach(function (c) {
+            var key = c.username + '|' + c.password;
+            if (seen.indexOf(key) === -1 && c.username && c.password) {
+              list.push({ id: uid(), label: c.label || c.username, username: c.username, password: c.password, isDefault: list.length === 0 });
+              seen.push(key);
+            }
+          });
+          writeAll(list);
+          if (cb) cb(list, true);
+        } catch (e) {
+          if (cb) cb(list, false);
+        }
+      }
     };
   })();
 
@@ -687,13 +701,58 @@
       }
     }, ['Save credential']);
 
-    wrap.appendChild(el('label', {}, ['Add credential (shared across all brands)']));
+    wrap.appendChild(el('label', {}, ['Add credential (stored on this brand domain)']));
     wrap.appendChild(labelIn);
     wrap.appendChild(userIn);
     wrap.appendChild(passIn);
     wrap.appendChild(addBtn);
     wrap.appendChild(el('label', {}, ['Saved credentials']));
     wrap.appendChild(list);
+
+    // Cross-brand sync: credentials live in THIS page's own localStorage
+    // (first-party, always works). To reuse them on another brand domain,
+    // copy the code here and paste it into that domain's Credentials tab.
+    var syncStatus = el('div', { class: 'lgt-log' }, []);
+    var codeOut = el('input', { type: 'text', readonly: 'readonly', placeholder: 'Click "Copy sync code" to fill this' });
+    var codeIn = el('input', { type: 'text', placeholder: 'Paste sync code from another brand tab here' });
+
+    var exportBtn = el('button', {
+      class: 'secondary',
+      onclick: function () {
+        var code = Vault.exportCode();
+        codeOut.value = code;
+        codeOut.focus();
+        codeOut.select();
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(code).then(function () {
+            syncStatus.textContent = 'Copied to clipboard - paste it in the Credentials tab on the other brand.';
+          }, function () {
+            syncStatus.textContent = 'Code selected above - copy it manually (Ctrl+C).';
+          });
+        } else {
+          syncStatus.textContent = 'Code selected above - copy it manually (Ctrl+C).';
+        }
+      }
+    }, ['Copy sync code (to use on another brand)']);
+
+    var importBtn = el('button', {
+      class: 'secondary',
+      onclick: function () {
+        if (!codeIn.value.trim()) return;
+        Vault.importCode(codeIn.value, function (creds, ok) {
+          syncStatus.textContent = ok ? 'Imported. Credentials merged in below.' : 'Invalid sync code - check it was copied fully.';
+          render(creds);
+          codeIn.value = '';
+        });
+      }
+    }, ['Import sync code']);
+
+    wrap.appendChild(el('label', {}, ['Sync across brand domains (manual - storage is per-domain)']));
+    wrap.appendChild(exportBtn);
+    wrap.appendChild(codeOut);
+    wrap.appendChild(codeIn);
+    wrap.appendChild(importBtn);
+    wrap.appendChild(syncStatus);
     return wrap;
   }
 
