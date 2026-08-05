@@ -515,9 +515,14 @@
     bodyB.style.display = 'none';
     bodyC.style.display = 'none';
 
-    [[tabA, bodyA], [tabB, bodyB], [tabC, bodyC]].forEach(function (pair) {
+    // Single shared array so the `p === pair` identity check in the click
+    // handler below actually matches - two separately-created array literals
+    // with the same elements are never === equal, which previously made the
+    // match always false and hid every tab body (including the clicked one).
+    var pairs = [[tabA, bodyA], [tabB, bodyB], [tabC, bodyC]];
+    pairs.forEach(function (pair) {
       pair[0].addEventListener('click', function () {
-        [[tabA, bodyA], [tabB, bodyB], [tabC, bodyC]].forEach(function (p) {
+        pairs.forEach(function (p) {
           p[0].classList.toggle('active', p === pair);
           p[1].style.display = p === pair ? '' : 'none';
         });
