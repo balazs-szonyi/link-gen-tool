@@ -263,9 +263,19 @@
 
   // Splice a captured (stc, ctx) pair into a freshly generated logged-out
   // base link for the same brand/env/device (used by Mode B).
+  //
+  // The base link path is always /{segment1}/{segment2}/ where segment1 is
+  // the static context id (always "stc[-]-<num>") and segment2 is the
+  // user/customer context id - but segment2's OWN prefix varies: anonymous
+  // links reuse "stc-<num>" for segment2 too (e.g. .../stc--123/stc--123/),
+  // while real logged-in captures look like ".../stc--123/ctx-<hex>/". So we
+  // replace by POSITION (first two path segments after the host), not by
+  // assuming a "ctx-" prefix is present in the base link.
   function spliceContext(baseLink, stc, ctx) {
     if (!baseLink) return null;
-    return baseLink.replace(/stc--?\d+/, stc).replace(/ctx-[0-9a-f]+/i, ctx);
+    var m = baseLink.match(/^(https:\/\/[^/]+\/)([^/]+)\/([^/?]+)(\/.*)$/);
+    if (!m) return null;
+    return m[1] + stc + '/' + ctx + m[4];
   }
 
   // ---------------------------------------------------------------------
@@ -281,8 +291,11 @@
 
     function considerHeaders(headers, url) {
       if (!/sb\/fe-api\//.test(url || '')) return;
-      var stc = headers['x-sb-static-context-id'] || headers['X-Sb-Static-Context-Id'];
-      var ctx = headers['x-sb-user-context-id'] || headers['X-Sb-User-Context-Id'];
+      // Header casing varies by call site - normalize to lowercase before lookup.
+      var normalized = {};
+      Object.keys(headers || {}).forEach(function (k) { normalized[k.toLowerCase()] = headers[k]; });
+      var stc = normalized['x-sb-static-context-id'];
+      var ctx = normalized['x-sb-user-context-id'];
       if (stc && ctx) {
         captured.stc = stc;
         captured.ctx = ctx;
@@ -347,6 +360,11 @@
     var strippedHost = labels.filter(function (l) { return l !== 'www' && ENV_LABELS.indexOf(l) === -1; }).join('.');
 
     var brand = null;
+    // Note: betssonarcb / btsarba / btsarbacity all resolve to the same
+    // real domain (betsson.bet.ar) - they differ by Argentina province, not
+    // hostname, so auto-detection can't disambiguate them. Whichever key is
+    // iterated last below wins; use the Generate tab's brand selector to
+    // override manually for Argentina brands.
     Object.keys(BRAND_DOMAINS).forEach(function (key) {
       if (strippedHost === BRAND_DOMAINS[key] || strippedHost.indexOf(BRAND_DOMAINS[key]) !== -1) {
         brand = key;

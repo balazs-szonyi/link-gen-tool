@@ -66,3 +66,10 @@ pattern used by ad-tech ID-sync iframes.
   (`BRAND_DOMAINS`) — brands without a known public domain (firestorm,
   firestormsg, sandbox) aren't auto-detectable this way; use the Generate tab
   directly for those.
+- `betssonarcb` / `btsarba` / `btsarbacity` share the same real domain
+  (`betsson.bet.ar`, differing only by Argentina province), so hostname
+  auto-detection can't tell them apart. Override the brand manually in that
+  case.
+- The credential vault (`vault.html`) accepts `postMessage` from any origin
+  — acceptable for a shared, non-production QA test credential, but do not
+  repurpose it to store real/production credentials.
