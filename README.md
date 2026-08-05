@@ -92,6 +92,24 @@ running.
 
 ## Known limitations
 
+- Clicking "Auto-login" when the current page isn't the brand's login path
+  navigates there (`location.href = ...`), which tears down this whole
+  script instance - including the panel - since a bookmarklet can't survive
+  a hard page load. Before navigating, a short-lived breadcrumb is left in
+  `sessionStorage` (`__lgtAutoLoginResume`); when the panel is re-injected
+  on the login page (re-click the bookmarklet), it checks for that
+  breadcrumb and - if found, fresh (<30s old), and the current path matches
+  - automatically switches to the Live Login tab and resumes the fill/
+  submit flow, instead of silently doing nothing until manually retriggered.
+  You still have to re-click the bookmarklet once after the redirect (a
+  bookmarklet has no way to run without being clicked), but you no longer
+  have to reopen the Live Login tab and click Auto-login a second time by
+  hand.
+- Username/password fields are cleared before typing into them
+  (`simulateTyping` in `link-gen-tool.js`), not just appended to - browser
+  or site autofill can pre-populate a field (e.g. a remembered username)
+  before the script gets to it, and typing on top of that without clearing
+  first silently corrupts the value instead of replacing it.
 - Auto-login selectors (`LOGIN_SELECTORS` in `link-gen-tool.js`) are
   experimental/best-effort. NordicBet's real login fields (`input[name=
   "email"]` / `input[name="password"]`) are plain light-DOM inputs (an

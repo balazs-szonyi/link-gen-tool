@@ -37,7 +37,7 @@
   // bookmarklet on a page that already has a panel now always tears down
   // the old instance and rebuilds from the freshly-fetched script, instead
   // of just toggling stale, already-executed code back into view).
-  var VERSION = 'v7-2026-08-05';
+  var VERSION = 'v8-2026-08-05';
   console.log('[link-gen-tool] loaded ' + VERSION);
 
   if (window.__lgtPanelInstance) {
@@ -424,7 +424,17 @@
   // not eliminate) behavioral-biometrics detection risk on the submit step.
   function simulateTyping(el, text) {
     return new Promise(function (resolve) {
+      var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
       el.focus();
+      // Browser/site autofill can pre-populate this field before we get to
+      // it (e.g. a remembered username). Clear it first instead of
+      // appending our text onto whatever's already there, which would
+      // otherwise silently corrupt the value (and make the post-typing
+      // value === text check below always fail).
+      if (el.value) {
+        nativeSetter.call(el, '');
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      }
       var i = 0;
       (function step() {
         if (!el.isConnected) { resolve('detached'); return; }
@@ -433,7 +443,6 @@
           resolve(el.value === text ? 'ok' : 'value-mismatch');
           return;
         }
-        var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
         nativeSetter.call(el, el.value + text[i]);
         el.dispatchEvent(new Event('input', { bubbles: true }));
         i++;
@@ -509,6 +518,8 @@
     return attempt(1);
   }
 
+  var RESUME_KEY = '__lgtAutoLoginResume';
+
   function attemptAutoLogin(brandKey, username, password, log) {
     var sel = LOGIN_SELECTORS[brandKey];
     if (!sel) {
@@ -517,8 +528,17 @@
     }
     if (location.pathname.indexOf(sel.loginPath) === -1) {
       log('Navigating to login page: ' + sel.loginPath);
+      // The navigation below tears down this whole script instance (panel
+      // included) - a bookmarklet has no way to keep running across a hard
+      // page load. Leave a short-lived breadcrumb so that when the panel
+      // is re-injected on the login page, it can resume automatically
+      // instead of silently doing nothing until the user manually reopens
+      // the Live Login tab and clicks Auto-login a second time.
+      try {
+        sessionStorage.setItem(RESUME_KEY, JSON.stringify({ brand: brandKey, ts: Date.now() }));
+      } catch (e) {}
       location.href = location.origin + sel.loginPath;
-      return Promise.resolve(false); // page will reload; user re-opens panel / re-runs after nav
+      return Promise.resolve(false); // page will reload; resumes automatically on next injection
     }
     log('Looking for username field...');
     return fillField(sel.usernameSelector, username, 6000, 'Username', log).then(function (userResult) {
@@ -629,6 +649,9 @@
     panel.appendChild(bodyB);
     panel.appendChild(bodyC);
     (document.body || document.documentElement).appendChild(panel);
+    // Exposed for bootstrap's auto-login-resume-after-navigation handling.
+    panel.__lgtSwitchToLiveLogin = function () { tabB.click(); };
+    panel.__lgtAutoLoginBtn = bodyB.__lgtAutoLoginBtn;
     return panel;
   }
 
@@ -722,6 +745,10 @@
         attemptAutoLogin(detected.brand, cred.username, cred.password, function (m) { status.textContent = m; });
       }
     }, ['Auto-login with default credential']);
+    // Exposed so bootstrap can resume the flow automatically after the
+    // login-page navigation below, without the user having to switch to
+    // this tab and click the button again by hand.
+    wrap.__lgtAutoLoginBtn = autoBtn;
 
     var buildBtn = el('button', {
       class: 'secondary',
@@ -843,6 +870,25 @@
   Vault.init();
   Capture.start();
   var panelEl = buildPanel();
+
+  // Resume an auto-login that was interrupted by the navigation to the
+  // brand's login page (see attemptAutoLogin) - runs once per breadcrumb,
+  // and only if we're actually on that brand's known login path now.
+  (function resumeAutoLoginIfPending() {
+    var raw;
+    try { raw = sessionStorage.getItem(RESUME_KEY); } catch (e) { return; }
+    if (!raw) return;
+    try { sessionStorage.removeItem(RESUME_KEY); } catch (e) {}
+    var pending;
+    try { pending = JSON.parse(raw); } catch (e) { return; }
+    if (!pending || !pending.brand || Date.now() - pending.ts > 30000) return; // stale breadcrumb, ignore
+    var sel = LOGIN_SELECTORS[pending.brand];
+    if (!sel || location.pathname.indexOf(sel.loginPath) === -1) return; // navigation didn't land where expected
+    var cred = Vault.getDefault();
+    if (!cred) return; // nothing to resume with (shouldn't normally happen - it was there before navigating)
+    panelEl.__lgtSwitchToLiveLogin();
+    if (panelEl.__lgtAutoLoginBtn) panelEl.__lgtAutoLoginBtn.click();
+  })();
 
   window.__lgtPanelInstance = {
     toggle: function () { panelEl.style.display = panelEl.style.display === 'none' ? '' : 'none'; },
