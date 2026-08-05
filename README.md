@@ -70,12 +70,21 @@ but it can't be silently broken by a storage policy.
 ## Known limitations
 
 - Auto-login selectors (`LOGIN_SELECTORS` in `link-gen-tool.js`) are
-  experimental/best-effort, not verified working. Confirmed issue: NordicBet
-  builds its login form with shadow-DOM web components that weren't
-  reachable even via a shadow-piercing `querySelector` in testing (2026-08).
-  The **passive capture** mechanism (no selectors needed) is what's actually
-  validated and reliable — auto-login is a bonus that may or may not work
-  per brand; log in manually when it doesn't.
+  experimental/best-effort. NordicBet's real login fields (`input[name=
+  "email"]` / `input[name="password"]`) are plain light-DOM inputs (an
+  earlier "shadow-DOM" diagnosis was wrong - the actual bug was just a
+  stale username selector, fixed 2026-08); with the corrected selector the
+  script reliably finds and fills both fields and clicks submit. However,
+  the submit step was observed to not reliably complete a real login in
+  testing - no login API call ever fired, and the form appeared to reset
+  shortly after the click - most likely NordicBet's GroupIB fraud-detection
+  (confirmed present via console logs) rejecting the non-human interaction,
+  though a flaky same-page real-time connection in the test environment
+  ("SST Connection Failed" in analytics) may also be a factor. The
+  **passive capture** mechanism (no selectors, no submit needed) is what's
+  actually validated and reliable — auto-login/auto-fill is a bonus that
+  may save typing but log in manually (real click) to actually complete
+  the login; passive capture keeps working regardless of who clicked.
 - Behavioral bot-detection (keystroke/mouse timing) on the submit action is
   reduced but not eliminated by the simulated-typing approach — this differs
   from the network/browser-fingerprint-level blocks that stop headless

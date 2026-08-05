@@ -114,15 +114,18 @@
   // Brand-specific login form + post-login sportsbook-nav selectors.
   // EXPERIMENTAL / best-effort: unlike the passive capture mechanism (which
   // needs no selectors at all and is fully validated), these CSS selectors
-  // are unverified guesses for brands whose login form lives behind a
-  // shadow-DOM-based web-component stack (confirmed on NordicBet, whose
-  // real login form was NOT reachable even via a shadow-root-piercing
-  // querySelector in testing on 2026-08 - it may only render after further
-  // client-side hydration, or behind a closed shadow root, which is
-  // fundamentally unreachable from page-injected JS). Auto-login may
-  // silently fail to find fields on such brands; when it does, log in
-  // manually - the passive capture keeps working regardless. Unmapped
-  // brands still get passive header capture, just no auto-fill/auto-submit.
+  // can go stale as brand sites change their markup (NordicBet's real
+  // username field is a plain light-DOM `input[name="email"]`, not
+  // `input[name="username"]`/`input[type="email"]` as an earlier version
+  // assumed - fixed 2026-08 via live DOM inspection). Even with correct
+  // selectors, the final submit click may not complete a real login -
+  // NordicBet's GroupIB fraud-detection (or a flaky same-page real-time
+  // connection) appears to reject/reset the synthetic submission in
+  // testing, with no login API call ever firing. Auto-login may still save
+  // typing time, but log in manually (a real click) to actually complete
+  // the login - the passive capture below keeps working regardless of who
+  // clicked. Unmapped brands still get passive header capture, just no
+  // auto-fill/auto-submit.
   var LOGIN_SELECTORS = {
     nordicbet: {
       loginPath: '/en/login',
