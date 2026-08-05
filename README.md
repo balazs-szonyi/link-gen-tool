@@ -49,6 +49,36 @@ brand page you're already logged into — no CLI, no headless automation.
    testing a stale build, check the version shown against the latest
    commit before assuming a fix didn't work.
 
+## Install (Chrome extension — recommended if passive capture keeps failing)
+
+A real Chrome extension (`extension/` in this repo) exists alongside the
+bookmarklet as a separate, more robust option. It captures `stc`/`ctx`
+headers via `chrome.webRequest` — a network-layer observation, immune to
+the fetch-reference timing race described below that can make the
+bookmarklet's in-page patch structurally blind to the relevant traffic on
+some sites. It also eliminates the navigation-lifecycle complexity the
+bookmarklet needs (`window.open`/re-injection/sessionStorage breadcrumbs) —
+a `content_scripts` entry auto-injects on every page load and navigation,
+and captured state lives in `chrome.storage.local` (survives navigation and
+service-worker restarts with zero extra plumbing). The Credentials vault is
+also `chrome.storage.local`-backed, so it's automatically shared across
+every brand domain — no manual sync-code step needed.
+
+1. Download the latest ZIP from this repo's
+   [Releases page](https://github.com/balazs-szonyi/link-gen-tool/releases/tag/extension-latest)
+   (`link-gen-tool-extension.zip`, auto-rebuilt on every push to `main`).
+2. Extract it anywhere.
+3. Open `chrome://extensions` in Chrome, enable **Developer mode** (top
+   right), click **Load unpacked**, and select the extracted folder.
+4. Click the extension's toolbar icon on any page to toggle the panel —
+   same three tabs (Generate / Live Login / Credentials) as the
+   bookmarklet, same UI.
+
+Chrome-only; not published to the Chrome Web Store (internal tool, ZIP/
+unpacked distribution only). The bookmarklet is unaffected and continues
+to work exactly as before — this is an additional option, not a
+replacement.
+
 ## Local development
 
 ```
@@ -90,7 +120,12 @@ and rebuilds fresh from whatever code was just fetched; the visible
 version number is the easiest way to confirm which build is actually
 running.
 
-## Known limitations
+## Known limitations (bookmarklet)
+
+> These limitations are specific to the bookmarklet's page-injected-script
+> architecture. The [Chrome extension](#install-chrome-extension--recommended-if-passive-capture-keeps-failing)
+> avoids most of them structurally — see below for what still applies to
+> the extension.
 
 - Clicking "Auto-login" when the current page isn't the brand's login path
   no longer navigates the current tab away. Instead it opens the login page
@@ -246,3 +281,22 @@ running.
   automatically across brands — use the "Copy sync code" / "Import sync
   code" buttons in the Credentials tab to move a credential to another
   brand's domain manually.
+
+## Known limitations (Chrome extension)
+
+The extension structurally avoids the capture-timing-race and navigation-
+lifecycle issues above (`chrome.webRequest` + `chrome.storage.local`), and
+its Credentials vault is shared across all brand domains automatically (no
+sync-code step). What still applies, since the DOM-automation code itself
+is largely unchanged:
+
+- Auto-login selectors (`LOGIN_SELECTORS` in `extension/content.js`) are
+  still experimental/best-effort and brand-markup-dependent, same as the
+  bookmarklet — see the bookmarklet notes above for the NordicBet/
+  GroupIB submit-detection details, which apply identically here.
+- Brand/environment auto-detection (`BRAND_DOMAINS`) and the Argentina-
+  brand hostname ambiguity (`betssonarcb`/`btsarba`/`btsarbacity`) are the
+  same as the bookmarklet's.
+- Chrome only; not published to the Chrome Web Store — unpacked/ZIP
+  install only (see "Install (Chrome extension)" above).
+
