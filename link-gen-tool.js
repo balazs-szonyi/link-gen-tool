@@ -37,7 +37,7 @@
   // bookmarklet on a page that already has a panel now always tears down
   // the old instance and rebuilds from the freshly-fetched script, instead
   // of just toggling stale, already-executed code back into view).
-  var VERSION = 'v10-2026-08-05';
+  var VERSION = 'v11-2026-08-05';
   console.log('[link-gen-tool] loaded ' + VERSION);
 
   // document.currentScript is only reliable synchronously during this
@@ -557,6 +557,25 @@
     return attempt(1);
   }
 
+  // Polls whether we're still on the login page after a submit click, up
+  // to timeoutMs. Resolves 'navigated' as soon as the pathname no longer
+  // contains loginPath, or 'stuck' once the timeout elapses while still
+  // there - the generic, brand-agnostic signal that the click likely
+  // didn't take effect (no page-specific "did the login API get called"
+  // check is attempted, since that would need per-brand knowledge this
+  // tool otherwise avoids relying on).
+  function watchForSubmitOutcome(loginPath, timeoutMs) {
+    return new Promise(function (resolve) {
+      var start = Date.now();
+      var iv = setInterval(function () {
+        var stillOnLogin = true;
+        try { stillOnLogin = location.pathname.indexOf(loginPath) !== -1; } catch (e) {}
+        if (!stillOnLogin) { clearInterval(iv); resolve('navigated'); return; }
+        if (Date.now() - start > timeoutMs) { clearInterval(iv); resolve('stuck'); }
+      }, 300);
+    });
+  }
+
   var RESUME_KEY = '__lgtAutoLoginResume';
 
   // Polls a same-origin window handle (opened via window.open below) until
@@ -666,7 +685,22 @@
           }
           log('Submitting...');
           simulateClick(submitEl);
-          return true;
+          // Some brand sites (e.g. NordicBet's GroupIB fraud-detection,
+          // per LOGIN_SELECTORS comment above) silently reject/reset a
+          // synthetic submit click - no error, no navigation, the login
+          // form just sits there. Without this, the panel would say
+          // "Submitting..." forever with zero feedback on whether it's
+          // still working or has actually stalled. Poll for a few seconds
+          // and, if we're still on the login path, say so plainly instead
+          // of leaving the user guessing.
+          return watchForSubmitOutcome(sel.loginPath, 4000).then(function (outcome) {
+            if (outcome === 'stuck') {
+              log('Both fields are filled, but still on the login page a few seconds after submitting - this site may be rejecting the synthetic click (known limitation on some brands). Click "Log In" yourself to finish.');
+            } else {
+              log('Submitted - navigated away from the login page.');
+            }
+            return true;
+          });
         });
       });
     });

@@ -154,6 +154,13 @@ running.
   actually validated and reliable — auto-login/auto-fill is a bonus that
   may save typing but log in manually (real click) to actually complete
   the login; passive capture keeps working regardless of who clicked.
+  **Since 2026-08 (v11)**: after clicking submit, the panel now waits a
+  few seconds and checks whether we've actually navigated away from the
+  login path - if we're still there (matching the stuck-submit pattern
+  above), it says so explicitly ("Both fields are filled, but still on the
+  login page... click Log In yourself to finish") instead of leaving the
+  status stuck on "Submitting..." forever with no way to tell whether it's
+  still working or has silently stalled.
 - Behavioral bot-detection (keystroke/mouse timing) on the submit action is
   reduced but not eliminated by the simulated-typing approach — this differs
   from the network/browser-fingerprint-level blocks that stop headless
