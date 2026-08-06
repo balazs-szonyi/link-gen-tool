@@ -25,11 +25,14 @@
 (function () {
   'use strict';
 
-  // Bump this on every content.js change (mirrors the bookmarklet's
-  // VERSION convention) - it's shown in the panel title so a user can
-  // confirm which build is actually running after reloading the
-  // extension, instead of guessing whether a fix "took".
-  var VERSION = 'ext-v9-2026-08-06';
+  // Displayed version is read live from manifest.json
+  // (chrome.runtime.getManifest().version) rather than a separate
+  // hand-maintained string - previously this file carried its own
+  // "ext-vN-date" label alongside manifest.json's semver, and the two
+  // could drift/disagree in the UI. Now there is a single source of
+  // truth: bump manifest.json's "version" on every release and the
+  // panel title always matches it.
+  var VERSION = 'v' + chrome.runtime.getManifest().version;
 
   if (window.__lgtExtInstance) {
     window.__lgtExtInstance.destroy();
@@ -1118,6 +1121,7 @@
     var envSel = el('select', {}, ENV_LABELS.map(function (e) { return el('option', { value: e }, [e]); }));
     var loginSel = el('select', {}, [el('option', { value: 'out' }, ['logged-out']), el('option', { value: 'in' }, ['logged-in'])]);
     var bleChk = el('input', { type: 'checkbox' });
+    var forceFreshChk = el('input', { type: 'checkbox' });
     var filterInput = el('input', { type: 'text', placeholder: 'e.g. turkey, restofworld' });
     var result = el('div', { class: 'lgt-result', style: 'display:none' });
     var log = el('div', { class: 'lgt-log' });
@@ -1130,6 +1134,7 @@
         var environment = envSel.value;
         var loggedIn = loginSel.value === 'in';
         var bleSource = bleChk.checked;
+        var forceFresh = forceFreshChk.checked;
 
         function renderLinks(links) {
           log.textContent = 'Customer: ' + links.customerLabel;
@@ -1139,12 +1144,26 @@
           result.appendChild(renderLinkRow('Mobile', links.mobile));
         }
 
-        function spliceAndRender(stc, ctx) {
+        // BLE source is a client-side query flag, not something baked
+        // into stc/ctx - so a live-login-captured link just needs
+        // "?bleSource=1" appended, same recipe as the static-registry
+        // BLE path, without re-deriving where stc/ctx come from (those
+        // still come from the brand's own real site, same as any other
+        // live-login capture).
+        function addBleParam(link) {
+          if (!link || link.indexOf('bleSource=') !== -1) return link;
+          return link.indexOf('?') !== -1 ? link.replace('?', '?bleSource=1&') : link + '?bleSource=1';
+        }
+
+        function spliceAndRender(stc, ctx, bleSourceWanted) {
           generateLink({ brand: brand, environment: environment, loggedIn: false, customerKeyFilter: '', bleSource: false }).then(function (links) {
             result.style.display = '';
             result.innerHTML = '';
-            result.appendChild(renderLinkRow('Desktop (live-login)', spliceContext(links.desktop, stc, ctx)));
-            result.appendChild(renderLinkRow('Mobile (live-login)', spliceContext(links.mobile, stc, ctx)));
+            var d = spliceContext(links.desktop, stc, ctx);
+            var m = spliceContext(links.mobile, stc, ctx);
+            if (bleSourceWanted) { d = addBleParam(d); m = addBleParam(m); }
+            result.appendChild(renderLinkRow('Desktop (live-login)', d));
+            result.appendChild(renderLinkRow('Mobile (live-login)', m));
           }).catch(function (err) {
             log.textContent = 'Error building final link: ' + err.message;
           });
@@ -1155,14 +1174,13 @@
         // captured stc/ctx into the normal logged-out link once done -
         // same mechanism the sbplayground-link-generator skill documents
         // as a manual workaround (REFERENCE.md), just automated here.
-        function runLiveLoginFallback() {
-          LiveLoginCache.get(brand, environment, function (cached) {
-            if (cached) {
-              log.textContent = 'Using cached live-login context (captured ' + Math.round((Date.now() - cached.capturedAt) / 60000) + ' min ago)...';
-              spliceAndRender(cached.stc, cached.ctx);
-              return;
-            }
-            log.textContent = 'No logged-in test customer for this brand - running a one-time live login on the real site (background tab, invisible)...';
+        // bleSourceWanted just controls whether "?bleSource=1" gets
+        // appended to the final link. forceFreshWanted skips the 30-min
+        // cache and always runs a brand-new capture, for cases where a
+        // guaranteed-fresh context is needed regardless of cache age.
+        function runLiveLoginFallback(bleSourceWanted, forceFreshWanted) {
+          function startFreshCapture(reasonPrefix) {
+            log.textContent = (reasonPrefix || '') + 'Running a one-time live login on the real site (background tab, invisible)...';
             var settled = false;
             var deadline = Date.now() + 60000;
 
@@ -1178,7 +1196,7 @@
                   log.textContent = 'Logging in on the real site...';
                 } else if (job.status === 'captured') {
                   log.textContent = 'Captured live-login context!';
-                  spliceAndRender(job.stc, job.ctx);
+                  spliceAndRender(job.stc, job.ctx, bleSourceWanted);
                   LiveLoginJob.clear();
                   settled = true;
                 } else if (job.status === 'failed' || job.status === 'unsupported') {
@@ -1198,27 +1216,48 @@
               }
               setTimeout(pollTimeout, 1000);
             })();
+          }
+
+          if (forceFreshWanted) {
+            startFreshCapture();
+            return;
+          }
+          LiveLoginCache.get(brand, environment, function (cached) {
+            if (cached) {
+              log.textContent = 'Using cached live-login context (captured ' + Math.round((Date.now() - cached.capturedAt) / 60000) + ' min ago)...';
+              spliceAndRender(cached.stc, cached.ctx, bleSourceWanted);
+              return;
+            }
+            startFreshCapture('No logged-in test customer for this brand - ');
           });
         }
 
-        if (!loggedIn || bleSource) {
-          // Logged-out, or BLE override (always sourced from the static
-          // registry regardless of login state) - unchanged path.
-          generateLink({ brand: brand, environment: environment, loggedIn: loggedIn, customerKeyFilter: filterInput.value, bleSource: bleSource })
+        if (!loggedIn) {
+          // Logged-out (with or without BLE) - unchanged path, BLE is
+          // handled entirely inside generateLink() via the static
+          // registry, no live-login involved either way.
+          generateLink({ brand: brand, environment: environment, loggedIn: false, customerKeyFilter: filterInput.value, bleSource: bleSource })
             .then(renderLinks)
             .catch(function (err) { log.textContent = 'Error: ' + err.message; });
           return;
         }
 
-        // Logged-in, no BLE: check upfront whether the brand has a real
-        // logged-in test customer key (works for 4/34 brands) rather
-        // than sniffing generateLink()'s error string - if it does, use
-        // the normal static-registry path unchanged; if not, only brands
-        // with known login/Sportsbook-nav selectors can fall back to
-        // live-login, everyone else keeps today's error behavior.
-        hasLoggedInCustomerKey(brand, environment).then(function (hasKey) {
+        // Logged-in, with or without BLE: check upfront whether the
+        // brand has a real logged-in test customer key (works for 4/34
+        // brands) on whichever API host generateLink() would actually
+        // use (prod when BLE is requested, same as its own apiEnv rule)
+        // rather than sniffing generateLink()'s error string. If it
+        // does, use the normal static-registry path unchanged (BLE
+        // query/host rewriting included); if not, only brands with known
+        // login/Sportsbook-nav selectors can fall back to live-login -
+        // everyone else keeps today's error behavior. BLE no longer
+        // bypasses this check on its own - previously "logged-in + BLE"
+        // for a brand with no logged-in key would go straight to
+        // generateLink() and fail immediately instead of falling back to
+        // live-login like the non-BLE case already did.
+        hasLoggedInCustomerKey(brand, bleSource ? 'prod' : environment).then(function (hasKey) {
           if (hasKey) {
-            generateLink({ brand: brand, environment: environment, loggedIn: true, customerKeyFilter: filterInput.value, bleSource: false })
+            generateLink({ brand: brand, environment: environment, loggedIn: true, customerKeyFilter: filterInput.value, bleSource: bleSource })
               .then(renderLinks)
               .catch(function (err) { log.textContent = 'Error: ' + err.message; });
             return;
@@ -1228,7 +1267,7 @@
             log.textContent = 'Error: No customer key matched prefix "logged-in" for this brand, and it is not live-login-capable (no login/Sportsbook-nav selectors known).';
             return;
           }
-          runLiveLoginFallback();
+          runLiveLoginFallback(bleSource, forceFresh);
         });
       }
     }, ['Generate']);
@@ -1243,6 +1282,8 @@
     wrap.appendChild(filterInput);
     var bleWrap = el('label', { style: 'display:flex;align-items:center;gap:6px;text-transform:none;margin-top:8px' }, [bleChk, ' BLE source (fresh live events on test/qa)']);
     wrap.appendChild(bleWrap);
+    var forceFreshWrap = el('label', { style: 'display:flex;align-items:center;gap:6px;text-transform:none;margin-top:4px' }, [forceFreshChk, ' Force fresh live-login (skip 30-min cache; logged-in only, when no test customer exists)']);
+    wrap.appendChild(forceFreshWrap);
     wrap.appendChild(btn);
     wrap.appendChild(log);
     wrap.appendChild(result);
