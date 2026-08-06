@@ -203,6 +203,33 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   return true; // keep the message channel open for the async sendResponse
 });
 
+// Opens/closes the background (inactive) tab used for the Generate tab's
+// auto live-login flow (see content.js's startLiveLoginJob /
+// resumeLiveLoginJobIfPending) - chrome.tabs is only callable from the
+// service worker, not a content script, hence these two small relays.
+// active:false keeps the tab out of the user's way for its whole (short)
+// lifetime; it closes itself via lgt-close-tab once its job settles
+// (success or failure alike - there's no reason to leave an inactive tab
+// open either way).
+chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+  if (!msg || msg.type !== 'lgt-open-tab') return false;
+  chrome.tabs.create({ url: msg.url, active: false }, function (tab) {
+    if (chrome.runtime.lastError) { sendResponse({ ok: false, error: chrome.runtime.lastError.message }); return; }
+    sendResponse({ ok: true, tabId: tab && tab.id });
+  });
+  return true;
+});
+
+chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+  if (!msg || msg.type !== 'lgt-close-tab') return false;
+  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
+  chrome.tabs.remove(sender.tab.id, function () {
+    void chrome.runtime.lastError; // ignore - tab may already be gone
+    sendResponse({ ok: true });
+  });
+  return true;
+});
+
 // Toolbar icon click toggles the panel in the active tab's content script.
 // The content script itself is always injected (document_idle, every page/
 // navigation) and always listening - it just keeps the panel hidden by

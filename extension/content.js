@@ -29,7 +29,7 @@
   // VERSION convention) - it's shown in the panel title so a user can
   // confirm which build is actually running after reloading the
   // extension, instead of guessing whether a fix "took".
-  var VERSION = 'ext-v3-2026-08-06';
+  var VERSION = 'ext-v4-2026-08-06';
 
   if (window.__lgtExtInstance) {
     window.__lgtExtInstance.destroy();
@@ -112,22 +112,51 @@
   // See link-gen-tool.js for the same table and its caveats (best-effort,
   // brand markup can go stale, submit may not complete a real login on
   // brands with fraud-detection that rejects synthetic clicks).
+  // sportsbookNavPattern: matched against the trimmed visible text of an
+  // in-page nav link/tab to reach the Sportsbook section post-login. This
+  // MUST be an in-page click (SPA-style client routing), never a hard
+  // location.href navigation - a hard reload straight to the sportsbook
+  // URL right after login races with session restoration and yields an
+  // anonymous "LoggedOut" context instead of the real logged-in one
+  // (confirmed 2026-08-05 on NordicBet/test; see the sbplayground-link-
+  // generator skill's REFERENCE.md "hard navigation breaks the session"
+  // pitfall - live-login-poc.mjs works around it the same way).
   var LOGIN_SELECTORS = {
     nordicbet: {
       loginPath: '/en/login',
       usernameSelector: 'input[name="email"], input#email-input, input[name="username"], input[type="email"]',
       passwordSelector: 'input[name="password"], input[type="password"]',
-      submitSelector: '[data-test-id="account-login-btn-1-button"], button[type="submit"]'
+      submitSelector: '[data-test-id="account-login-btn-1-button"], button[type="submit"]',
+      sportsbookNavPattern: /^sportsbook$/i
     },
     mobilbahis: {
       loginPath: '/tr/giris',
       usernameSelector: 'input[type="email"], input[name="username"]',
       passwordSelector: 'input[type="password"]',
-      submitSelector: 'button[type="submit"]'
+      submitSelector: 'button[type="submit"]',
+      // Best-effort/unverified via the extension (real-site selectors,
+      // same caveat as the rest of this brand's entry) - matches the
+      // "M-BAHIS" top-nav tab from the skill's worked example.
+      sportsbookNavPattern: /m-bahis/i
     }
   };
 
   var ENV_LABELS = ['test', 'qa', 'alpha', 'prod'];
+
+  // Builds the URL to the brand's REAL login page (not the sbplayground
+  // internal test harness) for a given environment - used to open the
+  // background tab for the Generate tab's auto live-login flow. Same
+  // env-prefix convention as the rest of this tool (test./qa./alpha.
+  // prefix, none for prod). Returns null if the brand isn't known or has
+  // no LOGIN_SELECTORS entry (i.e. isn't live-login-capable).
+  function realLoginUrl(brandKey, environment) {
+    var domain = BRAND_DOMAINS[brandKey];
+    var sel = LOGIN_SELECTORS[brandKey];
+    if (!domain || !sel) return null;
+    var prefix = (environment && environment !== 'prod') ? (environment + '.') : '';
+    return 'https://' + prefix + domain + sel.loginPath;
+  }
+
 
   // ---------------------------------------------------------------------
   // Vault - chrome.storage.local, extension-scoped so it is automatically
@@ -192,6 +221,23 @@
 
   function apiBase(env) {
     return 'https://internal.' + env + '.sbplayground1.net';
+  }
+
+  // Upfront check so the Generate tab's live-login fallback (see
+  // buildModeA) doesn't have to sniff generateLink()'s error string to
+  // decide whether a brand has a real logged-in test customer at all.
+  // Per the sbplayground-link-generator skill's REFERENCE.md, only 4/34
+  // brands (firestorm, firestormsg, playgurus, sandbox) currently have
+  // one - every other brand always resolves false here.
+  function hasLoggedInCustomerKey(brand, environment) {
+    var brandGuid = BRANDS[brand];
+    if (!brandGuid) return Promise.resolve(false);
+    return fetch(apiBase(environment) + '/api/customers/' + brandGuid)
+      .then(function (r) { return r.ok ? r.json() : {}; })
+      .then(function (customers) {
+        return Object.keys(customers || {}).some(function (k) { return k.toLowerCase().indexOf('logged-in') === 0; });
+      })
+      .catch(function () { return false; });
   }
 
   function generateLink(opts) {
@@ -295,6 +341,92 @@
         chrome.storage.local.remove([keyForThisOrigin()], function () { if (cb) cb(); });
       }
     };
+  })();
+
+  // ---------------------------------------------------------------------
+  // Auto live-login job coordination (Generate tab -> background tab ->
+  // back to the Generate tab), for brands with no real logged-in test
+  // customer. chrome.storage.local (not sessionStorage) is required here
+  // since the job spans two different tabs/origins - the Generate tab
+  // (wherever it happens to be open) and a throwaway background tab on
+  // the brand's real domain.
+  //
+  // Single in-flight job at a time (one key, not a list/queue) - the
+  // Generate tab UI only ever starts one live-login at a time itself.
+  // ---------------------------------------------------------------------
+
+  var LIVE_LOGIN_JOB_KEY = 'lgt-live-login-job';
+  var LIVE_LOGIN_CACHE_KEY = 'lgt-live-login-cache';
+  var LIVE_LOGIN_CACHE_TTL_MS = 30 * 60 * 1000; // 30 min - conservative slice of the ~8-24h real validity (see REFERENCE.md)
+
+  var LiveLoginJob = (function () {
+    function get(cb) {
+      chrome.storage.local.get([LIVE_LOGIN_JOB_KEY], function (res) {
+        cb((res && res[LIVE_LOGIN_JOB_KEY]) || null);
+      });
+    }
+    function write(job, cb) {
+      var obj = {};
+      obj[LIVE_LOGIN_JOB_KEY] = job;
+      chrome.storage.local.set(obj, function () { if (cb) cb(); });
+    }
+    function update(patch, cb) {
+      get(function (job) {
+        if (!job) { if (cb) cb(); return; }
+        write(Object.assign({}, job, patch), cb);
+      });
+    }
+    function clear(cb) {
+      chrome.storage.local.remove([LIVE_LOGIN_JOB_KEY], function () { if (cb) cb(); });
+    }
+    // Opens the background tab via background.js (content scripts cannot
+    // call chrome.tabs.* directly) at the brand's real login page.
+    function start(brandKey, environment, cb) {
+      var url = realLoginUrl(brandKey, environment);
+      if (!url) { cb({ ok: false, error: 'Brand "' + brandKey + '" is not live-login-capable (no login selectors known).' }); return; }
+      var job = { id: 'j' + Date.now().toString(36), brand: brandKey, environment: environment, status: 'starting', stc: null, ctx: null, error: null, createdAt: Date.now() };
+      write(job, function () {
+        chrome.runtime.sendMessage({ type: 'lgt-open-tab', url: url }, function (response) {
+          if (chrome.runtime.lastError) { cb({ ok: false, error: chrome.runtime.lastError.message }); return; }
+          if (!response || !response.ok) { cb({ ok: false, error: (response && response.error) || 'failed to open tab' }); return; }
+          cb({ ok: true, job: job });
+        });
+      });
+    }
+    // Live-updates via chrome.storage.onChanged - used by the Generate
+    // tab to reflect status without polling.
+    function onChange(cb) {
+      chrome.storage.onChanged.addListener(function (changes, area) {
+        if (area !== 'local' || !changes[LIVE_LOGIN_JOB_KEY]) return;
+        cb(changes[LIVE_LOGIN_JOB_KEY].newValue || null);
+      });
+    }
+    return { get: get, update: update, clear: clear, start: start, onChange: onChange };
+  })();
+
+  var LiveLoginCache = (function () {
+    function keyFor(brand, environment) { return brand + ':' + environment; }
+    function get(brand, environment, cb) {
+      chrome.storage.local.get([LIVE_LOGIN_CACHE_KEY], function (res) {
+        var map = (res && res[LIVE_LOGIN_CACHE_KEY]) || {};
+        var entry = map[keyFor(brand, environment)];
+        if (entry && (Date.now() - entry.capturedAt) < LIVE_LOGIN_CACHE_TTL_MS) {
+          cb(entry);
+        } else {
+          cb(null);
+        }
+      });
+    }
+    function set(brand, environment, stc, ctx, cb) {
+      chrome.storage.local.get([LIVE_LOGIN_CACHE_KEY], function (res) {
+        var map = (res && res[LIVE_LOGIN_CACHE_KEY]) || {};
+        map[keyFor(brand, environment)] = { stc: stc, ctx: ctx, capturedAt: Date.now() };
+        var obj = {};
+        obj[LIVE_LOGIN_CACHE_KEY] = map;
+        chrome.storage.local.set(obj, function () { if (cb) cb(); });
+      });
+    }
+    return { get: get, set: set };
   })();
 
   function detectBrandAndEnv() {
@@ -423,6 +555,21 @@
       if (matches.length) return matches[0];
     }
     return null;
+  }
+
+  // Finds a visible in-page nav link/tab whose trimmed text matches
+  // `pattern` - used to reach the Sportsbook section post-login via a real
+  // SPA-routed click rather than a hard navigation (see the
+  // sportsbookNavPattern comment on LOGIN_SELECTORS for why that matters).
+  // Covers plain <a>, <button>, and ARIA link/tab roles (some brand navs
+  // use non-anchor elements with a router's onClick handler).
+  function findSportsbookNavLink(pattern) {
+    var candidates = deepQuerySelectorAll('a, button, [role="link"], [role="tab"]')
+      .filter(function (elm) {
+        var text = (elm.textContent || '').trim();
+        return text && pattern.test(text) && isVisible(elm);
+      });
+    return candidates[0] || null;
   }
 
   function watchForSubmitOutcome(loginPath, timeoutMs) {
@@ -564,6 +711,63 @@
   // machinery is needed here at all (unlike the bookmarklet's v10/v13).
   var RESUME_KEY = '__lgtExtAutoLoginResume';
 
+  // Closes the loop after a successful auto-login: passive capture only
+  // fires once a page actually makes an sb/fe-api/* request, which a
+  // post-login account/home landing page usually doesn't - the Sportsbook
+  // section has to actually be reached. Uses a real in-page nav-link
+  // click (trusted, via CDP) rather than a hard navigation, per the
+  // documented "hard navigation breaks the session" pitfall (see the
+  // sportsbookNavPattern comment on LOGIN_SELECTORS).
+  function navigateToSportsbookAndAwaitCapture(brandKey, log) {
+    var sel = LOGIN_SELECTORS[brandKey];
+    var pattern = sel && sel.sportsbookNavPattern;
+    if (!pattern) {
+      log('No known Sportsbook nav link pattern for "' + brandKey + '" - click into the Sportsbook section yourself so stc/ctx capture can complete.');
+      return Promise.resolve(false);
+    }
+
+    function awaitCapture() {
+      return new Promise(function (resolve) {
+        var start = Date.now();
+        (function poll() {
+          Capture.get(function (c) {
+            if (c && c.stc && c.ctx) {
+              log('Captured! stc=' + c.stc + ' ctx=' + c.ctx);
+              resolve(true);
+              return;
+            }
+            if (Date.now() - start > 8000) {
+              log('Navigated to Sportsbook, but no stc/ctx captured yet - it may still be loading; check the Live Login tab.');
+              resolve(false);
+              return;
+            }
+            setTimeout(poll, 300);
+          });
+        })();
+      });
+    }
+
+    return new Promise(function (resolve) {
+      var start = Date.now();
+      (function pollNav() {
+        var linkEl = findSportsbookNavLink(pattern);
+        if (linkEl) {
+          var c = centerOf(linkEl);
+          sendTrustedSequence([{ type: 'click', x: c.x, y: c.y }]).then(function () {
+            resolve(awaitCapture());
+          });
+          return;
+        }
+        if (Date.now() - start > 4000) {
+          log('Could not find a Sportsbook nav link to click - click into the Sportsbook section yourself so stc/ctx capture can complete.');
+          resolve(false);
+          return;
+        }
+        setTimeout(pollNav, 200);
+      })();
+    });
+  }
+
   function attemptAutoLogin(brandKey, username, password, log) {
     var sel = LOGIN_SELECTORS[brandKey];
     if (!sel) {
@@ -608,18 +812,18 @@
             if (!submitted) return false;
             return watchForSubmitOutcome(sel.loginPath, 4000).then(function (outcome) {
               if (outcome !== 'stuck') {
-                log('Submitted - navigated away from the login page. Capture keeps running automatically here.');
-                return true;
+                log('Submitted - navigated away from the login page. Heading to Sportsbook to complete capture...');
+                return navigateToSportsbookAndAwaitCapture(brandKey, log).then(function () { return true; });
               }
               log('Still on the login page after clicking submit - trying a trusted Enter keypress in the password field as a button-independent fallback...');
               return trustedEnterKeySubmit(passEl, log).then(function () {
                 return watchForSubmitOutcome(sel.loginPath, 3000).then(function (outcome2) {
                   if (outcome2 === 'stuck') {
                     log('Still on the login page - likely a real login rejection (wrong credential, captcha, etc) rather than a click-trust issue at this point. Check manually.');
-                  } else {
-                    log('Submitted via Enter key - navigated away from the login page. Capture keeps running automatically here.');
+                    return true;
                   }
-                  return true;
+                  log('Submitted via Enter key - navigated away from the login page. Heading to Sportsbook to complete capture...');
+                  return navigateToSportsbookAndAwaitCapture(brandKey, log).then(function () { return true; });
                 });
               });
             });
@@ -731,20 +935,109 @@
       onclick: function () {
         result.style.display = 'none';
         log.textContent = 'Generating...';
-        generateLink({
-          brand: brandSel.value,
-          environment: envSel.value,
-          loggedIn: loginSel.value === 'in',
-          customerKeyFilter: filterInput.value,
-          bleSource: bleChk.checked
-        }).then(function (links) {
+        var brand = brandSel.value;
+        var environment = envSel.value;
+        var loggedIn = loginSel.value === 'in';
+        var bleSource = bleChk.checked;
+
+        function renderLinks(links) {
           log.textContent = 'Customer: ' + links.customerLabel;
           result.style.display = '';
           result.innerHTML = '';
           result.appendChild(renderLinkRow('Desktop', links.desktop));
           result.appendChild(renderLinkRow('Mobile', links.mobile));
-        }).catch(function (err) {
-          log.textContent = 'Error: ' + err.message;
+        }
+
+        function spliceAndRender(stc, ctx) {
+          generateLink({ brand: brand, environment: environment, loggedIn: false, customerKeyFilter: '', bleSource: false }).then(function (links) {
+            result.style.display = '';
+            result.innerHTML = '';
+            result.appendChild(renderLinkRow('Desktop (live-login)', spliceContext(links.desktop, stc, ctx)));
+            result.appendChild(renderLinkRow('Mobile (live-login)', spliceContext(links.mobile, stc, ctx)));
+          }).catch(function (err) {
+            log.textContent = 'Error building final link: ' + err.message;
+          });
+        }
+
+        // Runs a one-time live login (cache -> background-tab job) for
+        // brands with no real logged-in test customer, splicing the
+        // captured stc/ctx into the normal logged-out link once done -
+        // same mechanism the sbplayground-link-generator skill documents
+        // as a manual workaround (REFERENCE.md), just automated here.
+        function runLiveLoginFallback() {
+          LiveLoginCache.get(brand, environment, function (cached) {
+            if (cached) {
+              log.textContent = 'Using cached live-login context (captured ' + Math.round((Date.now() - cached.capturedAt) / 60000) + ' min ago)...';
+              spliceAndRender(cached.stc, cached.ctx);
+              return;
+            }
+            log.textContent = 'No logged-in test customer for this brand - running a one-time live login on the real site (background tab, invisible)...';
+            var settled = false;
+            var deadline = Date.now() + 60000;
+
+            LiveLoginJob.start(brand, environment, function (startResult) {
+              if (!startResult.ok) {
+                log.textContent = 'Error starting live login: ' + startResult.error;
+                settled = true;
+                return;
+              }
+              LiveLoginJob.onChange(function (job) {
+                if (settled || !job) return;
+                if (job.status === 'logging-in') {
+                  log.textContent = 'Logging in on the real site...';
+                } else if (job.status === 'captured') {
+                  log.textContent = 'Captured live-login context!';
+                  spliceAndRender(job.stc, job.ctx);
+                  LiveLoginJob.clear();
+                  settled = true;
+                } else if (job.status === 'failed' || job.status === 'unsupported') {
+                  log.textContent = 'Live login failed: ' + (job.error || job.status);
+                  LiveLoginJob.clear();
+                  settled = true;
+                }
+              });
+            });
+
+            (function pollTimeout() {
+              if (settled) return;
+              if (Date.now() > deadline) {
+                log.textContent = 'Live login timed out after 60s - check for a leftover background tab.';
+                settled = true;
+                return;
+              }
+              setTimeout(pollTimeout, 1000);
+            })();
+          });
+        }
+
+        if (!loggedIn || bleSource) {
+          // Logged-out, or BLE override (always sourced from the static
+          // registry regardless of login state) - unchanged path.
+          generateLink({ brand: brand, environment: environment, loggedIn: loggedIn, customerKeyFilter: filterInput.value, bleSource: bleSource })
+            .then(renderLinks)
+            .catch(function (err) { log.textContent = 'Error: ' + err.message; });
+          return;
+        }
+
+        // Logged-in, no BLE: check upfront whether the brand has a real
+        // logged-in test customer key (works for 4/34 brands) rather
+        // than sniffing generateLink()'s error string - if it does, use
+        // the normal static-registry path unchanged; if not, only brands
+        // with known login/Sportsbook-nav selectors can fall back to
+        // live-login, everyone else keeps today's error behavior.
+        hasLoggedInCustomerKey(brand, environment).then(function (hasKey) {
+          if (hasKey) {
+            generateLink({ brand: brand, environment: environment, loggedIn: true, customerKeyFilter: filterInput.value, bleSource: false })
+              .then(renderLinks)
+              .catch(function (err) { log.textContent = 'Error: ' + err.message; });
+            return;
+          }
+          var sel = LOGIN_SELECTORS[brand];
+          if (!sel || !sel.sportsbookNavPattern) {
+            log.textContent = 'Error: No customer key matched prefix "logged-in" for this brand, and it is not live-login-capable (no login/Sportsbook-nav selectors known).';
+            return;
+          }
+          runLiveLoginFallback();
         });
       }
     }, ['Generate']);
@@ -940,6 +1233,57 @@
     panelEl.__lgtSwitchToLiveLogin();
     if (panelEl.__lgtAutoLoginBtn) panelEl.__lgtAutoLoginBtn.click();
   })();
+
+  // Runs the Generate tab's auto live-login job (see LiveLoginJob /
+  // startLiveLoginJob) end to end in this tab - the background tab
+  // opened at the brand's real login URL, invisible to the user for its
+  // whole short lifetime. Only ever acts on a job in its initial
+  // 'starting' state (not 'logging-in') as a light-weight guard against
+  // a rare double-pickup: if the Generate tab itself happens to already
+  // be sitting on the brand's real login page when the job is created,
+  // its own bootstrap check could otherwise race the freshly-opened
+  // background tab for the same job - in practice the background tab's
+  // real network navigation is far slower than an already-loaded tab's
+  // synchronous storage read, so the already-loaded tab (if any) wins
+  // and flips the status before the background tab's check ever sees
+  // 'starting'.
+  (function resumeLiveLoginJobIfPending() {
+    LiveLoginJob.get(function (job) {
+      if (!job || job.status !== 'starting') return;
+      var detected = detectBrandAndEnv();
+      if (!detected.brand || detected.brand !== job.brand) return;
+      var sel = LOGIN_SELECTORS[job.brand];
+      if (!sel || !sel.sportsbookNavPattern) {
+        LiveLoginJob.update({ status: 'unsupported', error: 'Brand is not live-login-capable (missing login/Sportsbook-nav selectors).' }, closeThisTab);
+        return;
+      }
+      LiveLoginJob.update({ status: 'logging-in' }, function () {
+        Vault.getDefault(function (cred) {
+          if (!cred) {
+            LiveLoginJob.update({ status: 'failed', error: 'No saved credential in the vault.' }, closeThisTab);
+            return;
+          }
+          attemptAutoLogin(job.brand, cred.username, cred.password, function (m) { console.log('[lgt-live-login]', m); }).then(function () {
+            Capture.get(function (c) {
+              if (c && c.stc && c.ctx) {
+                LiveLoginJob.update({ status: 'captured', stc: c.stc, ctx: c.ctx }, function () {
+                  LiveLoginCache.set(job.brand, job.environment, c.stc, c.ctx, closeThisTab);
+                });
+              } else {
+                LiveLoginJob.update({ status: 'failed', error: 'Login/Sportsbook navigation completed but no stc/ctx was captured.' }, closeThisTab);
+              }
+            });
+          });
+        });
+      });
+    });
+  })();
+
+  function closeThisTab() {
+    chrome.runtime.sendMessage({ type: 'lgt-close-tab' }, function () {
+      void chrome.runtime.lastError; // ignore - nothing to do if this fails
+    });
+  }
 
   window.__lgtExtInstance = {
     destroy: function () {
