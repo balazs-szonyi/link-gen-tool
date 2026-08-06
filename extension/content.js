@@ -160,6 +160,22 @@
     return 'https://' + prefix + domain + sel.loginPath;
   }
 
+  // Builds the brand's REAL (production-like) origin for a given
+  // environment - used to spoof Origin/Referer toward Sportradar so its
+  // per-brand domain-licensing check (see background.js's
+  // startSrSpoofRule) accepts the request the same way it would for a
+  // real visitor. Confirmed via direct HTTP testing (2026-08-06) that
+  // "https://www.alpha.nordicbet.com" is accepted by Sportradar's
+  // licensing endpoint for nordicbet/alpha; other brands/environments
+  // follow the same www.{env.}domain convention but aren't individually
+  // verified yet.
+  function realBrandOrigin(brandKey, environment) {
+    var domain = BRAND_DOMAINS[brandKey];
+    if (!domain) return null;
+    var prefix = (environment && environment !== 'prod') ? (environment + '.') : '';
+    return 'https://www.' + prefix + domain;
+  }
+
 
   // ---------------------------------------------------------------------
   // Vault - chrome.storage.local, extension-scoped so it is automatically
@@ -1182,8 +1198,8 @@
           log.textContent = 'Customer: ' + links.customerLabel;
           result.style.display = '';
           result.innerHTML = '';
-          result.appendChild(renderLinkRow('Desktop', links.desktop, brand));
-          result.appendChild(renderLinkRow('Mobile', links.mobile, brand));
+          result.appendChild(renderLinkRow('Desktop', links.desktop, brand, environment));
+          result.appendChild(renderLinkRow('Mobile', links.mobile, brand, environment));
         }
 
         // BLE source (?bleSource=1) only makes sense together with a
@@ -1212,8 +1228,8 @@
             if (bleSourceWanted) {
               log.textContent += ' (BLE source applied: logged in for real on prod - prod always serves live BLE events - rendered on the ' + environment + ' frontend with bleSource=1.)';
             }
-            result.appendChild(renderLinkRow('Desktop (live-login' + (bleSourceWanted ? ' + BLE' : '') + ')', d, brand));
-            result.appendChild(renderLinkRow('Mobile (live-login' + (bleSourceWanted ? ' + BLE' : '') + ')', m, brand));
+            result.appendChild(renderLinkRow('Desktop (live-login' + (bleSourceWanted ? ' + BLE' : '') + ')', d, brand, environment));
+            result.appendChild(renderLinkRow('Mobile (live-login' + (bleSourceWanted ? ' + BLE' : '') + ')', m, brand, environment));
           }).catch(function (err) {
             log.textContent = 'Error building final link: ' + err.message;
           });
@@ -1392,11 +1408,23 @@
     });
   }
 
-  function renderLinkRow(label, link, brand) {
+  function openWithSrSpoof(link, brand, environment) {
+    var spoofOrigin = realBrandOrigin(brand, environment);
+    if (!spoofOrigin) { alert('Unknown brand - cannot determine a real domain to spoof.'); return; }
+    chrome.runtime.sendMessage({ type: 'lgt-open-with-sr-spoof', url: link, spoofOrigin: spoofOrigin }, function (response) {
+      void chrome.runtime.lastError;
+      if (!response || !response.ok) {
+        alert('Could not open with Sportradar spoofing: ' + (response && response.error || 'unknown error'));
+      }
+    });
+  }
+
+  function renderLinkRow(label, link, brand, environment) {
     var row = el('div', { style: 'margin-bottom:6px' });
     row.appendChild(el('div', { style: 'color:#9aa3b8' }, [label]));
     var linkText = el('div', {}, [link || '(not available)']);
     row.appendChild(linkText);
+    var srNote = el('div', { class: 'lgt-log', style: 'display:none' });
     if (link) {
       row.appendChild(el('button', {
         class: 'secondary', onclick: function () {
@@ -1408,6 +1436,17 @@
           class: 'secondary', style: 'margin-left:6px', onclick: function () { startEmbed(link); }
         }, ['Embed here']));
       }
+      var spoofOrigin = brand ? realBrandOrigin(brand, environment) : null;
+      if (spoofOrigin) {
+        row.appendChild(el('button', {
+          class: 'secondary', style: 'margin-left:6px', onclick: function () {
+            openWithSrSpoof(link, brand, environment);
+            srNote.style.display = '';
+            srNote.textContent = 'Opened in a new tab with Origin/Referer to Sportradar/Betradar spoofed as ' + spoofOrigin + ' for that tab only (so licensed widgets like the Live Match Tracker render - Sportradar checks the calling domain server-side and rejects the playground host otherwise).';
+          }
+        }, ['Open (Sportradar-enabled)']));
+      }
+      row.appendChild(srNote);
     }
     return row;
   }
@@ -1467,8 +1506,8 @@
       generateLink({ brand: detected.brand, environment: detected.environment, loggedIn: false }).then(function (links) {
         result.style.display = '';
         result.innerHTML = '';
-        result.appendChild(renderLinkRow('Desktop', spliceContext(links.desktop, c.stc, c.ctx), detected.brand));
-        result.appendChild(renderLinkRow('Mobile', spliceContext(links.mobile, c.stc, c.ctx), detected.brand));
+        result.appendChild(renderLinkRow('Desktop', spliceContext(links.desktop, c.stc, c.ctx), detected.brand, detected.environment));
+        result.appendChild(renderLinkRow('Mobile', spliceContext(links.mobile, c.stc, c.ctx), detected.brand, detected.environment));
         status.textContent = 'Done.';
       }).catch(function (err) { status.textContent = 'Error: ' + err.message; });
     }

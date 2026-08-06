@@ -365,9 +365,105 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
 // shouldn't keep silently stripping these headers for that origin).
 chrome.tabs.onRemoved.addListener(function (tabId) {
   stopEmbedRule(tabId);
+  stopSrSpoofRule(tabId);
 });
 chrome.tabs.onUpdated.addListener(function (tabId, changeInfo) {
   if (changeInfo.status === 'loading' && embedRuleIdByTab[tabId]) stopEmbedRule(tabId);
+  if (changeInfo.status === 'loading' && srSpoofRuleIdByTab[tabId]) stopSrSpoofRule(tabId);
+});
+
+// ---------------------------------------------------------------------
+// Sportradar Origin/Referer spoofing - the Live Match Tracker (and other
+// SIR) widgets check the calling page's Origin/Referer against a
+// per-brand domain-license list on Sportradar's own server (their
+// /{clientId}/licensing endpoint responds {"valid":false,"emsg":"No
+// packages licensed for \"<playground host>\""} for any non-whitelisted
+// domain, confirmed via direct HTTP testing 2026-08-06). This is a real
+// commercial licensing check, not a technical bug or a browser security
+// header - the widget's script/CSS load fine either way, but its own JS
+// gives up right after licensing fails, so the widget stays stuck on a
+// loading spinner. There is no way to make Sportradar's server itself
+// accept the playground domain; the only way to see the widget render on
+// a generated link is to make outgoing requests to Sportradar/Betradar
+// claim to come from the real brand's own (licensed) domain instead -
+// i.e. deliberately spoof Origin/Referer for that traffic, scoped to one
+// explicitly-opened tab only, same declarativeNetRequest mechanism (a
+// different action - request header rewrite instead of response header
+// removal) as the "Embed here" feature above.
+// ---------------------------------------------------------------------
+
+var SR_SPOOF_RULE_ID_START = 950001;
+var srSpoofRuleIdCounter = SR_SPOOF_RULE_ID_START;
+var srSpoofRuleIdByTab = {}; // tabId -> ruleId
+
+function startSrSpoofRule(tabId, spoofOrigin, requestDomains) {
+  var ruleId = ++srSpoofRuleIdCounter;
+  return new Promise(function (resolve, reject) {
+    chrome.declarativeNetRequest.updateSessionRules({
+      addRules: [{
+        id: ruleId,
+        priority: 1,
+        action: {
+          type: 'modifyHeaders',
+          requestHeaders: [
+            { header: 'origin', operation: 'set', value: spoofOrigin },
+            { header: 'referer', operation: 'set', value: spoofOrigin + '/' }
+          ]
+        },
+        condition: {
+          // requestDomains matches the domain itself AND its subdomains,
+          // so this one entry reaches both widgets.sir.sportradar.com and
+          // lmt.fn.sportradar.com without listing each subdomain.
+          // (Overridable only for tests - production callers never pass
+          // this third argument, so real usage always targets Sportradar/
+          // Betradar exactly as documented.)
+          requestDomains: requestDomains || ['sportradar.com', 'betradar.com'],
+          // Deliberately narrow to the data/script-fetching resource
+          // types the widget actually uses for the licensing/gismo calls
+          // - script/stylesheet/image loads don't need spoofed headers.
+          resourceTypes: ['xmlhttprequest', 'other'],
+          tabIds: [tabId]
+        }
+      }],
+      removeRuleIds: []
+    }, function () {
+      if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
+      srSpoofRuleIdByTab[tabId] = ruleId;
+      resolve();
+    });
+  });
+}
+
+function stopSrSpoofRule(tabId) {
+  var ruleId = srSpoofRuleIdByTab[tabId];
+  if (!ruleId) return Promise.resolve();
+  delete srSpoofRuleIdByTab[tabId];
+  return new Promise(function (resolve) {
+    chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [ruleId] }, function () {
+      void chrome.runtime.lastError; // ignore - rule may already be gone
+      resolve();
+    });
+  });
+}
+
+// Opens a NEW tab for the given generated link with Sportradar spoofing
+// already active before the page starts loading (unlike "Embed here",
+// this acts on a brand-new tab it creates itself, not the current one -
+// the widget needs to run on the generated link's OWN page).
+chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+  if (!msg || msg.type !== 'lgt-open-with-sr-spoof') return false;
+  var url = msg.url;
+  var spoofOrigin = msg.spoofOrigin;
+  if (!url || !spoofOrigin) { sendResponse({ ok: false, error: 'missing url or spoofOrigin' }); return false; }
+  chrome.tabs.create({ url: url, active: true }, function (tab) {
+    if (chrome.runtime.lastError || !tab) { sendResponse({ ok: false, error: (chrome.runtime.lastError && chrome.runtime.lastError.message) || 'failed to open tab' }); return; }
+    startSrSpoofRule(tab.id, spoofOrigin).then(function () {
+      sendResponse({ ok: true, tabId: tab.id });
+    }).catch(function (err) {
+      sendResponse({ ok: false, error: String(err && err.message || err) });
+    });
+  });
+  return true;
 });
 
 // Toolbar icon click toggles the panel in the active tab's content script.
