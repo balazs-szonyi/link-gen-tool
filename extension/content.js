@@ -1150,24 +1150,30 @@
           result.appendChild(renderLinkRow('Mobile', links.mobile));
         }
 
-        // BLE source is a client-side query flag, not something baked
-        // into stc/ctx - so a live-login-captured link just needs
-        // "?bleSource=1" appended, same recipe as the static-registry
-        // BLE path, without re-deriving where stc/ctx come from (those
-        // still come from the brand's own real site, same as any other
-        // live-login capture).
-        function addBleParam(link) {
-          if (!link || link.indexOf('bleSource=') !== -1) return link;
-          return link.indexOf('?') !== -1 ? link.replace('?', '?bleSource=1&') : link + '?bleSource=1';
-        }
-
+        // BLE source (?bleSource=1) only makes sense with a
+        // prod-sourced SIMULATED customer context (see generateLink's
+        // own apiEnv rule: bleSource forces the customer/context lookup
+        // to prod) - it is NOT compatible with a REAL live-login-captured
+        // session context. Confirmed 2026-08-06 via a direct HTTP check:
+        // appending "?bleSource=1" to a link built from a real captured
+        // stc/ctx returned a genuine server-side HTTP 503 from the CDN/
+        // edge (not just a client-rendered "maintenance" banner - the
+        // same URL without bleSource returns a clean 200 and the page
+        // loads normally). A real live-login session already reflects
+        // whatever real, live data that environment's own backend serves
+        // to a genuine logged-in user - there's no simulated-customer
+        // BDE staleness to route around in the first place, so
+        // bleSource is simply dropped (not applied) for this path, with
+        // an explanatory log line instead of a silent no-op.
         function spliceAndRender(stc, ctx, bleSourceWanted) {
           generateLink({ brand: brand, environment: environment, loggedIn: false, customerKeyFilter: '', bleSource: false }).then(function (links) {
             result.style.display = '';
             result.innerHTML = '';
             var d = spliceContext(links.desktop, stc, ctx);
             var m = spliceContext(links.mobile, stc, ctx);
-            if (bleSourceWanted) { d = addBleParam(d); m = addBleParam(m); }
+            if (bleSourceWanted) {
+              log.textContent += ' (Note: BLE source was requested but is not applied here - it only works with a prod-sourced simulated customer context, and causes a server error when combined with a real live-login session. This link reflects the live data your own login session actually sees.)';
+            }
             result.appendChild(renderLinkRow('Desktop (live-login)', d));
             result.appendChild(renderLinkRow('Mobile (live-login)', m));
           }).catch(function (err) {
