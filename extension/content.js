@@ -29,7 +29,7 @@
   // VERSION convention) - it's shown in the panel title so a user can
   // confirm which build is actually running after reloading the
   // extension, instead of guessing whether a fix "took".
-  var VERSION = 'ext-v8-2026-08-06';
+  var VERSION = 'ext-v9-2026-08-06';
 
   if (window.__lgtExtInstance) {
     window.__lgtExtInstance.destroy();
@@ -874,6 +874,11 @@
               return;
             }
             if (Date.now() - start > budgetMs) {
+              // Diagnostic breadcrumb for the next time this happens: lets
+              // us tell a write-side issue (c is null/undefined - background.js
+              // never saw the headers at all) apart from a read-side one
+              // (c exists with a seenCount but stc/ctx are still empty).
+              log('awaitCapture timed out after ' + budgetMs + 'ms - Capture.get() returned: ' + (c ? JSON.stringify({ seenCount: c.seenCount, hasStc: !!c.stc, hasCtx: !!c.ctx }) : 'null'));
               resolve(false);
               return;
             }
@@ -884,11 +889,18 @@
     }
 
     return new Promise(function (resolve) {
-      // Give the just-landed post-login page a short head start: for
-      // brands where that landing page already IS the Sportsbook section,
-      // no click is needed at all, and waiting for one would only risk
-      // missing the capture window.
-      awaitCapture(2500).then(function (already) {
+      // Give the just-landed post-login page a head start: for brands
+      // where that landing page already IS the Sportsbook section, no
+      // click is needed at all, and waiting for one would only risk
+      // missing the capture window. Bumped from 2500ms - real-world
+      // testing 2026-08-06 showed a genuinely successful login/navigation
+      // (confirmed via screenshot: real balance, full Sportsbook lobby
+      // loaded) still reporting "no stc/ctx captured", and a live
+      // end-to-end test of this exact extension code against the real
+      // site succeeded but took ~12s total for the whole login+capture
+      // sequence in a fast test environment - a real user's slower
+      // network/machine could plausibly exceed the old, tighter budgets.
+      awaitCapture(5000).then(function (already) {
         if (already) return resolve(true);
         if (!pattern) {
           log('No known Sportsbook nav link pattern for "' + brandKey + '" - click into the Sportsbook section yourself so stc/ctx capture can complete.');
@@ -901,14 +913,14 @@
           if (linkEl) {
             var c = centerOf(linkEl);
             sendTrustedSequence([{ type: 'click', x: c.x, y: c.y }]).then(function () {
-              awaitCapture(8000).then(function (ok) {
+              awaitCapture(20000).then(function (ok) {
                 if (!ok) log('Navigated to Sportsbook, but no stc/ctx captured yet - it may still be loading; check the Live Login tab.');
                 resolve(ok);
               });
             });
             return;
           }
-          if (Date.now() - start > 4000) {
+          if (Date.now() - start > 7000) {
             log('Could not find a Sportsbook nav link to click - click into the Sportsbook section yourself so stc/ctx capture can complete.');
             resolve(false);
             return;
