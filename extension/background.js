@@ -65,6 +65,105 @@ chrome.webRequest.onSendHeaders.addListener(
   ['requestHeaders', 'extraHeaders']
 );
 
+// ---------------------------------------------------------------------
+// Trusted input for auto-login, via chrome.debugger (CDP Input domain).
+//
+// Why this exists: some brands' login submit buttons check
+// `event.isTrusted` (or equivalent framework-level "was this a real user
+// gesture" heuristics) and silently ignore a content script's synthetic
+// dispatchEvent()/click() - a genuine, unavoidable limitation of DOM-level
+// simulation (this affected both the bookmarklet and this extension's
+// content.js equally, since content scripts run in the same "not a real
+// user" trust tier no matter how they're delivered). chrome.debugger is
+// different: it's a background-service-worker-only API (content scripts
+// cannot call it) that attaches Chrome DevTools Protocol to the tab and
+// injects input via the same Input.dispatchMouseEvent/dispatchKeyEvent
+// pipeline real DevTools/Playwright use - indistinguishable from a real
+// user to the page, so isTrusted-gated handlers fire normally. This is
+// the one "not the bookmarklet anymore" capability that actually matters
+// here.
+//
+// Trade-off: attaching shows Chrome's built-in "<name> started debugging
+// this browser" infobar for the few hundred ms the sequence takes, then
+// auto-dismisses on detach. There's no way to suppress that banner - it's
+// a Chrome-level anti-abuse indicator, not something this extension
+// controls.
+// ---------------------------------------------------------------------
+
+function sleep(ms) {
+  return new Promise(function (resolve) { setTimeout(resolve, ms); });
+}
+
+function sendDebuggerCommand(tabId, method, params) {
+  return new Promise(function (resolve, reject) {
+    chrome.debugger.sendCommand({ tabId: tabId }, method, params || {}, function (result) {
+      if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
+      resolve(result);
+    });
+  });
+}
+
+function attachDebugger(tabId) {
+  return new Promise(function (resolve, reject) {
+    chrome.debugger.attach({ tabId: tabId }, '1.3', function () {
+      if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
+      resolve();
+    });
+  });
+}
+
+function detachDebugger(tabId) {
+  return new Promise(function (resolve) {
+    chrome.debugger.detach({ tabId: tabId }, function () {
+      void chrome.runtime.lastError; // ignore - already detached is fine
+      resolve();
+    });
+  });
+}
+
+function trustedClick(tabId, x, y) {
+  return sendDebuggerCommand(tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: x, y: y })
+    .then(function () { return sendDebuggerCommand(tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: x, y: y, button: 'left', clickCount: 1 }); })
+    .then(function () { return sendDebuggerCommand(tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: x, y: y, button: 'left', clickCount: 1 }); });
+}
+
+function trustedType(tabId, text) {
+  var chars = String(text || '').split('');
+  return chars.reduce(function (chain, ch) {
+    return chain
+      .then(function () { return sendDebuggerCommand(tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', text: ch, unmodifiedText: ch, key: ch }); })
+      .then(function () { return sendDebuggerCommand(tabId, 'Input.dispatchKeyEvent', { type: 'char', text: ch }); })
+      .then(function () { return sendDebuggerCommand(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', text: ch, unmodifiedText: ch, key: ch }); })
+      .then(function () { return sleep(10 + Math.random() * 25); });
+  }, Promise.resolve());
+}
+
+function runTrustedSequence(tabId, actions) {
+  return attachDebugger(tabId).then(function () {
+    var chain = Promise.resolve();
+    actions.forEach(function (action) {
+      chain = chain.then(function () {
+        if (action.type === 'click') return trustedClick(tabId, action.x, action.y);
+        if (action.type === 'type') return trustedType(tabId, action.text);
+        return Promise.resolve();
+      }).then(function () { return sleep(action.delayAfter || 80); });
+    });
+    return chain.then(
+      function () { return detachDebugger(tabId).then(function () { return { ok: true }; }); },
+      function (err) { return detachDebugger(tabId).then(function () { return { ok: false, error: String(err && err.message || err) }; }); }
+    );
+  }, function (err) {
+    return { ok: false, error: String(err && err.message || err) };
+  });
+}
+
+chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+  if (!msg || msg.type !== 'lgt-trusted-sequence') return false;
+  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
+  runTrustedSequence(sender.tab.id, msg.actions || []).then(sendResponse);
+  return true; // keep the message channel open for the async sendResponse
+});
+
 // Toolbar icon click toggles the panel in the active tab's content script.
 // The content script itself is always injected (document_idle, every page/
 // navigation) and always listening - it just keeps the panel hidden by

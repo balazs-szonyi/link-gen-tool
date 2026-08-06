@@ -391,26 +391,14 @@
     });
   }
 
-  function fillField(selector, text, findTimeoutMs, fieldLabel, log) {
-    function attempt(attemptsLeft) {
-      return waitForElement(selector, findTimeoutMs).then(function (el) {
-        if (!el) return fieldLabel + ' field not found';
-        var allMatches = deepQuerySelectorAll(selector);
-        if (allMatches.length > 1) {
-          log(fieldLabel + ' selector matched ' + allMatches.length + ' elements' +
-            (isVisible(el) ? ' - using the visible one.' : ' - none looked visible, using the first match (may be a hidden decoy field).'));
-        } else if (!isVisible(el)) {
-          log(fieldLabel + ' field found but not visible - filling it anyway, may not be the real field.');
-        }
-        return simulateTyping(el, text).then(function (result) {
-          if (result === 'ok') return 'ok';
-          log(fieldLabel + ' field ' + result + ' while typing' + (attemptsLeft > 0 ? ' - retrying...' : ' - giving up.'));
-          if (attemptsLeft > 0) return attempt(attemptsLeft - 1);
-          return fieldLabel + ' field ' + result;
-        });
-      });
+  function warnIfMultipleMatches(selector, matchedEl, fieldLabel, log) {
+    var allMatches = deepQuerySelectorAll(selector);
+    if (allMatches.length > 1) {
+      log(fieldLabel + ' selector matched ' + allMatches.length + ' elements' +
+        (isVisible(matchedEl) ? ' - using the visible one.' : ' - none looked visible, using the first match (may be a hidden decoy field).'));
+    } else if (!isVisible(matchedEl)) {
+      log(fieldLabel + ' field found but not visible - using it anyway, may not be the real field.');
     }
-    return attempt(1);
   }
 
   function watchForSubmitOutcome(loginPath, timeoutMs) {
@@ -422,6 +410,70 @@
         if (!stillOnLogin) { clearInterval(iv); resolve('navigated'); return; }
         if (Date.now() - start > timeoutMs) { clearInterval(iv); resolve('stuck'); }
       }, 300);
+    });
+  }
+
+  function centerOf(el) {
+    var r = el.getBoundingClientRect();
+    return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+  }
+
+  function clearFieldValue(el) {
+    if (!el || !el.value) return;
+    var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    nativeSetter.call(el, '');
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  // Ask the background service worker to run a chrome.debugger (CDP)
+  // input sequence - see background.js for why this exists (trusted
+  // input, unlike a content script's forgeable dispatchEvent/click(),
+  // isn't rejected by brands that gate their submit handler on
+  // event.isTrusted). Content scripts can't call chrome.debugger
+  // directly, hence the message round-trip.
+  function sendTrustedSequence(actions) {
+    return new Promise(function (resolve) {
+      try {
+        chrome.runtime.sendMessage({ type: 'lgt-trusted-sequence', actions: actions }, function (response) {
+          if (chrome.runtime.lastError) { resolve({ ok: false, error: chrome.runtime.lastError.message }); return; }
+          resolve(response || { ok: false, error: 'no response' });
+        });
+      } catch (e) {
+        resolve({ ok: false, error: String(e && e.message || e) });
+      }
+    });
+  }
+
+  // DOM-simulation fallback (the original bookmarklet-era approach) -
+  // only used if chrome.debugger couldn't attach (e.g. real DevTools is
+  // already attached to this tab, which blocks a second debugger client).
+  function domFallbackSubmit(userEl, username, passEl, password, submitEl, log) {
+    log('Trusted input unavailable - falling back to synthetic DOM events (may be rejected by this brand\'s fraud checks, same limitation the bookmarklet had).');
+    return simulateTyping(userEl, username).then(function (userResult) {
+      if (userResult !== 'ok') { log('Username field ' + userResult + ' while typing (fallback path). Log in manually.'); return false; }
+      return simulateTyping(passEl, password).then(function (passResult) {
+        if (passResult !== 'ok') { log('Password field ' + passResult + ' while typing (fallback path). Log in manually.'); return false; }
+        simulateClick(submitEl);
+        return true;
+      });
+    });
+  }
+
+  function trustedAutoLoginSubmit(userEl, username, passEl, password, submitEl, log) {
+    clearFieldValue(userEl);
+    clearFieldValue(passEl);
+    var uc = centerOf(userEl), pc = centerOf(passEl), sc = centerOf(submitEl);
+    var actions = [
+      { type: 'click', x: uc.x, y: uc.y },
+      { type: 'type', text: username },
+      { type: 'click', x: pc.x, y: pc.y },
+      { type: 'type', text: password },
+      { type: 'click', x: sc.x, y: sc.y }
+    ];
+    return sendTrustedSequence(actions).then(function (response) {
+      if (response && response.ok) return true;
+      log('Trusted input failed (' + (response && response.error || 'unknown reason') + ').');
+      return domFallbackSubmit(userEl, username, passEl, password, submitEl, log);
     });
   }
 
@@ -447,32 +499,36 @@
       return Promise.resolve(false);
     }
     log('Looking for username field...');
-    return fillField(sel.usernameSelector, username, 6000, 'Username', log).then(function (userResult) {
-      if (userResult !== 'ok') {
-        log('Stopped: ' + userResult + '. Log in manually - capture stays passive and automatic either way.');
+    return waitForElement(sel.usernameSelector, 6000).then(function (userEl) {
+      if (!userEl) {
+        log('Stopped: Username field not found. Log in manually - capture stays passive and automatic either way.');
         return false;
       }
-      log('Username filled. Looking for password field...');
-      return fillField(sel.passwordSelector, password, 4000, 'Password', log).then(function (passResult) {
-        if (passResult !== 'ok') {
-          log('Stopped: ' + passResult + '. Log in manually - capture stays passive and automatic either way.');
+      warnIfMultipleMatches(sel.usernameSelector, userEl, 'Username', log);
+      log('Username field found. Looking for password field...');
+      return waitForElement(sel.passwordSelector, 4000).then(function (passEl) {
+        if (!passEl) {
+          log('Stopped: Password field not found. Log in manually - capture stays passive and automatic either way.');
           return false;
         }
-        log('Password filled. Looking for submit button...');
+        warnIfMultipleMatches(sel.passwordSelector, passEl, 'Password', log);
+        log('Password field found. Looking for submit button...');
         return waitForElement(sel.submitSelector, 3000).then(function (submitEl) {
           if (!submitEl) {
-            log('Stopped: submit button not found. Log in manually - both fields are filled, just click Log In.');
+            log('Stopped: submit button not found. Fields located - click Log In yourself to finish.');
             return false;
           }
-          log('Submitting...');
-          simulateClick(submitEl);
-          return watchForSubmitOutcome(sel.loginPath, 4000).then(function (outcome) {
-            if (outcome === 'stuck') {
-              log('Both fields are filled, but still on the login page a few seconds after submitting - this site may be rejecting the synthetic click (known limitation on some brands). Click "Log In" yourself to finish.');
-            } else {
-              log('Submitted - navigated away from the login page. Capture keeps running automatically here.');
-            }
-            return true;
+          log('Filling fields and submitting with trusted input (you may briefly see a "started debugging this browser" banner - expected, it\'s what lets the click bypass isTrusted/fraud checks; it disappears on its own).');
+          return trustedAutoLoginSubmit(userEl, username, passEl, password, submitEl, log).then(function (submitted) {
+            if (!submitted) return false;
+            return watchForSubmitOutcome(sel.loginPath, 4000).then(function (outcome) {
+              if (outcome === 'stuck') {
+                log('Fields were filled and submit was clicked (via trusted input), but still on the login page a few seconds later - likely a real login rejection (wrong credential, captcha, etc), not a click-trust issue. Check manually.');
+              } else {
+                log('Submitted - navigated away from the login page. Capture keeps running automatically here.');
+              }
+              return true;
+            });
           });
         });
       });
