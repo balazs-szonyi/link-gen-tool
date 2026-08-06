@@ -29,7 +29,7 @@
   // VERSION convention) - it's shown in the panel title so a user can
   // confirm which build is actually running after reloading the
   // extension, instead of guessing whether a fix "took".
-  var VERSION = 'ext-v4-2026-08-06';
+  var VERSION = 'ext-v5-2026-08-06';
 
   if (window.__lgtExtInstance) {
     window.__lgtExtInstance.destroy();
@@ -753,8 +753,22 @@
         var linkEl = findSportsbookNavLink(pattern);
         if (linkEl) {
           var c = centerOf(linkEl);
-          sendTrustedSequence([{ type: 'click', x: c.x, y: c.y }]).then(function () {
-            resolve(awaitCapture());
+          // Reset any capture already stored for this origin right before
+          // clicking - Capture is keyed per-origin and persists
+          // indefinitely, so without this a STALE entry from earlier
+          // anonymous browsing on this same brand (very likely, since the
+          // extension passively captures on every page load) would be
+          // silently reported as "captured" below even if this specific
+          // login attempt actually failed or never reached a real
+          // logged-in state (confirmed 2026-08-06: a NordicBet live-login
+          // job reported success with an anonymous stc/ctx pair left over
+          // from a prior visit). Resetting here guarantees the value
+          // awaitCapture() reads afterward can only have come from this
+          // click's own Sportsbook navigation.
+          Capture.reset(function () {
+            sendTrustedSequence([{ type: 'click', x: c.x, y: c.y }]).then(function () {
+              resolve(awaitCapture());
+            });
           });
           return;
         }
@@ -820,7 +834,7 @@
                 return watchForSubmitOutcome(sel.loginPath, 3000).then(function (outcome2) {
                   if (outcome2 === 'stuck') {
                     log('Still on the login page - likely a real login rejection (wrong credential, captcha, etc) rather than a click-trust issue at this point. Check manually.');
-                    return true;
+                    return false;
                   }
                   log('Submitted via Enter key - navigated away from the login page. Heading to Sportsbook to complete capture...');
                   return navigateToSportsbookAndAwaitCapture(brandKey, log).then(function () { return true; });
@@ -1263,7 +1277,25 @@
             LiveLoginJob.update({ status: 'failed', error: 'No saved credential in the vault.' }, closeThisTab);
             return;
           }
-          attemptAutoLogin(job.brand, cred.username, cred.password, function (m) { console.log('[lgt-live-login]', m); }).then(function () {
+          attemptAutoLogin(job.brand, cred.username, cred.password, function (m) { console.log('[lgt-live-login]', m); }).then(function (loginOk) {
+            // loginOk === false means attemptAutoLogin never reached a
+            // confirmed logged-in state (missing fields/selectors, or -
+            // most notably - still stuck on the login page after both the
+            // direct submit and the Enter-key fallback, i.e. a real login
+            // rejection) and so never got as far as
+            // navigateToSportsbookAndAwaitCapture. Do NOT fall through to
+            // Capture.get() in that case: Capture is keyed per-origin and
+            // persists indefinitely, so it may still hold a stale entry
+            // from unrelated earlier browsing on this brand's domain that
+            // would otherwise be misreported as a successful capture
+            // (confirmed 2026-08-06 on NordicBet: a rejected login - most
+            // likely a credential saved for a different brand, since the
+            // vault has no per-brand association - still reported
+            // "captured" with a leftover anonymous stc/ctx pair).
+            if (!loginOk) {
+              LiveLoginJob.update({ status: 'failed', error: 'Auto-login did not complete (login was rejected, or required page elements were not found) - the vault\'s default credential may not be valid for this brand, or manual login may be required.' }, closeThisTab);
+              return;
+            }
             Capture.get(function (c) {
               if (c && c.stc && c.ctx) {
                 LiveLoginJob.update({ status: 'captured', stc: c.stc, ctx: c.ctx }, function () {
