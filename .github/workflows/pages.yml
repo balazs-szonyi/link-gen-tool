@@ -32,6 +32,10 @@ jobs:
       url: ${{ steps.deploy_retry.outputs.page_url || steps.deploy.outputs.page_url }}
     runs-on: ubuntu-latest
     needs: build
+    permissions:
+      pages: write
+      id-token: write
+      contents: read
     env:
       DEPLOY_TIMEOUT_MS: 1800000 # 30 minutes
     steps:
