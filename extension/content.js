@@ -29,7 +29,7 @@
   // VERSION convention) - it's shown in the panel title so a user can
   // confirm which build is actually running after reloading the
   // extension, instead of guessing whether a fix "took".
-  var VERSION = 'ext-v6-2026-08-06';
+  var VERSION = 'ext-v7-2026-08-06';
 
   if (window.__lgtExtInstance) {
     window.__lgtExtInstance.destroy();
@@ -487,6 +487,12 @@
   function deepQuerySelectorAll(selector, root, results) {
     root = root || document;
     results = results || [];
+    // If root itself is a shadow host (as opposed to document or a
+    // ShadowRoot), root.querySelectorAll only sees its LIGHT DOM
+    // children - its own shadow content has to be dived into explicitly.
+    // Needed for findSubmitNear's shadow-boundary-crossing walk, which
+    // can pass a shadow host directly as root.
+    if (root.shadowRoot) deepQuerySelectorAll(selector, root.shadowRoot, results);
     var found = root.querySelectorAll(selector);
     for (var j = 0; j < found.length; j++) results.push(found[j]);
     var all = root.querySelectorAll('*');
@@ -546,10 +552,24 @@
   // exactly like "fields filled, clicked, but nothing happens". Walking up
   // from the password field to find the smallest containing ancestor with
   // a visible match keeps the search inside the actual login form/modal.
+  //
+  // `.parentElement` alone stops dead at a shadow root's edge (returns
+  // null, since a ShadowRoot is not an Element) - some brands' entire
+  // login form lives inside one (confirmed 2026-08-06 on NordicBet, an
+  // open shadow root), so without crossing back out via
+  // `getRootNode().host` the walk would give up after just 1-2 levels
+  // even though the real submit button is a perfectly normal, nearby
+  // sibling within that same shadow root.
+  function stepUp(node) {
+    if (node.parentElement) return node.parentElement;
+    var root = node.getRootNode();
+    return (root && root.host) || null;
+  }
+
   function findSubmitNear(passEl, submitSelector, maxLevels) {
     var node = passEl;
     for (var i = 0; i < (maxLevels || 12) && node && node !== document.body; i++) {
-      node = node.parentElement;
+      node = stepUp(node);
       if (!node) break;
       var matches = deepQuerySelectorAll(submitSelector, node).filter(isVisible);
       if (matches.length) return matches[0];
@@ -661,7 +681,7 @@
   // validation, (2) once the button looks enabled, click it. If the click
   // doesn't lead anywhere, attemptAutoLogin retries with a trusted Enter
   // keypress in the password field as a button-independent fallback.
-  function trustedAutoLoginSubmit(userEl, username, passEl, password, submitEl, log) {
+  function trustedAutoLoginSubmit(userEl, username, passEl, password, submitEl, log, retried) {
     clearFieldValue(userEl);
     clearFieldValue(passEl);
     var uc = centerOf(userEl), pc = centerOf(passEl);
@@ -674,6 +694,19 @@
     ];
     return sendTrustedSequence(fillActions).then(function (response) {
       if (!response || !response.ok) {
+        // chrome.debugger can occasionally detach mid-sequence for
+        // reasons outside this extension's control (observed 2026-08-06
+        // on NordicBet: "Detached while handling command" partway
+        // through typing) - one retry (re-clearing both fields first, so
+        // characters aren't doubled up on top of a partial value) is far
+        // more likely to actually succeed than immediately giving up on
+        // trusted input, since the untrusted DOM fallback is known to be
+        // silently ignored by brands that gate their submit handler on
+        // event.isTrusted (the whole reason trusted input exists here).
+        if (!retried) {
+          log('Trusted input failed (' + (response && response.error || 'unknown reason') + ') - retrying once...');
+          return trustedAutoLoginSubmit(userEl, username, passEl, password, submitEl, log, true);
+        }
         log('Trusted input failed (' + (response && response.error || 'unknown reason') + ').');
         return domFallbackSubmit(userEl, username, passEl, password, submitEl, log);
       }
@@ -721,12 +754,19 @@
   function navigateToSportsbookAndAwaitCapture(brandKey, log) {
     var sel = LOGIN_SELECTORS[brandKey];
     var pattern = sel && sel.sportsbookNavPattern;
-    if (!pattern) {
-      log('No known Sportsbook nav link pattern for "' + brandKey + '" - click into the Sportsbook section yourself so stc/ctx capture can complete.');
-      return Promise.resolve(false);
-    }
 
-    function awaitCapture() {
+    // NOTE: Capture.reset() is NOT called in here (anymore) - it now
+    // happens once, earlier, right before the login submit is even
+    // attempted (see attemptAutoLogin/resumeLiveLoginJobIfPending). That
+    // fixed a real 2026-08-06 NordicBet bug: some brands' post-login
+    // landing page (e.g. NordicBet's plain "/en") IS ALREADY the
+    // authenticated Sportsbook lobby, so the real sb/fe-api/* request can
+    // fire and complete within moments of landing there - resetting here,
+    // right before an (in that case redundant/no-op) nav-link click,
+    // would silently wipe out that already-good capture, leaving nothing
+    // for awaitCapture() to find afterward even though login had
+    // genuinely succeeded.
+    function awaitCapture(budgetMs) {
       return new Promise(function (resolve) {
         var start = Date.now();
         (function poll() {
@@ -736,8 +776,7 @@
               resolve(true);
               return;
             }
-            if (Date.now() - start > 8000) {
-              log('Navigated to Sportsbook, but no stc/ctx captured yet - it may still be loading; check the Live Login tab.');
+            if (Date.now() - start > budgetMs) {
               resolve(false);
               return;
             }
@@ -748,37 +787,38 @@
     }
 
     return new Promise(function (resolve) {
-      var start = Date.now();
-      (function pollNav() {
-        var linkEl = findSportsbookNavLink(pattern);
-        if (linkEl) {
-          var c = centerOf(linkEl);
-          // Reset any capture already stored for this origin right before
-          // clicking - Capture is keyed per-origin and persists
-          // indefinitely, so without this a STALE entry from earlier
-          // anonymous browsing on this same brand (very likely, since the
-          // extension passively captures on every page load) would be
-          // silently reported as "captured" below even if this specific
-          // login attempt actually failed or never reached a real
-          // logged-in state (confirmed 2026-08-06: a NordicBet live-login
-          // job reported success with an anonymous stc/ctx pair left over
-          // from a prior visit). Resetting here guarantees the value
-          // awaitCapture() reads afterward can only have come from this
-          // click's own Sportsbook navigation.
-          Capture.reset(function () {
-            sendTrustedSequence([{ type: 'click', x: c.x, y: c.y }]).then(function () {
-              resolve(awaitCapture());
-            });
-          });
-          return;
-        }
-        if (Date.now() - start > 4000) {
-          log('Could not find a Sportsbook nav link to click - click into the Sportsbook section yourself so stc/ctx capture can complete.');
+      // Give the just-landed post-login page a short head start: for
+      // brands where that landing page already IS the Sportsbook section,
+      // no click is needed at all, and waiting for one would only risk
+      // missing the capture window.
+      awaitCapture(2500).then(function (already) {
+        if (already) return resolve(true);
+        if (!pattern) {
+          log('No known Sportsbook nav link pattern for "' + brandKey + '" - click into the Sportsbook section yourself so stc/ctx capture can complete.');
           resolve(false);
           return;
         }
-        setTimeout(pollNav, 200);
-      })();
+        var start = Date.now();
+        (function pollNav() {
+          var linkEl = findSportsbookNavLink(pattern);
+          if (linkEl) {
+            var c = centerOf(linkEl);
+            sendTrustedSequence([{ type: 'click', x: c.x, y: c.y }]).then(function () {
+              awaitCapture(8000).then(function (ok) {
+                if (!ok) log('Navigated to Sportsbook, but no stc/ctx captured yet - it may still be loading; check the Live Login tab.');
+                resolve(ok);
+              });
+            });
+            return;
+          }
+          if (Date.now() - start > 4000) {
+            log('Could not find a Sportsbook nav link to click - click into the Sportsbook section yourself so stc/ctx capture can complete.');
+            resolve(false);
+            return;
+          }
+          setTimeout(pollNav, 200);
+        })();
+      });
     });
   }
 
@@ -1285,38 +1325,58 @@
           // attached to the job itself).
           var steps = [];
           function log(m) { steps.push(m); console.log('[lgt-live-login]', m); }
-          attemptAutoLogin(job.brand, cred.username, cred.password, log).then(function (loginOk) {
-            // loginOk === false means attemptAutoLogin never reached a
-            // confirmed logged-in state (missing fields/selectors, or -
-            // most notably - still stuck on the login page after both the
-            // direct submit and the Enter-key fallback, i.e. a real login
-            // rejection) and so never got as far as
-            // navigateToSportsbookAndAwaitCapture. Do NOT fall through to
-            // Capture.get() in that case: Capture is keyed per-origin and
-            // persists indefinitely, so it may still hold a stale entry
-            // from unrelated earlier browsing on this brand's domain that
-            // would otherwise be misreported as a successful capture
-            // (confirmed 2026-08-06 on NordicBet: a rejected login - most
-            // likely a credential saved for a different brand, since the
-            // vault has no per-brand association - still reported
-            // "captured" with a leftover anonymous stc/ctx pair).
-            if (!loginOk) {
-              // Bring the tab into view (instead of closing it) so the
-              // user can actually see the real page state that caused the
-              // failure - a step-message string alone can't capture
-              // things like a captcha, cookie-consent overlay, or 2FA
-              // prompt that our automation doesn't account for.
-              LiveLoginJob.update({ status: 'failed', error: 'Auto-login did not complete. Steps: ' + steps.join(' > ') }, focusThisTab);
-              return;
-            }
-            Capture.get(function (c) {
-              if (c && c.stc && c.ctx) {
-                LiveLoginJob.update({ status: 'captured', stc: c.stc, ctx: c.ctx }, function () {
-                  LiveLoginCache.set(job.brand, job.environment, c.stc, c.ctx, closeThisTab);
-                });
-              } else {
-                LiveLoginJob.update({ status: 'failed', error: 'Login/Sportsbook navigation completed but no stc/ctx was captured. Steps: ' + steps.join(' > ') }, focusThisTab);
+          // Reset any capture already stored for this origin ONCE, right
+          // before the login attempt even starts - Capture is keyed
+          // per-origin and persists indefinitely, so without this a STALE
+          // entry from earlier anonymous browsing on this same brand
+          // (very likely, since the extension passively captures on
+          // every page load) would be silently reported as "captured"
+          // even if this specific login attempt actually failed
+          // (confirmed 2026-08-06 on NordicBet: reported success with a
+          // leftover anonymous stc/ctx pair). This must happen BEFORE
+          // login, not right before the later Sportsbook-nav-link click -
+          // some brands' post-login landing page (e.g. NordicBet's plain
+          // "/en") is ALREADY the authenticated Sportsbook lobby, so the
+          // real capture can complete within moments of landing there;
+          // resetting any later than this would risk wiping out that
+          // already-good capture before ever reading it (also confirmed
+          // 2026-08-06: a genuinely successful NordicBet login still
+          // reported "no stc/ctx captured" because of exactly this
+          // ordering bug).
+          Capture.reset(function () {
+            attemptAutoLogin(job.brand, cred.username, cred.password, log).then(function (loginOk) {
+              // loginOk === false means attemptAutoLogin never reached a
+              // confirmed logged-in state (missing fields/selectors, or -
+              // most notably - still stuck on the login page after both the
+              // direct submit and the Enter-key fallback, i.e. a real login
+              // rejection) and so never got as far as
+              // navigateToSportsbookAndAwaitCapture. Do NOT fall through to
+              // Capture.get() in that case: Capture is keyed per-origin and
+              // persists indefinitely, so it may still hold a stale entry
+              // from unrelated earlier browsing on this brand's domain that
+              // would otherwise be misreported as a successful capture
+              // (confirmed 2026-08-06 on NordicBet: a rejected login - most
+              // likely a credential saved for a different brand, since the
+              // vault has no per-brand association - still reported
+              // "captured" with a leftover anonymous stc/ctx pair).
+              if (!loginOk) {
+                // Bring the tab into view (instead of closing it) so the
+                // user can actually see the real page state that caused the
+                // failure - a step-message string alone can't capture
+                // things like a captcha, cookie-consent overlay, or 2FA
+                // prompt that our automation doesn't account for.
+                LiveLoginJob.update({ status: 'failed', error: 'Auto-login did not complete. Steps: ' + steps.join(' > ') }, focusThisTab);
+                return;
               }
+              Capture.get(function (c) {
+                if (c && c.stc && c.ctx) {
+                  LiveLoginJob.update({ status: 'captured', stc: c.stc, ctx: c.ctx }, function () {
+                    LiveLoginCache.set(job.brand, job.environment, c.stc, c.ctx, closeThisTab);
+                  });
+                } else {
+                  LiveLoginJob.update({ status: 'failed', error: 'Login/Sportsbook navigation completed but no stc/ctx was captured. Steps: ' + steps.join(' > ') }, focusThisTab);
+                }
+              });
             });
           });
         });
