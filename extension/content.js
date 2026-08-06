@@ -976,8 +976,14 @@
     // "Username field not found" failure where a follow-up screenshot
     // showed the field WAS present (and even auto-filled by Chrome's own
     // password manager) shortly after, implying the modal simply hadn't
-    // finished mounting yet on a slow alpha-environment page load.
-    return waitForElement(sel.usernameSelector, 15000).then(function (userEl) {
+    // finished mounting yet on a slow alpha-environment page load. Bumped
+    // again from 15000ms after a qa-environment failure the same day -
+    // NordicBet's qa login page loads an additional Group-IB
+    // fraud-detection iframe (eu.id.group-ib.com) not observed on alpha,
+    // which can meaningfully delay when the (deeply shadow-DOM-nested,
+    // depth 6+ observed) login widget actually mounts and becomes
+    // queryable.
+    return waitForElement(sel.usernameSelector, 25000).then(function (userEl) {
       if (!userEl) {
         log('Stopped: Username field not found. Log in manually - capture stays passive and automatic either way.');
         return false;
@@ -1484,6 +1490,18 @@
       if (!job || job.status !== 'starting') return;
       var detected = detectBrandAndEnv();
       if (!detected.brand || detected.brand !== job.brand) return;
+      // Defensive hardening: also require the environment to match, not
+      // just the brand. In practice this content-script instance only
+      // ever runs inside the background tab this job itself opened (at
+      // realLoginUrl(job.brand, job.environment)), so brand+environment
+      // should always already agree here - but requiring both explicitly
+      // removes any structural possibility of a same-brand,
+      // different-environment tab (e.g. an already-open alpha tab, while
+      // a qa job is starting) ever picking up a job meant for a different
+      // environment, which a user reported suspecting 2026-08-06 after
+      // starting a qa live-login while an alpha tab for the same brand
+      // happened to be in the foreground.
+      if (detected.environment !== job.environment) return;
       var sel = LOGIN_SELECTORS[job.brand];
       if (!sel || !sel.sportsbookNavPattern) {
         LiveLoginJob.update({ status: 'unsupported', error: 'Brand is not live-login-capable (missing login/Sportsbook-nav selectors).' }, focusThisTab);
