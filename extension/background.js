@@ -230,6 +230,29 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   return true;
 });
 
+// Brings the background tab to the front instead of closing it - used
+// when a live-login job fails, so the user can actually see what state
+// the real login page was left in (captcha, cookie-consent banner, 2FA
+// prompt, unexpected layout, etc.) instead of the tab silently vanishing
+// with only a generic error string to go on (added 2026-08-06 after a
+// NordicBet failure that couldn't otherwise be diagnosed remotely).
+chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+  if (!msg || msg.type !== 'lgt-focus-tab') return false;
+  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
+  chrome.tabs.update(sender.tab.id, { active: true }, function (tab) {
+    if (chrome.runtime.lastError) { sendResponse({ ok: false, error: chrome.runtime.lastError.message }); return; }
+    if (tab && tab.windowId != null) {
+      chrome.windows.update(tab.windowId, { focused: true }, function () {
+        void chrome.runtime.lastError;
+        sendResponse({ ok: true });
+      });
+      return;
+    }
+    sendResponse({ ok: true });
+  });
+  return true;
+});
+
 // Toolbar icon click toggles the panel in the active tab's content script.
 // The content script itself is always injected (document_idle, every page/
 // navigation) and always listening - it just keeps the panel hidden by

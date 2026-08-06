@@ -29,7 +29,7 @@
   // VERSION convention) - it's shown in the panel title so a user can
   // confirm which build is actually running after reloading the
   // extension, instead of guessing whether a fix "took".
-  var VERSION = 'ext-v5-2026-08-06';
+  var VERSION = 'ext-v6-2026-08-06';
 
   if (window.__lgtExtInstance) {
     window.__lgtExtInstance.destroy();
@@ -1005,7 +1005,7 @@
                   LiveLoginJob.clear();
                   settled = true;
                 } else if (job.status === 'failed' || job.status === 'unsupported') {
-                  log.textContent = 'Live login failed: ' + (job.error || job.status);
+                  log.textContent = 'Live login failed: ' + (job.error || job.status) + ' (the background tab was kept open and brought to the front so you can see what happened - close it manually when done)';
                   LiveLoginJob.clear();
                   settled = true;
                 }
@@ -1268,16 +1268,24 @@
       if (!detected.brand || detected.brand !== job.brand) return;
       var sel = LOGIN_SELECTORS[job.brand];
       if (!sel || !sel.sportsbookNavPattern) {
-        LiveLoginJob.update({ status: 'unsupported', error: 'Brand is not live-login-capable (missing login/Sportsbook-nav selectors).' }, closeThisTab);
+        LiveLoginJob.update({ status: 'unsupported', error: 'Brand is not live-login-capable (missing login/Sportsbook-nav selectors).' }, focusThisTab);
         return;
       }
       LiveLoginJob.update({ status: 'logging-in' }, function () {
         Vault.getDefault(function (cred) {
           if (!cred) {
-            LiveLoginJob.update({ status: 'failed', error: 'No saved credential in the vault.' }, closeThisTab);
+            LiveLoginJob.update({ status: 'failed', error: 'No saved credential in the vault.' }, focusThisTab);
             return;
           }
-          attemptAutoLogin(job.brand, cred.username, cred.password, function (m) { console.log('[lgt-live-login]', m); }).then(function (loginOk) {
+          // Collect every step message attemptAutoLogin/navigateToSportsbookAndAwaitCapture
+          // report along the way, so a failure surfaces exactly which
+          // step it got stuck on in the Generate tab (this job runs in an
+          // invisible background tab that auto-closes, so console.log
+          // alone is never actually seen by the user - it has to be
+          // attached to the job itself).
+          var steps = [];
+          function log(m) { steps.push(m); console.log('[lgt-live-login]', m); }
+          attemptAutoLogin(job.brand, cred.username, cred.password, log).then(function (loginOk) {
             // loginOk === false means attemptAutoLogin never reached a
             // confirmed logged-in state (missing fields/selectors, or -
             // most notably - still stuck on the login page after both the
@@ -1293,7 +1301,12 @@
             // vault has no per-brand association - still reported
             // "captured" with a leftover anonymous stc/ctx pair).
             if (!loginOk) {
-              LiveLoginJob.update({ status: 'failed', error: 'Auto-login did not complete (login was rejected, or required page elements were not found) - the vault\'s default credential may not be valid for this brand, or manual login may be required.' }, closeThisTab);
+              // Bring the tab into view (instead of closing it) so the
+              // user can actually see the real page state that caused the
+              // failure - a step-message string alone can't capture
+              // things like a captcha, cookie-consent overlay, or 2FA
+              // prompt that our automation doesn't account for.
+              LiveLoginJob.update({ status: 'failed', error: 'Auto-login did not complete. Steps: ' + steps.join(' > ') }, focusThisTab);
               return;
             }
             Capture.get(function (c) {
@@ -1302,7 +1315,7 @@
                   LiveLoginCache.set(job.brand, job.environment, c.stc, c.ctx, closeThisTab);
                 });
               } else {
-                LiveLoginJob.update({ status: 'failed', error: 'Login/Sportsbook navigation completed but no stc/ctx was captured.' }, closeThisTab);
+                LiveLoginJob.update({ status: 'failed', error: 'Login/Sportsbook navigation completed but no stc/ctx was captured. Steps: ' + steps.join(' > ') }, focusThisTab);
               }
             });
           });
@@ -1313,6 +1326,12 @@
 
   function closeThisTab() {
     chrome.runtime.sendMessage({ type: 'lgt-close-tab' }, function () {
+      void chrome.runtime.lastError; // ignore - nothing to do if this fails
+    });
+  }
+
+  function focusThisTab() {
+    chrome.runtime.sendMessage({ type: 'lgt-focus-tab' }, function () {
       void chrome.runtime.lastError; // ignore - nothing to do if this fails
     });
   }
