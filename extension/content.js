@@ -536,6 +536,37 @@
     });
   }
 
+  // Like waitForElement, but also races against the login page itself
+  // redirecting away before the form ever renders - some brands' login
+  // page checks for an existing valid session and immediately bounces to
+  // the logged-in homepage instead of showing the form at all (confirmed
+  // 2026-08-06 on NordicBet prod: a background tab opened at
+  // https://nordicbet.com/en/login while the browser already carried a
+  // valid prod session from earlier manual browsing landed on
+  // https://nordicbet.com/en, fully logged in, with the login form never
+  // appearing - waitForElement's plain timeout misreported this as
+  // "Username field not found" instead of recognizing it as an
+  // already-authenticated session that just needs the Sportsbook capture
+  // step, not a login at all). Resolves { alreadyLoggedIn: true } if the
+  // pathname stops containing loginPath before the field shows up,
+  // otherwise { field: <element-or-null> } exactly like waitForElement.
+  function waitForUsernameFieldOrAlreadyLoggedIn(sel, timeoutMs) {
+    return new Promise(function (resolve) {
+      var start = Date.now();
+      var lastSeen = null;
+      (function poll() {
+        var stillOnLogin = true;
+        try { stillOnLogin = location.pathname.indexOf(sel.loginPath) !== -1; } catch (e) {}
+        if (!stillOnLogin) return resolve({ alreadyLoggedIn: true });
+        var el = deepQuerySelector(sel.usernameSelector);
+        if (el) lastSeen = el;
+        if (el && isVisible(el)) return resolve({ field: el });
+        if (Date.now() - start > timeoutMs) return resolve({ field: lastSeen });
+        setTimeout(poll, 150);
+      })();
+    });
+  }
+
   function warnIfMultipleMatches(selector, matchedEl, fieldLabel, log) {
     var allMatches = deepQuerySelectorAll(selector);
     if (allMatches.length > 1) {
@@ -983,7 +1014,12 @@
     // which can meaningfully delay when the (deeply shadow-DOM-nested,
     // depth 6+ observed) login widget actually mounts and becomes
     // queryable.
-    return waitForElement(sel.usernameSelector, 25000).then(function (userEl) {
+    return waitForUsernameFieldOrAlreadyLoggedIn(sel, 25000).then(function (result) {
+      if (result.alreadyLoggedIn) {
+        log('Already logged in (redirected away from the login page before any form appeared, most likely because a valid session already existed here from earlier browsing) - skipping straight to Sportsbook capture.');
+        return navigateToSportsbookAndAwaitCapture(brandKey, log).then(function () { return true; });
+      }
+      var userEl = result.field;
       if (!userEl) {
         log('Stopped: Username field not found. Log in manually - capture stays passive and automatic either way.');
         return false;
