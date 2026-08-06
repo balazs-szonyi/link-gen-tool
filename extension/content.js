@@ -401,6 +401,26 @@
     }
   }
 
+  // The generic submitSelector (e.g. `button[type="submit"]`) can match
+  // MORE than just the login button when the login form is a modal/dialog
+  // overlaid on top of a page that has its own unrelated submit buttons
+  // (e.g. a "Deposit" button on the page behind the login modal) - those
+  // stay technically visible (not display:none, just visually dimmed by
+  // an overlay) so a page-wide search can pick the wrong one, which looks
+  // exactly like "fields filled, clicked, but nothing happens". Walking up
+  // from the password field to find the smallest containing ancestor with
+  // a visible match keeps the search inside the actual login form/modal.
+  function findSubmitNear(passEl, submitSelector, maxLevels) {
+    var node = passEl;
+    for (var i = 0; i < (maxLevels || 12) && node && node !== document.body; i++) {
+      node = node.parentElement;
+      if (!node) break;
+      var matches = deepQuerySelectorAll(submitSelector, node).filter(isVisible);
+      if (matches.length) return matches[0];
+    }
+    return null;
+  }
+
   function watchForSubmitOutcome(loginPath, timeoutMs) {
     return new Promise(function (resolve) {
       var start = Date.now();
@@ -513,7 +533,12 @@
         }
         warnIfMultipleMatches(sel.passwordSelector, passEl, 'Password', log);
         log('Password field found. Looking for submit button...');
-        return waitForElement(sel.submitSelector, 3000).then(function (submitEl) {
+        var scopedSubmit = findSubmitNear(passEl, sel.submitSelector);
+        var submitPromise = scopedSubmit ? Promise.resolve(scopedSubmit) : waitForElement(sel.submitSelector, 3000);
+        if (!scopedSubmit) {
+          log('No submit button found near the password field (unusual) - falling back to a page-wide search, which risks matching an unrelated button.');
+        }
+        return submitPromise.then(function (submitEl) {
           if (!submitEl) {
             log('Stopped: submit button not found. Fields located - click Log In yourself to finish.');
             return false;
