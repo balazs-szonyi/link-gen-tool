@@ -1030,7 +1030,21 @@
     // which can meaningfully delay when the (deeply shadow-DOM-nested,
     // depth 6+ observed) login widget actually mounts and becomes
     // queryable.
+    // Even 25000ms occasionally isn't enough - reported 2026-08-06 as an
+    // INTERMITTENT failure (works most of the time, dies occasionally),
+    // consistent with the Group-IB iframe delay above being variable
+    // (network/server load dependent) rather than a hard "never mounts"
+    // case. Rather than pushing the single timeout even higher (which
+    // delays every real "not supported here" case too), give the page one
+    // more, shorter, second chance below - re-running the cookie-banner
+    // dismissal too, in case a banner appeared only after the first wait
+    // elapsed and was itself blocking the modal.
     return waitForUsernameFieldOrAlreadyLoggedIn(sel, 25000).then(function (result) {
+      if (result.alreadyLoggedIn || result.field) return result;
+      log('Still waiting for the username field (this environment can be slow to mount the login form) - trying a bit longer...');
+      tryDismissCookieBanner(log);
+      return waitForUsernameFieldOrAlreadyLoggedIn(sel, 15000);
+    }).then(function (result) {
       if (result.alreadyLoggedIn) {
         log('Already logged in (redirected away from the login page before any form appeared, most likely because a valid session already existed here from earlier browsing) - skipping straight to Sportsbook capture.');
         return navigateToSportsbookAndAwaitCapture(brandKey, log).then(function () { return true; });
