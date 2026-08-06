@@ -253,6 +253,123 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   return true;
 });
 
+// ---------------------------------------------------------------------
+// "Embed here" - strips the response headers that block cross-origin
+// framing so a generated (often BLE-sourced) playground link can be
+// shown inside the CURRENT real brand tab as an iframe, instead of only
+// opening in a separate tab.
+//
+// Why this exists: the standalone playground host (d-cf.{env}.{brand}
+// playground.net - the only place bleSource=1 + arbitrary stc/ctx
+// actually renders) sends X-Frame-Options: SAMEORIGIN on its responses -
+// a hard, browser-enforced anti-framing block confirmed via direct
+// response-header inspection. No DOM/CSS/JS trick from a content script
+// can work around that.
+//
+// An earlier version of this feature tried to strip the header via
+// chrome.debugger + CDP's Fetch domain (the same mechanism already used
+// above for the trusted-click bypass) - that turned out NOT to work:
+// Fetch.continueResponse happily reports success and the modified
+// headers ARE what a page's own JS would see via fetch()/XHR, but
+// Chrome's actual X-Frame-Options/CSP frame-ancestors *enforcement* for
+// a navigation happens at a lower layer that CDP's Fetch domain cannot
+// override - confirmed by a real-extension test where the header was
+// verifiably stripped in the intercepted event yet the iframe still
+// landed on chrome-error://chromewebdata/.
+//
+// declarativeNetRequest's modifyHeaders action, however, operates
+// earlier in the network stack (before that enforcement check) and is
+// the officially supported MV3 mechanism for this - confirmed working
+// via the same real-extension test harness. As a bonus it needs no
+// chrome.debugger attach at all, so there's no persistent "started
+// debugging this browser" banner for this feature (unlike the
+// login-automation trusted-click feature above, which still needs CDP
+// for isTrusted input and keeps that trade-off).
+//
+// The rule is scoped as tightly as possible: session-only (never
+// persisted), restricted to sub_frame requests, restricted to the exact
+// target origin, and restricted via the `tabIds` condition to the one
+// tab the user actually clicked "Embed here" in - it does not affect any
+// other tab or any other site.
+// ---------------------------------------------------------------------
+
+var EMBED_RULE_ID_START = 900001;
+var embedRuleIdCounter = EMBED_RULE_ID_START;
+var embedRuleIdByTab = {}; // tabId -> ruleId
+
+function startEmbedRule(tabId, origin) {
+  var ruleId = ++embedRuleIdCounter;
+  return new Promise(function (resolve, reject) {
+    chrome.declarativeNetRequest.updateSessionRules({
+      addRules: [{
+        id: ruleId,
+        priority: 1,
+        action: {
+          type: 'modifyHeaders',
+          responseHeaders: [
+            { header: 'x-frame-options', operation: 'remove' },
+            { header: 'content-security-policy', operation: 'remove' }
+          ]
+        },
+        condition: {
+          urlFilter: origin + '/*',
+          resourceTypes: ['sub_frame'],
+          tabIds: [tabId]
+        }
+      }],
+      removeRuleIds: []
+    }, function () {
+      if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
+      embedRuleIdByTab[tabId] = ruleId;
+      resolve();
+    });
+  });
+}
+
+function stopEmbedRule(tabId) {
+  var ruleId = embedRuleIdByTab[tabId];
+  if (!ruleId) return Promise.resolve();
+  delete embedRuleIdByTab[tabId];
+  return new Promise(function (resolve) {
+    chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [ruleId] }, function () {
+      void chrome.runtime.lastError; // ignore - rule may already be gone
+      resolve();
+    });
+  });
+}
+
+chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+  if (!msg || msg.type !== 'lgt-embed-start') return false;
+  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
+  var tabId = sender.tab.id;
+  var origin = msg.origin;
+  if (!origin) { sendResponse({ ok: false, error: 'no origin' }); return false; }
+  stopEmbedRule(tabId).then(function () { return startEmbedRule(tabId, origin); }).then(function () {
+    sendResponse({ ok: true });
+  }).catch(function (err) {
+    sendResponse({ ok: false, error: String(err && err.message || err) });
+  });
+  return true;
+});
+
+chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+  if (!msg || msg.type !== 'lgt-embed-stop') return false;
+  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
+  stopEmbedRule(sender.tab.id).then(function () { sendResponse({ ok: true }); });
+  return true;
+});
+
+// Safety net - never leave a header-stripping rule behind on a closed or
+// navigated-away-from tab (session rules already vanish on browser
+// restart, but a long-lived tab reused for other browsing later
+// shouldn't keep silently stripping these headers for that origin).
+chrome.tabs.onRemoved.addListener(function (tabId) {
+  stopEmbedRule(tabId);
+});
+chrome.tabs.onUpdated.addListener(function (tabId, changeInfo) {
+  if (changeInfo.status === 'loading' && embedRuleIdByTab[tabId]) stopEmbedRule(tabId);
+});
+
 // Toolbar icon click toggles the panel in the active tab's content script.
 // The content script itself is always injected (document_idle, every page/
 // navigation) and always listening - it just keeps the panel hidden by

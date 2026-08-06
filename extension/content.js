@@ -1182,8 +1182,8 @@
           log.textContent = 'Customer: ' + links.customerLabel;
           result.style.display = '';
           result.innerHTML = '';
-          result.appendChild(renderLinkRow('Desktop', links.desktop));
-          result.appendChild(renderLinkRow('Mobile', links.mobile));
+          result.appendChild(renderLinkRow('Desktop', links.desktop, brand));
+          result.appendChild(renderLinkRow('Mobile', links.mobile, brand));
         }
 
         // BLE source (?bleSource=1) only makes sense together with a
@@ -1212,8 +1212,8 @@
             if (bleSourceWanted) {
               log.textContent += ' (BLE source applied: logged in for real on prod - prod always serves live BLE events - rendered on the ' + environment + ' frontend with bleSource=1.)';
             }
-            result.appendChild(renderLinkRow('Desktop (live-login' + (bleSourceWanted ? ' + BLE' : '') + ')', d));
-            result.appendChild(renderLinkRow('Mobile (live-login' + (bleSourceWanted ? ' + BLE' : '') + ')', m));
+            result.appendChild(renderLinkRow('Desktop (live-login' + (bleSourceWanted ? ' + BLE' : '') + ')', d, brand));
+            result.appendChild(renderLinkRow('Mobile (live-login' + (bleSourceWanted ? ' + BLE' : '') + ')', m, brand));
           }).catch(function (err) {
             log.textContent = 'Error building final link: ' + err.message;
           });
@@ -1347,7 +1347,52 @@
     return wrap;
   }
 
-  function renderLinkRow(label, link) {
+  // ---------------------------------------------------------------------
+  // "Embed here" - loads a generated link inside THIS tab as an overlay
+  // iframe instead of only opening it in a separate tab. Only offered
+  // when this tab's own detected brand matches the link's brand (embedding
+  // only makes sense on that brand's own real site). See background.js's
+  // lgt-embed-start/-stop for the CDP Fetch-domain mechanism that makes
+  // this possible at all - the playground host normally refuses to be
+  // framed by any other origin (X-Frame-Options: SAMEORIGIN, confirmed by
+  // direct investigation), which this feature works around on purpose.
+  // ---------------------------------------------------------------------
+
+  var embedOverlay = null;
+
+  function stopEmbed() {
+    if (embedOverlay) { embedOverlay.remove(); embedOverlay = null; }
+    chrome.runtime.sendMessage({ type: 'lgt-embed-stop' }, function () { void chrome.runtime.lastError; });
+  }
+
+  function startEmbed(link) {
+    stopEmbed(); // only one embed at a time
+    var origin;
+    try { origin = new URL(link).origin; } catch (e) { alert('Could not parse link origin.'); return; }
+    chrome.runtime.sendMessage({ type: 'lgt-embed-start', origin: origin }, function (response) {
+      void chrome.runtime.lastError;
+      if (!response || !response.ok) {
+        alert('Could not start embedding: ' + (response && response.error || 'unknown error'));
+        return;
+      }
+      var note = el('div', {
+        style: 'padding:6px 10px;background:#3a2a00;color:#ffcf80;font:12px/1.4 sans-serif;flex:none'
+      }, ['This deliberately strips this specific response\'s frame-protection header for this tab only, so it can be shown here instead of in its own tab. Click "Stop embedding" (or reload the page) when done.']);
+      var closeBtn = el('button', { class: 'secondary', onclick: stopEmbed }, ['Stop embedding']);
+      var header = el('div', { style: 'display:flex;align-items:center;gap:10px;padding:6px 10px;background:#1c2233;flex:none' }, [
+        el('div', { style: 'flex:1;color:#f6f7fb;font:12px sans-serif' }, ['Embedded (Link Gen Tool)']),
+        closeBtn
+      ]);
+      var iframe = el('iframe', { src: link, style: 'flex:1;width:100%;border:0;background:#fff' });
+      embedOverlay = el('div', {
+        style: 'position:fixed;top:5vh;left:5vw;width:90vw;height:88vh;display:flex;flex-direction:column;' +
+          'background:#101320;z-index:2147483000;box-shadow:0 8px 40px rgba(0,0,0,.6);border-radius:8px;overflow:hidden'
+      }, [header, note, iframe]);
+      (document.body || document.documentElement).appendChild(embedOverlay);
+    });
+  }
+
+  function renderLinkRow(label, link, brand) {
     var row = el('div', { style: 'margin-bottom:6px' });
     row.appendChild(el('div', { style: 'color:#9aa3b8' }, [label]));
     var linkText = el('div', {}, [link || '(not available)']);
@@ -1358,6 +1403,11 @@
           navigator.clipboard.writeText(link);
         }
       }, ['Copy ' + label]));
+      if (brand && detectBrandAndEnv().brand === brand) {
+        row.appendChild(el('button', {
+          class: 'secondary', style: 'margin-left:6px', onclick: function () { startEmbed(link); }
+        }, ['Embed here']));
+      }
     }
     return row;
   }
@@ -1417,8 +1467,8 @@
       generateLink({ brand: detected.brand, environment: detected.environment, loggedIn: false }).then(function (links) {
         result.style.display = '';
         result.innerHTML = '';
-        result.appendChild(renderLinkRow('Desktop', spliceContext(links.desktop, c.stc, c.ctx)));
-        result.appendChild(renderLinkRow('Mobile', spliceContext(links.mobile, c.stc, c.ctx)));
+        result.appendChild(renderLinkRow('Desktop', spliceContext(links.desktop, c.stc, c.ctx), detected.brand));
+        result.appendChild(renderLinkRow('Mobile', spliceContext(links.mobile, c.stc, c.ctx), detected.brand));
         status.textContent = 'Done.';
       }).catch(function (err) { status.textContent = 'Error: ' + err.message; });
     }
