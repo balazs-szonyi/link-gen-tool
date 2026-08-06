@@ -127,15 +127,53 @@ function trustedClick(tabId, x, y) {
     .then(function () { return sendDebuggerCommand(tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: x, y: y, button: 'left', clickCount: 1 }); });
 }
 
+// 'rawKeyDown' (not 'keyDown') for the down-event is deliberate: CDP's
+// 'keyDown' type ALSO performs character insertion when a `text` payload
+// is set, so pairing it with a following 'char' event (which inserts the
+// same character again) silently double-types every character - this was
+// a real, previously-undetected bug here: credentials were typed as e.g.
+// "tteesstteerr@@..." instead of "tester@...", so the real site correctly
+// rejected the (garbled) login while every local fixture test - which
+// only checked the fields were non-empty, not their exact value - kept
+// passing. 'rawKeyDown' dispatches the physical key-down without
+// inserting anything, leaving the 'char' event as the single source of
+// the actual character insertion (the CDP-documented pattern for typing).
 function trustedType(tabId, text) {
   var chars = String(text || '').split('');
   return chars.reduce(function (chain, ch) {
     return chain
-      .then(function () { return sendDebuggerCommand(tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', text: ch, unmodifiedText: ch, key: ch }); })
+      .then(function () { return sendDebuggerCommand(tabId, 'Input.dispatchKeyEvent', { type: 'rawKeyDown', text: ch, unmodifiedText: ch, key: ch }); })
       .then(function () { return sendDebuggerCommand(tabId, 'Input.dispatchKeyEvent', { type: 'char', text: ch }); })
       .then(function () { return sendDebuggerCommand(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', text: ch, unmodifiedText: ch, key: ch }); })
       .then(function () { return sleep(10 + Math.random() * 25); });
   }, Promise.resolve());
+}
+
+// Named (non-character) keys - Tab to blur a field and let any on-blur
+// validation/debounce run, Enter as a submit fallback that doesn't
+// depend on locating the right button at all (most login forms submit
+// their enclosing <form> on Enter inside a text/password field).
+//
+// Enter needs `type: 'keyDown'` plus a `text`/`unmodifiedText` of '\r'
+// (not the char-less 'rawKeyDown' used for e.g. Tab) - that's what
+// actually drives Blink's native "Enter submits the form" default
+// action; a bare rawKeyDown with no text is a real keypress but doesn't
+// reliably trigger implicit form submission the way a genuine keyboard
+// Enter (or Playwright's own page.keyboard.press('Enter')) does.
+var NAMED_KEYS = {
+  Tab: { key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, downType: 'rawKeyDown' },
+  Enter: { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, text: '\r', unmodifiedText: '\r', downType: 'keyDown' }
+};
+
+function trustedKey(tabId, keyName) {
+  var k = NAMED_KEYS[keyName];
+  if (!k) return Promise.resolve();
+  var downType = k.downType || 'rawKeyDown';
+  var payload = { key: k.key, code: k.code, windowsVirtualKeyCode: k.windowsVirtualKeyCode, nativeVirtualKeyCode: k.nativeVirtualKeyCode, text: k.text, unmodifiedText: k.unmodifiedText };
+  var down = Object.assign({ type: downType }, payload);
+  var up = Object.assign({ type: 'keyUp' }, payload);
+  return sendDebuggerCommand(tabId, 'Input.dispatchKeyEvent', down)
+    .then(function () { return sendDebuggerCommand(tabId, 'Input.dispatchKeyEvent', up); });
 }
 
 function runTrustedSequence(tabId, actions) {
@@ -145,6 +183,7 @@ function runTrustedSequence(tabId, actions) {
       chain = chain.then(function () {
         if (action.type === 'click') return trustedClick(tabId, action.x, action.y);
         if (action.type === 'type') return trustedType(tabId, action.text);
+        if (action.type === 'key') return trustedKey(tabId, action.key);
         return Promise.resolve();
       }).then(function () { return sleep(action.delayAfter || 80); });
     });

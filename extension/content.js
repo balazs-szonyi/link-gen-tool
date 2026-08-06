@@ -25,7 +25,11 @@
 (function () {
   'use strict';
 
-  var VERSION = 'ext-v1-2026-08-05';
+  // Bump this on every content.js change (mirrors the bookmarklet's
+  // VERSION convention) - it's shown in the panel title so a user can
+  // confirm which build is actually running after reloading the
+  // extension, instead of guessing whether a fix "took".
+  var VERSION = 'ext-v3-2026-08-06';
 
   if (window.__lgtExtInstance) {
     window.__lgtExtInstance.destroy();
@@ -479,21 +483,77 @@
     });
   }
 
+  function isDisabled(el) {
+    if (!el) return true;
+    if (el.disabled) return true;
+    if (el.getAttribute('aria-disabled') === 'true') return true;
+    if (el.hasAttribute('disabled')) return true;
+    return false;
+  }
+
+  // Some forms only enable the submit button after an on-blur validation
+  // pass (debounced), which a straight type-then-click sequence can
+  // outrun - the click lands on a still-disabled button and silently
+  // does nothing (no isTrusted issue at all, just a timing race with the
+  // form's own validation). Poll briefly rather than clicking immediately.
+  function waitForEnabled(el, timeoutMs) {
+    return new Promise(function (resolve) {
+      var start = Date.now();
+      (function poll() {
+        if (!isDisabled(el)) return resolve(true);
+        if (Date.now() - start > timeoutMs) return resolve(false);
+        setTimeout(poll, 100);
+      })();
+    });
+  }
+
+  // Two round trips to the background's chrome.debugger session, split
+  // so this content script can poll the (plain, non-trusted-input-
+  // requiring) `disabled` state of the submit button in between: (1) type
+  // both fields and Tab out of the password field to trigger any on-blur
+  // validation, (2) once the button looks enabled, click it. If the click
+  // doesn't lead anywhere, attemptAutoLogin retries with a trusted Enter
+  // keypress in the password field as a button-independent fallback.
   function trustedAutoLoginSubmit(userEl, username, passEl, password, submitEl, log) {
     clearFieldValue(userEl);
     clearFieldValue(passEl);
-    var uc = centerOf(userEl), pc = centerOf(passEl), sc = centerOf(submitEl);
-    var actions = [
+    var uc = centerOf(userEl), pc = centerOf(passEl);
+    var fillActions = [
       { type: 'click', x: uc.x, y: uc.y },
       { type: 'type', text: username },
       { type: 'click', x: pc.x, y: pc.y },
       { type: 'type', text: password },
-      { type: 'click', x: sc.x, y: sc.y }
+      { type: 'key', key: 'Tab' }
     ];
-    return sendTrustedSequence(actions).then(function (response) {
-      if (response && response.ok) return true;
-      log('Trusted input failed (' + (response && response.error || 'unknown reason') + ').');
-      return domFallbackSubmit(userEl, username, passEl, password, submitEl, log);
+    return sendTrustedSequence(fillActions).then(function (response) {
+      if (!response || !response.ok) {
+        log('Trusted input failed (' + (response && response.error || 'unknown reason') + ').');
+        return domFallbackSubmit(userEl, username, passEl, password, submitEl, log);
+      }
+      return waitForEnabled(submitEl, 3000).then(function (enabled) {
+        if (!enabled) log('Submit button still looks disabled after filling both fields - clicking anyway (may be a false read on a custom component).');
+        var sc = centerOf(submitEl);
+        return sendTrustedSequence([{ type: 'click', x: sc.x, y: sc.y }]).then(function (clickResponse) {
+          if (clickResponse && clickResponse.ok) return true;
+          log('Trusted submit click failed (' + (clickResponse && clickResponse.error || 'unknown reason') + ').');
+          return domFallbackSubmit(userEl, username, passEl, password, submitEl, log);
+        });
+      });
+    });
+  }
+
+  // Button-independent fallback: press Enter while focused in the
+  // password field, which most login forms treat as "submit the
+  // enclosing form" regardless of whether our submitSelector guess
+  // found (or clicked) the actual right element.
+  function trustedEnterKeySubmit(passEl, log) {
+    var pc = centerOf(passEl);
+    return sendTrustedSequence([{ type: 'click', x: pc.x, y: pc.y }, { type: 'key', key: 'Enter' }]).then(function (response) {
+      if (!response || !response.ok) {
+        log('Enter-key submit fallback failed (' + (response && response.error || 'unknown reason') + ').');
+        return false;
+      }
+      return true;
     });
   }
 
@@ -547,12 +607,21 @@
           return trustedAutoLoginSubmit(userEl, username, passEl, password, submitEl, log).then(function (submitted) {
             if (!submitted) return false;
             return watchForSubmitOutcome(sel.loginPath, 4000).then(function (outcome) {
-              if (outcome === 'stuck') {
-                log('Fields were filled and submit was clicked (via trusted input), but still on the login page a few seconds later - likely a real login rejection (wrong credential, captcha, etc), not a click-trust issue. Check manually.');
-              } else {
+              if (outcome !== 'stuck') {
                 log('Submitted - navigated away from the login page. Capture keeps running automatically here.');
+                return true;
               }
-              return true;
+              log('Still on the login page after clicking submit - trying a trusted Enter keypress in the password field as a button-independent fallback...');
+              return trustedEnterKeySubmit(passEl, log).then(function () {
+                return watchForSubmitOutcome(sel.loginPath, 3000).then(function (outcome2) {
+                  if (outcome2 === 'stuck') {
+                    log('Still on the login page - likely a real login rejection (wrong credential, captcha, etc) rather than a click-trust issue at this point. Check manually.');
+                  } else {
+                    log('Submitted via Enter key - navigated away from the login page. Capture keeps running automatically here.');
+                  }
+                  return true;
+                });
+              });
             });
           });
         });
