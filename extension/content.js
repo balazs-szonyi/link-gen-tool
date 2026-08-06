@@ -29,7 +29,7 @@
   // VERSION convention) - it's shown in the panel title so a user can
   // confirm which build is actually running after reloading the
   // extension, instead of guessing whether a fix "took".
-  var VERSION = 'ext-v7-2026-08-06';
+  var VERSION = 'ext-v8-2026-08-06';
 
   if (window.__lgtExtInstance) {
     window.__lgtExtInstance.destroy();
@@ -616,6 +616,71 @@
     el.dispatchEvent(new Event('input', { bubbles: true }));
   }
 
+  // document.activeElement stops at the first shadow host - the actually
+  // focused element can be several shadow roots deeper (confirmed on
+  // NordicBet's FDS-INPUT web components). Needed to verify a trusted
+  // click really landed on our target field rather than something else
+  // entirely (observed once in real testing 2026-08-06: a click aimed at
+  // the username field's coordinates instead focused an unrelated
+  // cookie-consent-banner button, so the subsequently-typed username went
+  // nowhere while the login form stayed empty - no CDP error was raised
+  // anywhere in that chain, since strictly speaking every dispatched
+  // event succeeded, it just didn't hit the element we intended).
+  function activeElementDeep() {
+    var el = document.activeElement;
+    while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement;
+    return el;
+  }
+
+  // A login modal that's still animating in (slide/fade transition) can
+  // report a getBoundingClientRect() that doesn't match where it'll
+  // actually be a moment later, so a click computed against it can land
+  // on whatever's underneath instead (another real, observed cause of
+  // "typed text goes nowhere" alongside the cookie-banner case above).
+  // Poll until two consecutive reads agree before trusting the rect.
+  function waitForStableRect(elGetter, timeoutMs) {
+    return new Promise(function (resolve) {
+      var start = Date.now();
+      var last = null;
+      (function poll() {
+        var el = elGetter();
+        if (!el) { resolve(null); return; }
+        var r = el.getBoundingClientRect();
+        var cur = r.left + ',' + r.top + ',' + r.width + ',' + r.height;
+        if (last === cur) { resolve(el); return; }
+        last = cur;
+        if (Date.now() - start > timeoutMs) { resolve(el); return; }
+        setTimeout(poll, 120);
+      })();
+    });
+  }
+
+  // Clicks a field via trusted CDP input, then verifies (from the content
+  // script, which - unlike background.js - can read document.activeElement
+  // across shadow roots) that focus actually landed on that field before
+  // typing into it. Retries the click once (after a short wait, in case
+  // something was still settling/animating) if focus missed - this is
+  // what actually catches and self-heals the "click landed on an
+  // unrelated element" failure mode instead of silently typing into the
+  // void.
+  function clickFieldAndVerifyFocus(el, fieldLabel, log) {
+    function attempt(retriesLeft) {
+      var c = centerOf(el);
+      return sendTrustedSequence([{ type: 'click', x: c.x, y: c.y }]).then(function (response) {
+        if (!response || !response.ok) return { ok: false, error: response && response.error };
+        return new Promise(function (resolve) { setTimeout(resolve, 120); }).then(function () {
+          if (activeElementDeep() === el) return { ok: true };
+          if (retriesLeft > 0) {
+            log(fieldLabel + ' click landed on an unrelated element instead of the field (possibly a cookie banner or an animating overlay) - retrying...');
+            return new Promise(function (resolve) { setTimeout(resolve, 250); }).then(function () { return attempt(retriesLeft - 1); });
+          }
+          return { ok: false, error: 'focus did not land on ' + fieldLabel + ' field after retrying' };
+        });
+      });
+    }
+    return attempt(1);
+  }
+
   // Ask the background service worker to run a chrome.debugger (CDP)
   // input sequence - see background.js for why this exists (trusted
   // input, unlike a content script's forgeable dispatchEvent/click(),
@@ -674,6 +739,31 @@
     });
   }
 
+  // Clicks a field (verifying focus actually lands there - see
+  // clickFieldAndVerifyFocus), types into it via trusted CDP input, then
+  // verifies the field's actual value matches what we intended before
+  // moving on. Retries the whole click+type once if the value doesn't
+  // match (re-clearing first) - catches cases where focus landed
+  // correctly but e.g. the field's own JS reset/reformatted the value
+  // mid-type, in addition to the focus-miss case already handled by
+  // clickFieldAndVerifyFocus.
+  function fillFieldVerified(el, text, fieldLabel, log, retriesLeft) {
+    if (retriesLeft == null) retriesLeft = 1;
+    return clickFieldAndVerifyFocus(el, fieldLabel, log).then(function (clickResult) {
+      if (!clickResult.ok) return clickResult;
+      return sendTrustedSequence([{ type: 'type', text: text }]).then(function (typeResponse) {
+        if (!typeResponse || !typeResponse.ok) return { ok: false, error: typeResponse && typeResponse.error };
+        if (el.value === text) return { ok: true };
+        if (retriesLeft > 0) {
+          log(fieldLabel + ' field value didn\'t match what was typed (got ' + JSON.stringify(el.value) + ') - clearing and retrying...');
+          clearFieldValue(el);
+          return fillFieldVerified(el, text, fieldLabel, log, retriesLeft - 1);
+        }
+        return { ok: false, error: fieldLabel + ' field value still doesn\'t match after retrying (got ' + JSON.stringify(el.value) + ')' };
+      });
+    });
+  }
+
   // Two round trips to the background's chrome.debugger session, split
   // so this content script can poll the (plain, non-trusted-input-
   // requiring) `disabled` state of the submit button in between: (1) type
@@ -684,23 +774,30 @@
   function trustedAutoLoginSubmit(userEl, username, passEl, password, submitEl, log, retried) {
     clearFieldValue(userEl);
     clearFieldValue(passEl);
-    var uc = centerOf(userEl), pc = centerOf(passEl);
-    var fillActions = [
-      { type: 'click', x: uc.x, y: uc.y },
-      { type: 'type', text: username },
-      { type: 'click', x: pc.x, y: pc.y },
-      { type: 'type', text: password },
-      { type: 'key', key: 'Tab' }
-    ];
-    return sendTrustedSequence(fillActions).then(function (response) {
+    return waitForStableRect(function () { return userEl; }, 800).then(function () {
+      return fillFieldVerified(userEl, username, 'Username', log);
+    }).then(function (userResult) {
+      if (!userResult.ok) return { ok: false, error: userResult.error };
+      return waitForStableRect(function () { return passEl; }, 800).then(function () {
+        return fillFieldVerified(passEl, password, 'Password', log);
+      }).then(function (passResult) {
+        if (!passResult.ok) return { ok: false, error: passResult.error };
+        return sendTrustedSequence([{ type: 'key', key: 'Tab' }]);
+      });
+    }).then(function (response) {
       if (!response || !response.ok) {
         // chrome.debugger can occasionally detach mid-sequence for
         // reasons outside this extension's control (observed 2026-08-06
         // on NordicBet: "Detached while handling command" partway
-        // through typing) - one retry (re-clearing both fields first, so
-        // characters aren't doubled up on top of a partial value) is far
-        // more likely to actually succeed than immediately giving up on
-        // trusted input, since the untrusted DOM fallback is known to be
+        // through typing), and a click can also simply land on the wrong
+        // element (observed the same day: an intervening cookie-consent
+        // banner button stole focus meant for the username field, which
+        // fillFieldVerified above now catches and retries on its own -
+        // this outer retry is for everything else, e.g. the CDP detach
+        // case). One retry (re-clearing both fields first, so characters
+        // aren't doubled up on top of a partial value) is far more likely
+        // to actually succeed than immediately giving up on trusted
+        // input, since the untrusted DOM fallback is known to be
         // silently ignored by brands that gate their submit handler on
         // event.isTrusted (the whole reason trusted input exists here).
         if (!retried) {
@@ -822,6 +919,28 @@
     });
   }
 
+  // Some brands show a cookie-consent banner (OneTrust, confirmed on
+  // NordicBet's alpha env: #onetrust-accept-btn-handler) that can overlap
+  // or briefly intercept clicks meant for the login form underneath -
+  // observed once in real testing 2026-08-06 as a click intended for the
+  // username field instead focusing the banner's own button, leaving the
+  // username field empty while the password field (clicked afterward,
+  // once the banner had closed) filled correctly. fillFieldVerified's
+  // focus-check/retry now catches that case regardless of cause, but
+  // dismissing the banner proactively first is cheap and removes the
+  // failure mode outright when this specific, common consent SDK is
+  // present. Uses a plain (untrusted) click since consent-management
+  // platforms aren't part of a brand's fraud/isTrusted-gated login logic.
+  function tryDismissCookieBanner(log) {
+    try {
+      var btn = document.getElementById('onetrust-accept-btn-handler');
+      if (btn && isVisible(btn)) {
+        log('Dismissing cookie consent banner...');
+        btn.click();
+      }
+    } catch (e) {}
+  }
+
   function attemptAutoLogin(brandKey, username, password, log) {
     var sel = LOGIN_SELECTORS[brandKey];
     if (!sel) {
@@ -836,8 +955,14 @@
       location.href = location.origin + sel.loginPath;
       return Promise.resolve(false);
     }
+    tryDismissCookieBanner(log);
     log('Looking for username field...');
-    return waitForElement(sel.usernameSelector, 6000).then(function (userEl) {
+    // 6000ms was too tight for this environment - observed 2026-08-06 a
+    // "Username field not found" failure where a follow-up screenshot
+    // showed the field WAS present (and even auto-filled by Chrome's own
+    // password manager) shortly after, implying the modal simply hadn't
+    // finished mounting yet on a slow alpha-environment page load.
+    return waitForElement(sel.usernameSelector, 15000).then(function (userEl) {
       if (!userEl) {
         log('Stopped: Username field not found. Log in manually - capture stays passive and automatic either way.');
         return false;
