@@ -1150,32 +1150,34 @@
           result.appendChild(renderLinkRow('Mobile', links.mobile));
         }
 
-        // BLE source (?bleSource=1) only makes sense with a
-        // prod-sourced SIMULATED customer context (see generateLink's
-        // own apiEnv rule: bleSource forces the customer/context lookup
-        // to prod) - it is NOT compatible with a REAL live-login-captured
-        // session context. Confirmed 2026-08-06 via a direct HTTP check:
-        // appending "?bleSource=1" to a link built from a real captured
-        // stc/ctx returned a genuine server-side HTTP 503 from the CDN/
-        // edge (not just a client-rendered "maintenance" banner - the
-        // same URL without bleSource returns a clean 200 and the page
-        // loads normally). A real live-login session already reflects
-        // whatever real, live data that environment's own backend serves
-        // to a genuine logged-in user - there's no simulated-customer
-        // BDE staleness to route around in the first place, so
-        // bleSource is simply dropped (not applied) for this path, with
-        // an explanatory log line instead of a silent no-op.
+        // BLE source (?bleSource=1) only makes sense together with a
+        // context that is genuinely BLE-native, i.e. minted on prod (see
+        // generateLink's own apiEnv rule: bleSource forces the
+        // customer/context lookup to prod). A live-login session
+        // captured on the TARGET env itself (e.g. qa) is BDE-native, not
+        // BLE-native - forcing bleSource=1 onto THAT combination is what
+        // caused a confirmed HTTP 503 (2026-08-06, direct HTTP check:
+        // appending "?bleSource=1" to a link built from a qa-captured
+        // stc/ctx returned a genuine server-side 503; the same URL
+        // without bleSource returned a clean 200). The fix is not to drop
+        // BLE for live-login, but to capture the live-login session on
+        // PROD instead (prod always serves real, current BLE events -
+        // there's no separate "prod BLE source" concept, prod IS BLE) and
+        // then render that prod-sourced context on the target env's
+        // frontend via the same host-rewrite + bleSource=1 mechanism the
+        // static/simulated-customer BLE path already uses - see
+        // runLiveLoginFallback below for the login-environment switch.
         function spliceAndRender(stc, ctx, bleSourceWanted) {
-          generateLink({ brand: brand, environment: environment, loggedIn: false, customerKeyFilter: '', bleSource: false }).then(function (links) {
+          generateLink({ brand: brand, environment: environment, loggedIn: false, customerKeyFilter: '', bleSource: bleSourceWanted }).then(function (links) {
             result.style.display = '';
             result.innerHTML = '';
             var d = spliceContext(links.desktop, stc, ctx);
             var m = spliceContext(links.mobile, stc, ctx);
             if (bleSourceWanted) {
-              log.textContent += ' (Note: BLE source was requested but is not applied here - it only works with a prod-sourced simulated customer context, and causes a server error when combined with a real live-login session. This link reflects the live data your own login session actually sees.)';
+              log.textContent += ' (BLE source applied: logged in for real on prod - prod always serves live BLE events - rendered on the ' + environment + ' frontend with bleSource=1.)';
             }
-            result.appendChild(renderLinkRow('Desktop (live-login)', d));
-            result.appendChild(renderLinkRow('Mobile (live-login)', m));
+            result.appendChild(renderLinkRow('Desktop (live-login' + (bleSourceWanted ? ' + BLE' : '') + ')', d));
+            result.appendChild(renderLinkRow('Mobile (live-login' + (bleSourceWanted ? ' + BLE' : '') + ')', m));
           }).catch(function (err) {
             log.textContent = 'Error building final link: ' + err.message;
           });
@@ -1186,17 +1188,24 @@
         // captured stc/ctx into the normal logged-out link once done -
         // same mechanism the sbplayground-link-generator skill documents
         // as a manual workaround (REFERENCE.md), just automated here.
-        // bleSourceWanted just controls whether "?bleSource=1" gets
-        // appended to the final link. forceFreshWanted skips the 30-min
-        // cache and always runs a brand-new capture, for cases where a
-        // guaranteed-fresh context is needed regardless of cache age.
+        // When BLE source is wanted, the login itself happens on PROD
+        // (not the target env) - see the note on spliceAndRender above -
+        // so the cache/job are also keyed on prod in that case; a single
+        // prod capture can then be reused (via spliceAndRender's host
+        // rewrite) to render BLE-sourced logged-in links for ANY target
+        // env (test/qa/alpha), not just the one originally requested.
+        // forceFreshWanted skips the 30-min cache and always runs a
+        // brand-new capture, for cases where a guaranteed-fresh context
+        // is needed regardless of cache age.
         function runLiveLoginFallback(bleSourceWanted, forceFreshWanted) {
+          var loginEnv = bleSourceWanted ? 'prod' : environment;
+
           function startFreshCapture(reasonPrefix) {
             log.textContent = (reasonPrefix || '') + 'Running a one-time live login on the real site (background tab, invisible)...';
             var settled = false;
             var deadline = Date.now() + 60000;
 
-            LiveLoginJob.start(brand, environment, function (startResult) {
+            LiveLoginJob.start(brand, loginEnv, function (startResult) {
               if (!startResult.ok) {
                 log.textContent = 'Error starting live login: ' + startResult.error;
                 settled = true;
@@ -1234,9 +1243,9 @@
             startFreshCapture();
             return;
           }
-          LiveLoginCache.get(brand, environment, function (cached) {
+          LiveLoginCache.get(brand, loginEnv, function (cached) {
             if (cached) {
-              log.textContent = 'Using cached live-login context (captured ' + Math.round((Date.now() - cached.capturedAt) / 60000) + ' min ago)...';
+              log.textContent = 'Using cached live-login context (captured ' + Math.round((Date.now() - cached.capturedAt) / 60000) + ' min ago' + (bleSourceWanted ? ', on prod' : '') + ')...';
               spliceAndRender(cached.stc, cached.ctx, bleSourceWanted);
               return;
             }
