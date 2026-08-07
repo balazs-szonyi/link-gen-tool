@@ -1117,6 +1117,39 @@
     return node;
   }
 
+  // Lets the user pick the panel up by its header (title bar) and drop it
+  // anywhere in the viewport, instead of it staying pinned to the
+  // top-right corner forever. Switches the panel from right/top-anchored
+  // positioning to explicit left/top on the first drag so it can move
+  // freely afterwards, and clamps to the viewport so it can't be dragged
+  // fully off-screen (which would make it unreachable again).
+  function makeDraggable(panel, handle) {
+    var dragging = false, offsetX = 0, offsetY = 0;
+    handle.style.cursor = 'move';
+    handle.addEventListener('mousedown', function (e) {
+      // Don't start a drag when the click is on the header's own action
+      // buttons (minimize/close) - those need their normal click behavior.
+      if (e.target.closest && e.target.closest('.lgt-header-actions')) return;
+      dragging = true;
+      var rect = panel.getBoundingClientRect();
+      panel.style.left = rect.left + 'px';
+      panel.style.top = rect.top + 'px';
+      panel.style.right = 'auto';
+      panel.style.bottom = 'auto';
+      offsetX = e.clientX - rect.left;
+      offsetY = e.clientY - rect.top;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function (e) {
+      if (!dragging) return;
+      var x = Math.max(0, Math.min(window.innerWidth - panel.offsetWidth, e.clientX - offsetX));
+      var y = Math.max(0, Math.min(window.innerHeight - panel.offsetHeight, e.clientY - offsetY));
+      panel.style.left = x + 'px';
+      panel.style.top = y + 'px';
+    });
+    document.addEventListener('mouseup', function () { dragging = false; });
+  }
+
   function buildPanel() {
     var style = document.createElement('style');
     style.id = 'lgt-panel-style';
@@ -1125,18 +1158,33 @@
       'background:#101320;color:#f6f7fb;font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;',
       'border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.4);z-index:2147483647;padding:14px;}',
       '#lgt-panel h3{margin:0 0 8px;font-size:15px;display:flex;justify-content:space-between;align-items:center}',
+      '#lgt-panel .lgt-header-actions{display:flex;align-items:center;gap:10px;flex:none}',
       '#lgt-panel .lgt-tabs{display:flex;gap:6px;margin-bottom:10px}',
       '#lgt-panel .lgt-tab{flex:1;text-align:center;padding:6px;border-radius:6px;background:#1c2233;cursor:pointer}',
       '#lgt-panel .lgt-tab.active{background:#ff6600;color:#101320;font-weight:600}',
       '#lgt-panel label{display:block;margin:8px 0 3px;color:#9aa3b8;font-size:11px;text-transform:uppercase}',
       '#lgt-panel select,#lgt-panel input{width:100%;box-sizing:border-box;padding:6px;border-radius:5px;border:1px solid #2b3350;background:#1c2233;color:#f6f7fb}',
+      // Checkbox rows (BLE source / Force fresh): without this, the
+      // generic "select,input{width:100%}" rule above stretches the
+      // checkbox itself to fill the whole row (inputs match it too),
+      // which is what was pushing the label text out of a clean
+      // left-aligned line. Pin the checkbox to its natural size and lay
+      // the row out as a simple left-aligned flex row instead.
+      '#lgt-panel input[type=checkbox]{width:auto;flex:0 0 auto;margin:0;accent-color:#ff6600}',
+      '#lgt-panel .lgt-checkbox-row{display:flex;align-items:center;justify-content:flex-start;gap:8px;',
+      'text-transform:none;margin-top:8px;text-align:left}',
       '#lgt-panel button{margin-top:10px;width:100%;padding:8px;border:none;border-radius:6px;background:#ff6600;color:#101320;font-weight:600;cursor:pointer}',
       '#lgt-panel button.secondary{background:#2b3350;color:#f6f7fb;margin-top:6px}',
       '#lgt-panel .lgt-row{display:flex;gap:8px}',
       '#lgt-panel .lgt-row > *{flex:1}',
       '#lgt-panel .lgt-result{margin-top:10px;background:#1c2233;border-radius:6px;padding:8px;word-break:break-all;font-size:11px}',
       '#lgt-panel .lgt-log{margin-top:8px;font-size:11px;color:#9aa3b8;white-space:pre-wrap}',
-      '#lgt-panel .lgt-close{cursor:pointer;color:#9aa3b8}',
+      '#lgt-panel .lgt-close,#lgt-panel .lgt-min{cursor:pointer;color:#9aa3b8}',
+      '#lgt-panel .lgt-min{font-weight:700}',
+      // Collapsed ("_"-minimized): only the header stays visible, the
+      // panel shrinks to fit since its content is removed from layout.
+      '#lgt-panel.lgt-collapsed .lgt-content{display:none}',
+      '#lgt-panel.lgt-collapsed h3{margin-bottom:0}',
       '#lgt-panel .lgt-cred{display:flex;justify-content:space-between;align-items:center;background:#1c2233;padding:6px;border-radius:5px;margin-top:6px}',
       '#lgt-panel .lgt-cred.default{border:1px solid #ff6600}',
       '#lgt-panel .lgt-cred button{width:auto;margin:0;padding:3px 8px;font-size:11px}'
@@ -1145,7 +1193,15 @@
 
     var panel = el('div', { id: 'lgt-panel', style: 'display:none' });
     var titleText = el('span', {}, ['Link Gen Tool ', el('span', { style: 'opacity:.5;font-weight:400;font-size:10px' }, [VERSION])]);
-    var title = el('h3', {}, [titleText, el('span', { class: 'lgt-close', onclick: function () { panel.style.display = 'none'; } }, ['x'])]);
+    var minBtn = el('span', {
+      class: 'lgt-min', title: 'Minimize', onclick: function () {
+        panel.classList.toggle('lgt-collapsed');
+      }
+    }, ['_']);
+    var closeBtn = el('span', { class: 'lgt-close', title: 'Close', onclick: function () { panel.style.display = 'none'; } }, ['x']);
+    var headerActions = el('div', { class: 'lgt-header-actions' }, [minBtn, closeBtn]);
+    var title = el('h3', {}, [titleText, headerActions]);
+    makeDraggable(panel, title);
     var tabs = el('div', { class: 'lgt-tabs' });
     var tabA = el('div', { class: 'lgt-tab active' }, ['Generate']);
     var tabB = el('div', { class: 'lgt-tab' }, ['Live Login']);
@@ -1168,11 +1224,17 @@
       });
     });
 
+    // Wrapped in one element so minimizing can hide tabs + all three tab
+    // bodies with a single CSS rule (see ".lgt-collapsed .lgt-content"
+    // above) instead of having to touch each of them individually.
+    var content = el('div', { class: 'lgt-content' });
+    content.appendChild(tabs);
+    content.appendChild(bodyA);
+    content.appendChild(bodyB);
+    content.appendChild(bodyC);
+
     panel.appendChild(title);
-    panel.appendChild(tabs);
-    panel.appendChild(bodyA);
-    panel.appendChild(bodyB);
-    panel.appendChild(bodyC);
+    panel.appendChild(content);
     (document.body || document.documentElement).appendChild(panel);
     panel.__lgtSwitchToLiveLogin = function () { tabB.click(); };
     panel.__lgtAutoLoginBtn = bodyB.__lgtAutoLoginBtn;
@@ -1194,9 +1256,66 @@
     var loginSel = el('select', {}, [el('option', { value: 'out' }, ['logged-out']), el('option', { value: 'in' }, ['logged-in'])]);
     var bleChk = el('input', { type: 'checkbox' });
     var forceFreshChk = el('input', { type: 'checkbox' });
-    var filterInput = el('input', { type: 'text', placeholder: 'e.g. turkey, restofworld' });
     var result = el('div', { class: 'lgt-result', style: 'display:none' });
     var log = el('div', { class: 'lgt-log' });
+
+    // Customer dropdown - lists every customer key the brand actually has
+    // for the current environment/login-state (same data the internal
+    // generate-link UI's own "Customer" dropdown reads from
+    // /api/customers/{brandGuid}), instead of a free-text substring
+    // filter. Hidden whenever there's nothing meaningful to pick (0 or 1
+    // matching key) - most brands only have a single logged-out customer,
+    // and forcing a one-option dropdown on everyone would just be noise.
+    var customerSelect = el('select', {});
+    var customerWrap = el('div', { style: 'display:none' }, [
+      el('label', {}, ['Customer']),
+      customerSelect
+    ]);
+    var customerFetchToken = 0;
+
+    function refreshCustomerOptions() {
+      var brand = brandSel.value;
+      var brandGuid = BRANDS[brand];
+      var token = ++customerFetchToken;
+      if (!brandGuid) { customerWrap.style.display = 'none'; return; }
+      var apiEnv = bleChk.checked ? 'prod' : envSel.value;
+      var prefix = loginSel.value === 'in' ? 'logged-in' : 'logged-out';
+      fetch(apiBase(apiEnv) + '/api/customers/' + brandGuid)
+        .then(function (r) { return r.ok ? r.json() : {}; })
+        .then(function (customers) {
+          if (token !== customerFetchToken) return; // superseded by a newer selection
+          var keys = Object.keys(customers || {}).filter(function (k) {
+            return k.toLowerCase().indexOf(prefix) === 0;
+          });
+          customerSelect.innerHTML = '';
+          if (keys.length <= 1) {
+            customerWrap.style.display = 'none';
+            return;
+          }
+          keys.forEach(function (k) {
+            customerSelect.appendChild(el('option', { value: k }, [(customers[k] || {}).label || k]));
+          });
+          customerWrap.style.display = '';
+        })
+        .catch(function () {
+          if (token !== customerFetchToken) return;
+          customerWrap.style.display = 'none';
+        });
+    }
+
+    brandSel.addEventListener('change', refreshCustomerOptions);
+    envSel.addEventListener('change', refreshCustomerOptions);
+    loginSel.addEventListener('change', refreshCustomerOptions);
+    bleChk.addEventListener('change', refreshCustomerOptions);
+    refreshCustomerOptions();
+
+    // Falls back to '' (let generateLink() auto-pick the first match) when
+    // the dropdown is hidden/empty, otherwise passes the exact selected
+    // customer key through - generateLink()'s existing substring filter
+    // matches an exact key against itself just fine, no change needed there.
+    function selectedCustomerKeyFilter() {
+      return customerWrap.style.display !== 'none' && customerSelect.value ? customerSelect.value : '';
+    }
 
     var btn = el('button', {
       onclick: function () {
@@ -1323,7 +1442,7 @@
           // Logged-out (with or without BLE) - unchanged path, BLE is
           // handled entirely inside generateLink() via the static
           // registry, no live-login involved either way.
-          generateLink({ brand: brand, environment: environment, loggedIn: false, customerKeyFilter: filterInput.value, bleSource: bleSource })
+          generateLink({ brand: brand, environment: environment, loggedIn: false, customerKeyFilter: selectedCustomerKeyFilter(), bleSource: bleSource })
             .then(renderLinks)
             .catch(function (err) { log.textContent = 'Error: ' + err.message; });
           return;
@@ -1344,7 +1463,7 @@
         // live-login like the non-BLE case already did.
         hasLoggedInCustomerKey(brand, bleSource ? 'prod' : environment).then(function (hasKey) {
           if (hasKey) {
-            generateLink({ brand: brand, environment: environment, loggedIn: true, customerKeyFilter: filterInput.value, bleSource: bleSource })
+            generateLink({ brand: brand, environment: environment, loggedIn: true, customerKeyFilter: selectedCustomerKeyFilter(), bleSource: bleSource })
               .then(renderLinks)
               .catch(function (err) { log.textContent = 'Error: ' + err.message; });
             return;
@@ -1365,11 +1484,10 @@
       (function () { var d = el('div', {}); d.appendChild(el('label', {}, ['Environment'])); d.appendChild(envSel); return d; })(),
       (function () { var d = el('div', {}); d.appendChild(el('label', {}, ['Login state'])); d.appendChild(loginSel); return d; })()
     ]));
-    wrap.appendChild(el('label', {}, ['Customer key filter (optional)']));
-    wrap.appendChild(filterInput);
-    var bleWrap = el('label', { style: 'display:flex;align-items:center;gap:6px;text-transform:none;margin-top:8px' }, [bleChk, ' BLE source (fresh live events on test/qa)']);
+    wrap.appendChild(customerWrap);
+    var bleWrap = el('label', { class: 'lgt-checkbox-row' }, [bleChk, ' BLE source (fresh live events on test/qa)']);
     wrap.appendChild(bleWrap);
-    var forceFreshWrap = el('label', { style: 'display:flex;align-items:center;gap:6px;text-transform:none;margin-top:4px' }, [forceFreshChk, ' Force fresh live-login (skip 30-min cache; logged-in only, when no test customer exists)']);
+    var forceFreshWrap = el('label', { class: 'lgt-checkbox-row' }, [forceFreshChk, ' Force fresh live-login (skip 30-min cache; logged-in only, when no test customer exists)']);
     wrap.appendChild(forceFreshWrap);
     wrap.appendChild(btn);
     wrap.appendChild(log);
