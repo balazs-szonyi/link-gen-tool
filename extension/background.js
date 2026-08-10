@@ -1109,7 +1109,7 @@ function nextUniqueSessionRuleIds(startId, count, cb) {
 // are resolved against the TARGET env's own indexer host, never a
 // hardcoded one, since a relative path always means "same host as the
 // indexer.json that listed it."
-function buildBundleRedirectRules(indexerData, brandId, targetEnv, tabId, ruleIds) {
+function buildBundleRedirectRules(indexerData, brandId, targetEnv, tabId, ruleIds, sandboxDevice) {
   var entry = indexerData && indexerData[brandId];
   if (!entry) return { rules: [], skippedNoBrand: true };
   var indexerOrigin = '';
@@ -1138,23 +1138,49 @@ function buildBundleRedirectRules(indexerData, brandId, targetEnv, tabId, ruleId
           tabIds: [tabId]
         }
       });
+
+      // Sandbox-shape source pattern (2026-08-10 fix): the tool's own
+      // standalone "Generate" tab links serve their bundle as plain
+      // `/assets/<prefix>-<hash>.js`, with NO brandId or device segment
+      // in the URL at all (see BUNDLE_OBSERVE_SANDBOX_RE in the
+      // "Detected build" section below) - so the brandId-based urlFilter
+      // above can never match it, and Bundle Override silently did
+      // nothing on these links. Since the sandbox URL carries no device
+      // marker either, this ambiguity can only be resolved by an
+      // explicit user choice (the Bundle tab's new Device select) - only
+      // add this extra rule for the ONE device the user picked, never
+      // both, or two rules would both try to match the exact same
+      // `/assets/main-*.js` pattern on the same tab.
+      if (sandboxDevice && device === sandboxDevice && idIdx < ruleIds.length) {
+        rules.push({
+          id: ruleIds[idIdx++],
+          priority: 1,
+          action: { type: 'redirect', redirect: { url: targetUrl } },
+          condition: {
+            urlFilter: '*/assets/' + prefix + '-*.js',
+            resourceTypes: ['script'],
+            tabIds: [tabId]
+          }
+        });
+      }
     });
   });
   return { rules: rules, skippedNoBrand: false };
 }
 
-function startBundleOverrideRule(tabId, targetEnv, brandId) {
+function startBundleOverrideRule(tabId, targetEnv, brandId, sandboxDevice) {
   var previousRuleIds = bundleRuleIdsByTab[tabId]; // swap atomically, same
   // reasoning as the other three declarativeNetRequest features above -
   // re-applying (e.g. switching target env without disabling first) must
   // not leave the old rules alongside the new ones.
   return fetchBundleIndexer(targetEnv).then(function (indexerData) {
     return new Promise(function (resolve, reject) {
-      // Worst case (2 devices x up to 4 files) is 8 rules - reserve that
-      // many ids up front; buildBundleRedirectRules only consumes as many
-      // as it actually needs.
-      nextUniqueSessionRuleIds(BUNDLE_RULE_ID_START, 8, function (ruleIds) {
-        var built = buildBundleRedirectRules(indexerData, brandId, targetEnv, tabId, ruleIds);
+      // Worst case (2 devices x up to 4 files, plus up to 4 extra sandbox-
+      // shape rules for the one selected device) is 12 rules - reserve
+      // that many ids up front; buildBundleRedirectRules only consumes as
+      // many as it actually needs.
+      nextUniqueSessionRuleIds(BUNDLE_RULE_ID_START, 12, function (ruleIds) {
+        var built = buildBundleRedirectRules(indexerData, brandId, targetEnv, tabId, ruleIds, sandboxDevice);
         if (built.skippedNoBrand) { reject(new Error('Brand not found in ' + targetEnv + ' indexer.json')); return; }
         if (!built.rules.length) { reject(new Error('No bundle files found for this brand/env')); return; }
         chrome.declarativeNetRequest.updateSessionRules({
@@ -1204,8 +1230,9 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
   var tabId = sender.tab.id;
   var targetEnv = msg.targetEnv, brandId = msg.brandId;
+  var sandboxDevice = (msg.sandboxDevice === 'desktop' || msg.sandboxDevice === 'mobile') ? msg.sandboxDevice : null;
   if (!targetEnv || !brandId) { sendResponse({ ok: false, error: 'missing targetEnv or brandId' }); return false; }
-  startBundleOverrideRule(tabId, targetEnv, brandId).then(function (result) {
+  startBundleOverrideRule(tabId, targetEnv, brandId, sandboxDevice).then(function (result) {
     sendResponse({ ok: true, ruleCount: result.ruleCount });
   }).catch(function (err) {
     sendResponse({ ok: false, error: String(err && err.message || err) });
@@ -1252,6 +1279,19 @@ var bundleObservedByTab = {}; // tabId -> {buildFolder, version, device,
 
 var BUNDLE_OBSERVE_RE = /\/dist\/([a-z]+)\/xp\/widgets\/sportsbook\/([0-9a-fA-F-]{36})\/([^/]+)\/(desktop|mobile)\/files\/([a-zA-Z0-9]+)-[^/.]+\.js/i;
 
+// Second, structurally different bundle URL shape, discovered 2026-08-10:
+// the tool's OWN "Generate" tab links (opened standalone, not embedded in a
+// real brand page) serve their Angular bundle as plain, same-origin
+// `/assets/<prefix>-<hash>.js` - standard Angular CLI output with NO
+// version, brandId, or device segment anywhere in the URL (unlike the
+// dist-shape above). BUNDLE_OBSERVE_RE never matches this shape, which is
+// why the Detected-build strip previously showed "No sportsbook bundle
+// detected" forever on these links even though a bundle clearly was
+// loading. Restricted to the canonical Angular CLI bundle name prefixes so
+// it doesn't fire on arbitrary small helper scripts also served from
+// `/assets/`.
+var BUNDLE_OBSERVE_SANDBOX_RE = /\/assets\/(main|chunk|polyfills|runtime|vendor)-[A-Za-z0-9]+\.m?js(\?|$)/i;
+
 // Same label-scan approach as detectBrandAndEnvFromPlaygroundHost() above,
 // but not restricted to known playground suffixes - the bundle CDN host
 // can be a brand-owned domain (e.g. d-cf.btsplayground.net) that isn't in
@@ -1270,32 +1310,64 @@ if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
     if (details.tabId == null || details.tabId < 0) return; // not a real tab
     // (e.g. a service-worker/extension-initiated request) - nothing to
     // attribute the observation to.
-    var m = BUNDLE_OBSERVE_RE.exec(details.url);
-    if (!m) return;
     var hostname = '';
     try { hostname = new URL(details.url).hostname; } catch (e) { /* leave empty */ }
+
+    var m = BUNDLE_OBSERVE_RE.exec(details.url);
+    if (m) {
+      bundleObservedByTab[details.tabId] = {
+        shape: 'dist',
+        // m[1] ("dist/<label>/") is NOT a reliable environment indicator on
+        // its own - confirmed live 2026-08-10 that a brand's TEST site can
+        // serve its bundle from a path literally labeled "qa" with NO
+        // override applied (TEST/QA apparently share one underlying BLE-
+        // layer build artifact folder). Kept only as a diagnostic detail
+        // (buildFolder); the actual "which environment served this file"
+        // answer is hostEnv below, derived from the REQUEST'S OWN HOST -
+        // which correctly differs between a native load (same host as the
+        // page) and an active override (redirected to a different env's
+        // CDN host).
+        buildFolder: m[1].toLowerCase(),
+        brandId: m[2],
+        version: m[3],
+        device: m[4],
+        filePrefix: m[5],
+        host: hostname,
+        hostEnv: envLabelFromHostname(hostname),
+        url: details.url,
+        ts: Date.now()
+      };
+      return;
+    }
+
+    // Sandbox shape (see BUNDLE_OBSERVE_SANDBOX_RE comment above): no
+    // version/brandId/device in the URL at all, so the ONLY way to avoid
+    // false positives on completely unrelated websites (which may very
+    // well also serve a `/assets/main-<hash>.js`, this pattern is generic
+    // Angular CLI output, not unique to us) is to require the REQUEST'S
+    // OWN HOSTNAME to already be a recognized sbplayground CDN host. If it
+    // isn't, silently ignore the request - it's not one of ours.
+    var sm = BUNDLE_OBSERVE_SANDBOX_RE.exec(details.url);
+    if (!sm) return;
+    var known = detectBrandAndEnvFromPlaygroundHost(hostname);
+    if (!known) return;
     bundleObservedByTab[details.tabId] = {
-      // m[1] ("dist/<label>/") is NOT a reliable environment indicator on
-      // its own - confirmed live 2026-08-10 that a brand's TEST site can
-      // serve its bundle from a path literally labeled "qa" with NO
-      // override applied (TEST/QA apparently share one underlying BLE-
-      // layer build artifact folder). Kept only as a diagnostic detail
-      // (buildFolder); the actual "which environment served this file"
-      // answer is hostEnv below, derived from the REQUEST'S OWN HOST -
-      // which correctly differs between a native load (same host as the
-      // page) and an active override (redirected to a different env's
-      // CDN host).
-      buildFolder: m[1].toLowerCase(),
-      brandId: m[2],
-      version: m[3],
-      device: m[4],
-      filePrefix: m[5],
+      shape: 'sandbox',
+      buildFolder: null,
+      brandId: null,
+      brand: known.brand,
+      // version/device are simply not encoded in this URL shape at all -
+      // left explicit null rather than guessed, so the UI can say "not
+      // available" instead of showing a misleading value.
+      version: null,
+      device: null,
+      filePrefix: sm[1].toLowerCase(),
       host: hostname,
       hostEnv: envLabelFromHostname(hostname),
       url: details.url,
       ts: Date.now()
     };
-  }, { urls: ['*://*/dist/*/xp/widgets/sportsbook/*'], types: ['script'] });
+  }, { urls: ['*://*/dist/*/xp/widgets/sportsbook/*', '*://*/assets/*'], types: ['script'] });
 }
 
 // Clear a tab's observation on a genuine top-level navigation to a

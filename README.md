@@ -45,9 +45,14 @@ brand page you're already logged into — no CLI, no headless automation.
   even selectable). Scoped to the one tab you click Apply in via a
   session-only `declarativeNetRequest` rule — never affects any other
   tab or site, and is cleared automatically when that tab closes or you
-  click Disable. See "Bundle override" in `extension/background.js` for
-  the implementation, or the `sb-bundle-override-tool` skill's
-  `REFERENCE.md` for the original tool's own documentation.
+  click Disable. Also works on **standalone sandbox links** (the tool's
+  own "Generate" tab output opened directly, not embedded in a real
+  brand page) via a **Device** select (Desktop/Mobile) — a sandbox
+  link's bundle URL carries no device segment at all, so pick the one
+  matching the link you're on. See "Bundle override" in
+  `extension/background.js` for the implementation, or the
+  `sb-bundle-override-tool` skill's `REFERENCE.md` for the original
+  tool's own documentation.
 - **Detected build strip** (Chrome extension only, always visible above
   the tabs): shows the environment/version actually serving the current
   tab's sportsbook bundle, read from the real network request the
@@ -59,13 +64,19 @@ brand page you're already logged into — no CLI, no headless automation.
   an optional, on-demand **"Verify with page state"** button that
   cross-checks against `window.xSbState` (only useful on a link with
   `exposeObgState=true`) for anyone who wants a second, independent
-  confirmation. Note: the internal `/dist/<label>/...` path segment in
+  confirmation — resolves within 5 seconds either way (never hangs), and
+  reports a specific "blocked by page CSP" reason if that's detected.
+  Note: the internal `/dist/<label>/...` path segment in
   the bundle URL is *not* itself a reliable environment indicator (a
   brand's TEST site has been observed serving its bundle from a path
   literally labeled `qa`, since TEST/QA share one underlying BLE-layer
   build artifact folder) — the strip instead derives the environment from
   which **host** actually served the file, which reliably differs between
-  a native load and an active override.
+  a native load and an active override. On a standalone sandbox link
+  (the tool's own "Generate" tab output, opened directly) the bundle is
+  served as a plain `/assets/main-<hash>.js` with no version or device
+  segment at all — the strip shows the environment only, labeled as a
+  "sandbox link", rather than guessing a version/device it can't know.
 
 ## Install (bookmarklet)
 
@@ -348,10 +359,18 @@ is largely unchanged:
 - **Detected build strip**: only populates once the tab has actually
   requested a sportsbook bundle file — a lobby-only or non-sportsbook
   page will keep showing "No sportsbook bundle detected on this tab
-  yet.", which is expected, not a bug. The "Verify with page state"
+  yet.", which is expected, not a bug. On a **standalone sandbox link**
+  (the tool's own "Generate" tab output, no version/brandId/device in the
+  bundle URL), only the environment is shown, labeled as a sandbox link,
+  since version/device genuinely aren't available from that URL shape —
+  this detection is also restricted to known playground CDN hostnames to
+  avoid false positives on unrelated websites that happen to serve a
+  similarly-named `/assets/main-*.js` file. The "Verify with page state"
   button requires `exposeObgState=true` on the URL; without it, clicking
-  the button just explains why it can't check. The exact
-  version/environment field names inside `window.xSbState` aren't
+  the button just explains why it can't check. It always resolves within
+  5 seconds (never hangs), reporting a specific "blocked by page CSP"
+  reason if a `securitypolicyviolation` event fires in that window. The
+  exact version/environment field names inside `window.xSbState` aren't
   officially documented, so that secondary check falls back to listing
   the object's top-level keys if none of its best-effort field guesses
   match — the primary, always-on network-based reading doesn't depend on

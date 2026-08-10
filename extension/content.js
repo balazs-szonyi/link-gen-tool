@@ -2833,7 +2833,15 @@
         // (hostEnv === pageEnv), on an active override it's a
         // different env's CDN host entirely.
         var mismatch = o.hostEnv !== pageEnv;
-        label.textContent = 'SB build: v' + o.version + ' (' + o.device + ')' + (mismatch ? ' \u2013 overridden from ' + pageEnv.toUpperCase() : '');
+        // Sandbox-shape links (the tool's own standalone "Generate" tab
+        // output) carry no version/device in the bundle URL at all - see
+        // BUNDLE_OBSERVE_SANDBOX_RE in background.js. Show what we DO
+        // know (env) rather than a misleading "vundefined (undefined)".
+        if (o.shape === 'sandbox') {
+          label.textContent = 'SB build: ' + o.hostEnv.toUpperCase() + ' (sandbox link \u2013 version/device not encoded in URL)' + (mismatch ? ' \u2013 overridden from ' + pageEnv.toUpperCase() : '');
+        } else {
+          label.textContent = 'SB build: v' + o.version + ' (' + o.device + ')' + (mismatch ? ' \u2013 overridden from ' + pageEnv.toUpperCase() : '');
+        }
         badge.textContent = o.hostEnv.toUpperCase();
         badge.className = 'lgt-build-badge ' + (mismatch ? 'mismatch' : 'match');
         badge.style.display = '';
@@ -2858,6 +2866,16 @@
     // context and posts the result back via window.postMessage, since a
     // content script's isolated world cannot read the page's own JS
     // variables directly.
+    //
+    // FIXED 2026-08-10: this used to hang forever ("Checking
+    // window.xSbState...") with no way out if the injected script never
+    // ran or never posted back (e.g. a page CSP silently blocking inline
+    // scripts - never fully confirmed as THE cause, so the fix is
+    // deliberately cause-agnostic rather than betting on one specific
+    // root cause): a 5s timeout now always resolves the UI one way or
+    // another, and a securitypolicyviolation listener upgrades the
+    // message to a specific, actionable "blocked by page CSP" reason
+    // whenever that turns out to be the actual cause.
     verifyBtn.addEventListener('click', function () {
       if (location.search.indexOf('exposeObgState=true') === -1) {
         verifyResult.style.display = '';
@@ -2866,6 +2884,33 @@
       }
       verifyResult.style.display = '';
       verifyResult.textContent = 'Checking window.xSbState\u2026';
+      var settled = false;
+      var cspViolation = null;
+      var timeoutId;
+
+      function cleanup() {
+        window.removeEventListener('message', onMsg);
+        document.removeEventListener('securitypolicyviolation', onCsp);
+        clearTimeout(timeoutId);
+      }
+
+      function onCsp(ev) {
+        // Record it but don't resolve immediately - a violation for some
+        // unrelated inline script elsewhere on the page shouldn't be
+        // misattributed; only used to enrich the message if we actually
+        // time out with no response.
+        cspViolation = ev.violatedDirective || ev.effectiveDirective || 'unknown-directive';
+      }
+
+      timeoutId = setTimeout(function () {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        verifyResult.textContent = cspViolation
+          ? ('No response from the page after 5s \u2013 likely blocked by the page\'s Content-Security-Policy (' + cspViolation + ').')
+          : 'No response from the page after 5s \u2013 the injected script may be blocked by the page\'s Content-Security-Policy, or window.xSbState may never be set on this page.';
+      }, 5000);
+
       var script = document.createElement('script');
       script.textContent = '(function(){try{' +
         'var s=window.xSbState;' +
@@ -2881,15 +2926,17 @@
         '}catch(e){window.postMessage({__lgtXSbStateResult:true,ok:false,error:String(e)},"*");}})();';
       function onMsg(ev) {
         if (ev.source !== window || !ev.data || !ev.data.__lgtXSbStateResult) return;
-        window.removeEventListener('message', onMsg);
+        if (settled) return;
+        settled = true;
+        cleanup();
         var d = ev.data;
         if (!d.ok) { verifyResult.textContent = 'xSbState check failed: ' + d.error; return; }
         if (!d.hasState) { verifyResult.textContent = 'window.xSbState is not present on this page.'; return; }
         if (d.version || d.environment) {
           var lines = ['xSbState: version=' + (d.version || '?') + ' environment=' + (d.environment || '?')];
-          if (lastObserved && d.version && String(d.version).indexOf(lastObserved.version) === -1 && lastObserved.version.indexOf(String(d.version)) === -1) {
+          if (lastObserved && lastObserved.version && d.version && String(d.version).indexOf(lastObserved.version) === -1 && lastObserved.version.indexOf(String(d.version)) === -1) {
             lines.push('\u26a0 does not match the network-detected version (' + lastObserved.version + ')');
-          } else if (lastObserved && d.version) {
+          } else if (lastObserved && lastObserved.version && d.version) {
             lines.push('\u2713 matches the network-detected version');
           }
           verifyResult.textContent = lines.join('\n');
@@ -2898,6 +2945,7 @@
         }
       }
       window.addEventListener('message', onMsg);
+      document.addEventListener('securitypolicyviolation', onCsp);
       (document.head || document.documentElement).appendChild(script);
       script.remove();
     });
@@ -2920,6 +2968,20 @@
     var brandSel = el('select', {}, brandOptions(detected.brand || undefined));
     var curEnvSel = el('select', {}, ENV_LABELS.map(function (e) { return el('option', { value: e }, [e]); }));
     if (detected.environment) curEnvSel.value = detected.environment;
+
+    // Sandbox-shape links (the tool's own standalone "Generate" tab
+    // output, opened directly rather than embedded in a real brand page)
+    // serve their bundle as plain /assets/<prefix>-<hash>.js, with no
+    // device segment anywhere in the URL - unlike a real embedded page's
+    // /dist/.../desktop|mobile/files/... path, which self-discloses the
+    // device. This means Bundle Override cannot auto-detect which device
+    // build a sandbox link represents; the user must say so explicitly.
+    // Only affects the extra sandbox-shape redirect rule - the normal
+    // /dist/... rules are still built for both devices as before.
+    var sandboxDeviceSel = el('select', {}, [
+      el('option', { value: 'desktop' }, ['Desktop']),
+      el('option', { value: 'mobile' }, ['Mobile'])
+    ]);
 
     var targetEnvBadge = el('div', { class: 'lgt-hint' }, ['']);
     function refreshTargetEnv() {
@@ -2951,7 +3013,7 @@
         if (!brandGuid) { status.textContent = 'Unknown brand.'; return; }
         if (!targetEnv) { status.textContent = 'Could not determine a same-layer target environment.'; return; }
         status.textContent = 'Applying...';
-        chrome.runtime.sendMessage({ type: 'lgt-bundle-start', targetEnv: targetEnv, brandId: brandGuid }, function (res) {
+        chrome.runtime.sendMessage({ type: 'lgt-bundle-start', targetEnv: targetEnv, brandId: brandGuid, sandboxDevice: sandboxDeviceSel.value }, function (res) {
           void chrome.runtime.lastError;
           if (!res || !res.ok) { status.textContent = 'Failed: ' + ((res && res.error) || 'unknown error'); return; }
           status.textContent = 'Active (' + res.ruleCount + ' rule(s) applied) - reload the page if it was already loaded.';
@@ -2979,6 +3041,8 @@
     wrap.appendChild(el('label', {}, ['Current environment (what this tab is actually on)']));
     wrap.appendChild(curEnvSel);
     wrap.appendChild(targetEnvBadge);
+    wrap.appendChild(el('label', {}, ['Device (only used for standalone sandbox links - ignored on a real embedded brand page)']));
+    wrap.appendChild(sandboxDeviceSel);
     wrap.appendChild(el('div', { style: 'display:flex;gap:6px;margin-top:6px' }, [applyBtn, disableBtn]));
     wrap.appendChild(status);
     wrap.appendChild(el('div', { class: 'lgt-hint', style: 'margin-top:8px' }, [
@@ -2987,7 +3051,10 @@
       'ALPHA\u2194PROD). Only works within the same layer - mixing layers ' +
       'loads a broken build with no error. Reload the page after Apply if ' +
       'it was already open. Avoid running the standalone "Sportsbook ' +
-      'Bundle Override Tool" extension at the same time in the same tab.'
+      'Bundle Override Tool" extension at the same time in the same tab. ' +
+      'If you\u2019re overriding a bundle on a standalone sandbox link (not ' +
+      'embedded in a real brand page), pick the matching device above - ' +
+      'the tool can\u2019t detect it automatically from a sandbox URL.'
     ]));
 
     chrome.storage.local.get([BUNDLE_STATE_KEY], function (res) {
