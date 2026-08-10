@@ -1497,6 +1497,30 @@
     return node;
   }
 
+  // Runs fn() immediately, then every intervalMs, until either the tab is
+  // closed or the extension itself gets reloaded/updated while this page
+  // stays open (a normal event during dev, or a background auto-update in
+  // the wild). In that second case `chrome.runtime.id` becomes undefined
+  // and any chrome.runtime.* call throws a synchronous, uncatchable-by-
+  // -callback "Extension context invalidated" error - without this guard
+  // that error re-fires (and gets logged) every tick forever, since
+  // nothing else ever clears a plain setInterval. Used by both the
+  // Detected-build strip and the Bundle tab's status poller, the only two
+  // places in the panel that poll the background page on a timer.
+  function pollWhileExtensionValid(fn, intervalMs) {
+    // iv is assigned before the first tick() runs (not after) so that even
+    // an invalidation caught on the very first call can clear it - a plain
+    // "tick(); iv = setInterval(...)" ordering would leave iv still null
+    // during that first call, silently leaking one live interval.
+    var iv = setInterval(tick, intervalMs);
+    function tick() {
+      if (!chrome.runtime || !chrome.runtime.id) { clearInterval(iv); return; }
+      try { fn(); } catch (e) { clearInterval(iv); }
+    }
+    tick();
+    return iv;
+  }
+
   // A single, reused "First connect VPN!" modal - shown whenever a
   // user-initiated Generate/Live-Login action's internal.*.sbplayground1.net
   // call fails with a classified VPN/connectivity error (see
@@ -2817,8 +2841,7 @@
         copyBtn.disabled = false;
       });
     }
-    refresh();
-    setInterval(refresh, 3000);
+    pollWhileExtensionValid(refresh, 3000);
 
     copyBtn.addEventListener('click', function () {
       if (!lastObserved) return;
@@ -2918,8 +2941,7 @@
           : 'Not active on this tab.';
       });
     }
-    setInterval(refreshStatus, 3000);
-    refreshStatus();
+    pollWhileExtensionValid(refreshStatus, 3000);
 
     var applyBtn = el('button', {
       onclick: function () {

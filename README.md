@@ -356,4 +356,18 @@ is largely unchanged:
   the object's top-level keys if none of its best-effort field guesses
   match — the primary, always-on network-based reading doesn't depend on
   this at all.
+- **Detected build strip / Bundle tab background polling**: both poll
+  `background.js` on a 3s timer for as long as the panel is open. If the
+  extension itself gets reloaded/updated (e.g. a dev `chrome://extensions`
+  reload, or a background auto-update) while a tab with the panel open is
+  left running, `chrome.runtime` becomes a stale reference and any call
+  into it throws a synchronous, uncatchable-via-callback "Extension
+  context invalidated" error. Fixed in 1.11.1 (`pollWhileExtensionValid`
+  in `content.js`): both pollers now detect this (via `chrome.runtime.id`
+  going `undefined`, plus a try/catch belt-and-braces around the call
+  itself) and silently stop polling instead of re-throwing the same error
+  every 3 seconds forever. If you ever see this error logged repeatedly
+  in `chrome://extensions` → "Errors", just reload the affected tab(s) —
+  it only means the extension was reloaded while they were open, it is
+  not a sign of a data/functionality problem.
 
