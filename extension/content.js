@@ -1687,7 +1687,17 @@
       // column's plain single-line label.
       '#lgt-panel .lgt-cred-badge{display:block;font-size:10px;margin-top:4px;padding:1px 6px;border-radius:8px;white-space:nowrap;width:fit-content}',
       '#lgt-panel .lgt-cred-badge.has{background:#1e7e34;color:#fff}',
-      '#lgt-panel .lgt-cred-badge.none{background:#a02020;color:#fff}'
+      '#lgt-panel .lgt-cred-badge.none{background:#a02020;color:#fff}',
+      // "Detected build" strip - always visible above the tabs, on every
+      // tab (unlike the Bundle tab's own controls). See buildDetectedBuildStrip().
+      '#lgt-panel .lgt-build-strip{background:var(--lgt-tab-bg);border-radius:6px;padding:6px 8px;margin-bottom:10px;font-size:11px}',
+      '#lgt-panel .lgt-build-row{display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap}',
+      '#lgt-panel .lgt-build-badge{padding:1px 6px;border-radius:8px;font-weight:700;white-space:nowrap;font-size:10px}',
+      '#lgt-panel .lgt-build-badge.match{background:#1e7e34;color:#fff}',
+      '#lgt-panel .lgt-build-badge.mismatch{background:#c77900;color:#fff}',
+      '#lgt-panel .lgt-build-strip button{width:auto;margin:0;padding:3px 8px;font-size:10px;flex:none}',
+      '#lgt-panel .lgt-build-strip .lgt-build-actions{display:flex;gap:6px;flex:none}',
+      '#lgt-panel .lgt-build-verify{margin-top:4px;font-size:10px;color:var(--lgt-muted);white-space:pre-wrap}'
     ].join('');
     document.head.appendChild(style);
 
@@ -1756,6 +1766,7 @@
     // bodies with a single CSS rule (see ".lgt-collapsed .lgt-content"
     // above) instead of having to touch each of them individually.
     var content = el('div', { class: 'lgt-content' });
+    content.appendChild(buildDetectedBuildStrip());
     content.appendChild(tabs);
     content.appendChild(bodyA);
     content.appendChild(bodyB);
@@ -2745,6 +2756,130 @@
       obj[BUNDLE_STATE_KEY] = state;
       chrome.storage.local.set(obj);
     });
+  }
+
+  // "Detected build" strip - always visible above the tabs, regardless of
+  // which tab is active. Answers "what environment/version is THIS page's
+  // sportsbook bundle actually loaded from?" from the one source that
+  // cannot be wrong: the real network request the browser already made
+  // (see background.js's bundleObservedByTab / lgt-bundle-observed). This
+  // is deliberately independent of the Bundle tab above - it works
+  // whether or not an override was ever applied, and is meant to replace
+  // relying on the separate "Sportsbook Tool" bookmarklet's own "SB
+  // Version" field or manually checking the DevTools Network tab.
+  function buildDetectedBuildStrip() {
+    var wrap = el('div', { class: 'lgt-build-strip' });
+    var row = el('div', { class: 'lgt-build-row' });
+    var label = el('span', {}, ['Detecting sportsbook bundle\u2026']);
+    var badge = el('span', { class: 'lgt-build-badge', style: 'display:none' }, ['']);
+    var copyBtn = el('button', { class: 'secondary', title: 'Copy the full bundle URL' }, ['Copy URL']);
+    var verifyBtn = el('button', { class: 'secondary', title: 'Double-check against window.xSbState (requires exposeObgState=true)' }, ['Verify with page state']);
+    var actions = el('div', { class: 'lgt-build-actions' }, [copyBtn, verifyBtn]);
+    row.appendChild(label);
+    row.appendChild(badge);
+    row.appendChild(actions);
+    var verifyResult = el('div', { class: 'lgt-build-verify', style: 'display:none' }, ['']);
+    wrap.appendChild(row);
+    wrap.appendChild(verifyResult);
+
+    var lastObserved = null;
+    copyBtn.disabled = true;
+
+    function refresh() {
+      chrome.runtime.sendMessage({ type: 'lgt-bundle-observed' }, function (res) {
+        void chrome.runtime.lastError;
+        if (!res || !res.ok) return;
+        var o = res.observed;
+        lastObserved = o;
+        if (!o) {
+          label.textContent = 'No sportsbook bundle detected on this tab yet.';
+          badge.style.display = 'none';
+          copyBtn.disabled = true;
+          return;
+        }
+        var pageEnv = (detectBrandAndEnv().environment || 'prod');
+        // Use hostEnv (which HOST actually served this file), not the
+        // internal /dist/<label>/ path segment - confirmed live
+        // 2026-08-10 that a brand's own TEST site can serve its bundle
+        // from a path literally labeled "qa" with no override applied
+        // (TEST/QA share one underlying BLE-layer build artifact
+        // folder), so the path label alone is not a trustworthy
+        // "which environment" answer. The request's own hostname is:
+        // on a native load it's the same host as the page itself
+        // (hostEnv === pageEnv), on an active override it's a
+        // different env's CDN host entirely.
+        var mismatch = o.hostEnv !== pageEnv;
+        label.textContent = 'SB build: v' + o.version + ' (' + o.device + ')' + (mismatch ? ' \u2013 overridden from ' + pageEnv.toUpperCase() : '');
+        badge.textContent = o.hostEnv.toUpperCase();
+        badge.className = 'lgt-build-badge ' + (mismatch ? 'mismatch' : 'match');
+        badge.style.display = '';
+        badge.title = o.url;
+        copyBtn.disabled = false;
+      });
+    }
+    refresh();
+    setInterval(refresh, 3000);
+
+    copyBtn.addEventListener('click', function () {
+      if (!lastObserved) return;
+      navigator.clipboard.writeText(lastObserved.url);
+      var old = copyBtn.textContent;
+      copyBtn.textContent = 'Copied!';
+      setTimeout(function () { copyBtn.textContent = old; }, 1200);
+    });
+
+    // Secondary, on-demand confirmation via window.xSbState - only
+    // meaningful on a link carrying exposeObgState=true. Injects a plain
+    // <script> tag (no chrome.scripting/"scripting" permission needed)
+    // that reads window.xSbState from the page's own (MAIN world)
+    // context and posts the result back via window.postMessage, since a
+    // content script's isolated world cannot read the page's own JS
+    // variables directly.
+    verifyBtn.addEventListener('click', function () {
+      if (location.search.indexOf('exposeObgState=true') === -1) {
+        verifyResult.style.display = '';
+        verifyResult.textContent = 'Add exposeObgState=true to the URL to enable this check (window.xSbState is not exposed otherwise).';
+        return;
+      }
+      verifyResult.style.display = '';
+      verifyResult.textContent = 'Checking window.xSbState\u2026';
+      var script = document.createElement('script');
+      script.textContent = '(function(){try{' +
+        'var s=window.xSbState;' +
+        'if(!s){window.postMessage({__lgtXSbStateResult:true,ok:true,hasState:false},"*");return;}' +
+        // Exact field names for version/environment are unconfirmed (see
+        // REFERENCE.md - only sportsbook.statistics/scoreboard are
+        // documented) - best-effort guesses with a safe fallback to just
+        // listing top-level keys so this remains useful even if none of
+        // the guesses match the real shape.
+        'var version=(s.app&&s.app.version)||s.version||s.buildVersion||null;' +
+        'var environment=(s.app&&s.app.environment)||s.environment||null;' +
+        'window.postMessage({__lgtXSbStateResult:true,ok:true,hasState:true,version:version,environment:environment,keys:Object.keys(s)},"*");' +
+        '}catch(e){window.postMessage({__lgtXSbStateResult:true,ok:false,error:String(e)},"*");}})();';
+      function onMsg(ev) {
+        if (ev.source !== window || !ev.data || !ev.data.__lgtXSbStateResult) return;
+        window.removeEventListener('message', onMsg);
+        var d = ev.data;
+        if (!d.ok) { verifyResult.textContent = 'xSbState check failed: ' + d.error; return; }
+        if (!d.hasState) { verifyResult.textContent = 'window.xSbState is not present on this page.'; return; }
+        if (d.version || d.environment) {
+          var lines = ['xSbState: version=' + (d.version || '?') + ' environment=' + (d.environment || '?')];
+          if (lastObserved && d.version && String(d.version).indexOf(lastObserved.version) === -1 && lastObserved.version.indexOf(String(d.version)) === -1) {
+            lines.push('\u26a0 does not match the network-detected version (' + lastObserved.version + ')');
+          } else if (lastObserved && d.version) {
+            lines.push('\u2713 matches the network-detected version');
+          }
+          verifyResult.textContent = lines.join('\n');
+        } else {
+          verifyResult.textContent = 'xSbState present but no known version/environment field found. Top-level keys: ' + d.keys.join(', ');
+        }
+      }
+      window.addEventListener('message', onMsg);
+      (document.head || document.documentElement).appendChild(script);
+      script.remove();
+    });
+
+    return wrap;
   }
 
   // "Bundle" tab - overrides this brand's sportsbook JS bundle (main-*.js)

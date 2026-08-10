@@ -635,6 +635,7 @@ chrome.tabs.onRemoved.addListener(function (tabId) {
   stopBleCorsRule(tabId);
   stopBundleOverrideRule(tabId);
   keepAttachedTabs.delete(tabId);
+  delete bundleObservedByTab[tabId];
 });
 chrome.tabs.onUpdated.addListener(function (tabId, changeInfo) {
   if (changeInfo.status === 'loading' && embedRuleIdByTab[tabId]) stopEmbedRule(tabId);
@@ -1225,6 +1226,99 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   var tabId = sender.tab.id;
   var ruleIds = bundleRuleIdsByTab[tabId] || [];
   sendResponse({ ok: true, active: ruleIds.length > 0, ruleCount: ruleIds.length, matched: bundleMatchedByTab[tabId] || [] });
+  return false;
+});
+
+// ---------------------------------------------------------------------
+// "Detected build" observation - answers "what environment/version is
+// THIS tab's sportsbook bundle actually loaded from, right now?" with
+// certainty, from the one source that cannot lie: the real HTTP request
+// the browser already made for main-<hash>.js. Completely independent of
+// the Bundle-override feature above (works whether or not an override is
+// active, and whether or not the user ever opens the Bundle tab) - this
+// is what should be trusted over any UI dropdown or the separate
+// "Sportsbook Tool" bookmarklet's own "SB Version" field, since both of
+// those can show a stale/misconfigured value with no visible error (see
+// the 2026-08-10 Bundle-tab bug this was built in response to).
+// ---------------------------------------------------------------------
+
+var bundleObservedByTab = {}; // tabId -> {buildFolder, version, device,
+// brandId, filePrefix, host, hostEnv, url, ts}. Last-write-wins on
+// purpose: every fresh page load/reload always re-requests the bundle
+// (hashed filenames, not cached across deploys), so the most recent
+// observation IS the current truth for that tab - no separate "is this
+// stale" check needed beyond clearing it on a real cross-page navigation
+// (below).
+
+var BUNDLE_OBSERVE_RE = /\/dist\/([a-z]+)\/xp\/widgets\/sportsbook\/([0-9a-fA-F-]{36})\/([^/]+)\/(desktop|mobile)\/files\/([a-zA-Z0-9]+)-[^/.]+\.js/i;
+
+// Same label-scan approach as detectBrandAndEnvFromPlaygroundHost() above,
+// but not restricted to known playground suffixes - the bundle CDN host
+// can be a brand-owned domain (e.g. d-cf.btsplayground.net) that isn't in
+// PLAYGROUND_HOST_SUFFIX, so this only looks at the env label itself.
+function envLabelFromHostname(hostname) {
+  hostname = (hostname || '').toLowerCase();
+  var env = 'prod';
+  ['test', 'qa', 'alpha'].forEach(function (e) {
+    if (hostname.indexOf('.' + e + '.') !== -1 || hostname.indexOf(e + '.') === 0) env = e;
+  });
+  return env;
+}
+
+if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
+  chrome.webRequest.onBeforeRequest.addListener(function (details) {
+    if (details.tabId == null || details.tabId < 0) return; // not a real tab
+    // (e.g. a service-worker/extension-initiated request) - nothing to
+    // attribute the observation to.
+    var m = BUNDLE_OBSERVE_RE.exec(details.url);
+    if (!m) return;
+    var hostname = '';
+    try { hostname = new URL(details.url).hostname; } catch (e) { /* leave empty */ }
+    bundleObservedByTab[details.tabId] = {
+      // m[1] ("dist/<label>/") is NOT a reliable environment indicator on
+      // its own - confirmed live 2026-08-10 that a brand's TEST site can
+      // serve its bundle from a path literally labeled "qa" with NO
+      // override applied (TEST/QA apparently share one underlying BLE-
+      // layer build artifact folder). Kept only as a diagnostic detail
+      // (buildFolder); the actual "which environment served this file"
+      // answer is hostEnv below, derived from the REQUEST'S OWN HOST -
+      // which correctly differs between a native load (same host as the
+      // page) and an active override (redirected to a different env's
+      // CDN host).
+      buildFolder: m[1].toLowerCase(),
+      brandId: m[2],
+      version: m[3],
+      device: m[4],
+      filePrefix: m[5],
+      host: hostname,
+      hostEnv: envLabelFromHostname(hostname),
+      url: details.url,
+      ts: Date.now()
+    };
+  }, { urls: ['*://*/dist/*/xp/widgets/sportsbook/*'], types: ['script'] });
+}
+
+// Clear a tab's observation on a genuine top-level navigation to a
+// different page - without this, navigating away from a sportsbook page
+// to something unrelated would leave the last build's info visible,
+// silently misleading ("Detected build" would show the OLD page's data).
+// Deliberately not tied to same-origin SPA route changes (those don't
+// fire onBeforeNavigate at all) or to the embedded-iframe case (the SB
+// app frequently runs inside an iframe on a real brand site, not the top
+// frame - clearing only on frameId 0 means an iframe-only reload doesn't
+// wipe a still-valid observation; a fresh bundle request will simply
+// overwrite it moments later anyway).
+if (chrome.webNavigation && chrome.webNavigation.onBeforeNavigate) {
+  chrome.webNavigation.onBeforeNavigate.addListener(function (details) {
+    if (details.frameId !== 0) return;
+    delete bundleObservedByTab[details.tabId];
+  });
+}
+
+chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+  if (!msg || msg.type !== 'lgt-bundle-observed') return false;
+  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
+  sendResponse({ ok: true, observed: bundleObservedByTab[sender.tab.id] || null });
   return false;
 });
 

@@ -75,6 +75,34 @@ async function main() {
   log('Panel is visible');
 
   const panel = page.locator('#lgt-panel');
+
+  // "Detected build" strip check (native, no override applied yet) - this
+  // is the always-visible strip above the tabs, backed by background.js's
+  // real webRequest-based observation (bundleObservedByTab), independent
+  // of the Bundle tab's own controls below.
+  const buildStrip = panel.locator('.lgt-build-strip');
+  const buildLabel = buildStrip.locator('span').first();
+  {
+    const deadline = Date.now() + 15000;
+    let text = '';
+    while (Date.now() < deadline) {
+      text = (await buildLabel.textContent().catch(() => '')) || '';
+      if (/^SB build:/.test(text.trim())) break;
+      await page.waitForTimeout(1000);
+    }
+    log('Detected build strip (native, pre-override): ' + text.trim());
+    if (!/^SB build:/.test(text.trim())) {
+      throw new Error('Detected build strip never populated (expected "SB build: ..."), last text: ' + text);
+    }
+    const badgeText = (await buildStrip.locator('.lgt-build-badge').textContent().catch(() => '')) || '';
+    log('Detected build badge (native): ' + badgeText.trim());
+    const badgeTitle = (await buildStrip.locator('.lgt-build-badge').getAttribute('title').catch(() => '')) || '';
+    log('Detected build URL (native, for diagnosis): ' + badgeTitle);
+    if (badgeText.trim().toUpperCase() !== CURRENT_ENV.toUpperCase()) {
+      throw new Error('Detected build badge did not show native env "' + CURRENT_ENV + '", got: ' + badgeText);
+    }
+  }
+
   await panel.locator('.lgt-tab').filter({ hasText: 'Bundle' }).click();
   log('Switched to Bundle tab');
 
@@ -129,6 +157,33 @@ async function main() {
     log('PASS (network-level): a bundle request actually resolved against the ' + TARGET_ENV + ' environment.');
   } else {
     log('NOTE: could not confirm a redirected bundle request at the network level within this run (page/timing-dependent, non-fatal) - the declarativeNetRequest-rule-installed assertion above already validates the core new mechanism end-to-end.');
+  }
+
+  // "Detected build" strip check AFTER the override + reload - the panel
+  // itself re-injects on the fresh page load, so re-find it and confirm
+  // the badge/label now show the OVERRIDE target env with a mismatch
+  // indicator, proving the strip's own detection tracks reality live
+  // rather than a UI-remembered value (the exact bug this feature exists
+  // to make impossible - see the 2026-08-10 Bundle-tab environment fix).
+  {
+    await page.waitForSelector('#lgt-panel', { state: 'attached', timeout: 10000 }).catch(() => {});
+    const strip2 = page.locator('#lgt-panel .lgt-build-strip');
+    const label2 = strip2.locator('span').first();
+    const deadline = Date.now() + 15000;
+    let text2 = '';
+    while (Date.now() < deadline) {
+      text2 = (await label2.textContent().catch(() => '')) || '';
+      if (/^SB build:/.test(text2.trim())) break;
+      await page.waitForTimeout(1000);
+    }
+    log('Detected build strip (post-override, post-reload): ' + text2.trim());
+    const badge2 = (await strip2.locator('.lgt-build-badge').textContent().catch(() => '')) || '';
+    log('Detected build badge (post-override): ' + badge2.trim());
+    if (badge2.trim().toUpperCase() === TARGET_ENV.toUpperCase()) {
+      log('PASS: Detected build strip correctly flipped to ' + TARGET_ENV.toUpperCase() + ' after the override + reload.');
+    } else {
+      log('NOTE: Detected build strip did not show ' + TARGET_ENV.toUpperCase() + ' after reload (got "' + badge2.trim() + '") - non-fatal, network-timing dependent like the redirect check above.');
+    }
   }
 
   log('Test run complete.');

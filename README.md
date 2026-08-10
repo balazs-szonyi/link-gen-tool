@@ -48,6 +48,24 @@ brand page you're already logged into — no CLI, no headless automation.
   click Disable. See "Bundle override" in `extension/background.js` for
   the implementation, or the `sb-bundle-override-tool` skill's
   `REFERENCE.md` for the original tool's own documentation.
+- **Detected build strip** (Chrome extension only, always visible above
+  the tabs): shows the environment/version actually serving the current
+  tab's sportsbook bundle, read from the real network request the
+  browser already made for it — not from any UI dropdown or the separate
+  "Sportsbook Tool" bookmarklet's own "SB Version" field, both of which
+  can silently show a stale/wrong value. Flags with an orange badge when
+  the served environment differs from the page's own (i.e. a Bundle
+  override is active). Includes a "Copy URL" button for bug reports and
+  an optional, on-demand **"Verify with page state"** button that
+  cross-checks against `window.xSbState` (only useful on a link with
+  `exposeObgState=true`) for anyone who wants a second, independent
+  confirmation. Note: the internal `/dist/<label>/...` path segment in
+  the bundle URL is *not* itself a reliable environment indicator (a
+  brand's TEST site has been observed serving its bundle from a path
+  literally labeled `qa`, since TEST/QA share one underlying BLE-layer
+  build artifact folder) — the strip instead derives the environment from
+  which **host** actually served the file, which reliably differs between
+  a native load and an active override.
 
 ## Install (bookmarklet)
 
@@ -327,4 +345,15 @@ is largely unchanged:
   override (a `declarativeNetRequest` rule only affects requests made
   *after* it's registered, not ones already in flight or already
   rendered).
+- **Detected build strip**: only populates once the tab has actually
+  requested a sportsbook bundle file — a lobby-only or non-sportsbook
+  page will keep showing "No sportsbook bundle detected on this tab
+  yet.", which is expected, not a bug. The "Verify with page state"
+  button requires `exposeObgState=true` on the URL; without it, clicking
+  the button just explains why it can't check. The exact
+  version/environment field names inside `window.xSbState` aren't
+  officially documented, so that secondary check falls back to listing
+  the object's top-level keys if none of its best-effort field guesses
+  match — the primary, always-on network-based reading doesn't depend on
+  this at all.
 
