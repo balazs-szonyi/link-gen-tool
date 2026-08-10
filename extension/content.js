@@ -3171,11 +3171,17 @@
       chrome.runtime.sendMessage({ type: 'lgt-ble-data-status' }, function (res) {
         void chrome.runtime.lastError;
         if (!res || !res.ok) return;
-        if (!res.active) status.textContent = 'Not active on this tab.';
-        // While active, leave whatever the last Apply already wrote
-        // (customer key / stc used) instead of overwriting it with a
-        // generic "Active" - more useful for the tester to see at a
-        // glance which context is currently applied.
+        if (!res.active) { status.textContent = 'Not active on this tab.'; return; }
+        // Active - but only overwrite the status text if it doesn't
+        // already reflect that (i.e. it's still showing the initial
+        // "Not active..." default, e.g. right after a page reload
+        // rebuilt this panel from scratch) - otherwise leave whatever
+        // the last Apply already wrote (customer key / stc used) alone,
+        // more useful for the tester than replacing it with a generic
+        // message on every 3s poll tick.
+        if (!/^Active/.test(status.textContent)) {
+          status.textContent = 'Active - override is active on this tab (reload if you just applied it).';
+        }
       });
     }
     pollWhileExtensionValid(refreshStatus, 3000);

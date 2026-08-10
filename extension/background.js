@@ -551,11 +551,55 @@ var embedRuleIdByTab = {}; // tabId -> ruleId
 // rule below). Querying the actually-registered session rules for the
 // current max id, instead of trusting any in-memory counter, is immune to
 // this regardless of how many times the service worker has restarted.
-function nextUniqueSessionRuleId(startId, cb) {
+//
+// IMPORTANT (root-caused 2026-08-10, real bug hit combining Bundle
+// Override + BLE Data Override on the same tab): `endIdExclusive` is
+// REQUIRED and the max-id scan below is restricted to ids already inside
+// [startId, endIdExclusive) - it must NOT look at the global max across
+// ALL registered rules. Each feature owns a fixed numeric id range (e.g.
+// BLE Data 910001-929999, Bundle 930001-949999); if the scan considered
+// every rule regardless of range, a feature applied while an EARLIER-
+// range feature had only used a couple of ids (e.g. Bundle using just
+// 930001-930002) would get its own next id computed from that lower
+// max - landing INSIDE the other feature's declared range. That
+// mis-allocation broke both features' range-restricted status/stop
+// lookups (getOwnSessionRuleIdsForTab) silently: the wrongly-numbered
+// rule became invisible to its own feature's status check while a
+// DIFFERENT feature's status check (whose range now unintentionally
+// covers it) would wrongly claim the rule as its own on next resync.
+// Restricting the scan to each feature's own range makes id allocation
+// depend only on that feature's own rule count/history, never on
+// apply order relative to any other feature.
+function nextUniqueSessionRuleId(startId, endIdExclusive, cb) {
   chrome.declarativeNetRequest.getSessionRules(function (rules) {
     var max = startId - 1;
-    (rules || []).forEach(function (r) { if (r.id > max) max = r.id; });
+    (rules || []).forEach(function (r) { if (r.id >= startId && r.id < endIdExclusive && r.id > max) max = r.id; });
     cb(max + 1);
+  });
+}
+
+// Same ephemeral-service-worker problem as above, but for STATUS/STOP
+// correctness rather than id allocation: the *-RuleIdsByTab in-memory maps
+// (used by the Bundle/BLE Data status+stop handlers) are plain JS
+// variables and are wiped on every SW restart, while the actual
+// declarativeNetRequest session rules they were tracking are NOT wiped
+// (session rules persist across SW restarts within the same browser
+// session). Trusting only the memory map after a restart means: (a) the
+// status handler wrongly reports "not active" for a rule that is still
+// live and still redirecting, and (b) stop/re-apply can leave that live
+// rule behind uncleared. Querying the browser's own live rules for the
+// tab, filtered to the id range owned by the calling feature, is immune
+// to this regardless of how many times the service worker restarted
+// between Apply and this call.
+function getOwnSessionRuleIdsForTab(tabId, startId, endIdExclusive) {
+  return new Promise(function (resolve) {
+    chrome.declarativeNetRequest.getSessionRules(function (rules) {
+      var ids = (rules || []).filter(function (r) {
+        return r.id >= startId && r.id < endIdExclusive &&
+          r.condition && Array.isArray(r.condition.tabIds) && r.condition.tabIds.indexOf(tabId) !== -1;
+      }).map(function (r) { return r.id; });
+      resolve(ids);
+    });
   });
 }
 
@@ -564,7 +608,7 @@ function startEmbedRule(tabId, origin) {
   // leaking the old rule - without this, re-clicking "Embed here" in the
   // same tab would leave a stale rule alongside the new one.
   return new Promise(function (resolve, reject) {
-    nextUniqueSessionRuleId(EMBED_RULE_ID_START, function (ruleId) {
+    nextUniqueSessionRuleId(EMBED_RULE_ID_START, BLE_DATA_RULE_ID_START, function (ruleId) {
       chrome.declarativeNetRequest.updateSessionRules({
         addRules: [{
           id: ruleId,
@@ -634,6 +678,7 @@ chrome.tabs.onRemoved.addListener(function (tabId) {
   stopSrSpoofRule(tabId);
   stopBleCorsRule(tabId);
   stopBundleOverrideRule(tabId);
+  stopBleDataOverrideRule(tabId);
   keepAttachedTabs.delete(tabId);
   delete bundleObservedByTab[tabId];
 });
@@ -716,7 +761,7 @@ function startSrSpoofRule(tabId, spoofOrigin, requestDomains) {
   // modifyHeaders rules matching the same request is not something to rely
   // on.
   return new Promise(function (resolve, reject) {
-    nextUniqueSessionRuleId(SR_SPOOF_RULE_ID_START, function (ruleId) {
+    nextUniqueSessionRuleId(SR_SPOOF_RULE_ID_START, BLE_CORS_RULE_ID_START, function (ruleId) {
       chrome.declarativeNetRequest.updateSessionRules({
         addRules: [{
           id: ruleId,
@@ -920,6 +965,13 @@ if (chrome.webNavigation && chrome.webNavigation.onBeforeNavigate) {
     // ahead of the playground-host detection below and NOT gated on it,
     // since Bundle Override must be cleared even if the tab is navigating
     // away to something that isn't itself a recognized playground host.
+    // Deliberately compares the FULL URL, not just the origin - unlike BLE
+    // Data below, the Bundle redirect condition (urlFilter matching
+    // brandId/device/prefix, see buildBundleRedirectRules) is NOT anchored
+    // to a specific host, so it would otherwise keep silently redirecting
+    // the bundle on ANY other same-origin page the user browses to next in
+    // this tab - confirmed as the actual real-world bug this cleanup
+    // exists to prevent (see test-bundle-override-stale-cleanup.cjs).
     if (bundleRuleIdsByTab[details.tabId]) {
       var bundleExpectedUrl = bundleExpectedUrlByTab[details.tabId];
       if (bundleExpectedUrl && details.url !== bundleExpectedUrl) {
@@ -929,14 +981,29 @@ if (chrome.webNavigation && chrome.webNavigation.onBeforeNavigate) {
       }
     }
 
-    // Same stale-rule cleanup, same reasoning, for BLE Data Override - its
-    // redirect rule is keyed to the CURRENT host at the time it was
-    // applied, so navigating to a genuinely different page (not just a
-    // same-URL reload) must clear it rather than leave a redirect rule
-    // targeting a host the tab is no longer on.
+    // Same stale-rule cleanup intent, but for BLE Data Override compares
+    // only the ORIGIN, not the full URL (2026-08-10 follow-up fix, real
+    // bug: BLE Data's redirect condition IS anchored to a specific host
+    // (regexFilter built from escapeRegexLiteral(currentHost) - see
+    // startBleDataOverrideRule), so it can only ever match requests from
+    // that exact host regardless of path/query - a same-origin
+    // reload/redirect/query-param change (common on SPA sportsbook pages)
+    // does NOT invalidate it, but comparing the exact full URL string was
+    // wrongly treating any such change as "navigated away" and tearing the
+    // override down before the reloaded page's own requests went out -
+    // confirmed live (2026-08-10): applying BLE Data + Bundle Override
+    // together, then reloading, left BLE Data reporting "not active" and
+    // no fresh data flowing, while Bundle Override (already origin-
+    // tolerant via its own, unrelated urlFilter pattern) kept working.
+    // Only a genuinely different ORIGIN un-anchors the redirect regex, so
+    // only that should clear it - matches the same reasoning already
+    // proven for the Sportradar-spoof rule below (see its onUpdated
+    // 'loading' handler comment).
     if (bleDataRuleIdsByTab[details.tabId]) {
-      var bleDataExpectedUrl = bleDataExpectedUrlByTab[details.tabId];
-      if (bleDataExpectedUrl && details.url !== bleDataExpectedUrl) {
+      var bleDataExpectedOrigin = bleDataExpectedOriginByTab[details.tabId];
+      var navOrigin;
+      try { navOrigin = new URL(details.url).origin; } catch (e) { navOrigin = null; }
+      if (bleDataExpectedOrigin && navOrigin && navOrigin !== bleDataExpectedOrigin) {
         stopBleDataOverrideRule(details.tabId).catch(function (err) {
           console.warn('[link-gen-tool] stale BLE Data Override cleanup failed:', err);
         });
@@ -1008,6 +1075,9 @@ if (chrome.webNavigation && chrome.webNavigation.onBeforeNavigate) {
 // ---------------------------------------------------------------------
 
 var BLE_CORS_RULE_ID_START = 970001;
+var BLE_CORS_RULE_ID_END = 990001; // exclusive upper bound of this
+// feature's own id range, used to scope nextUniqueSessionRuleId's max-id
+// scan (see that function's comment for why this is required).
 var bleCorsRuleIdByTab = {}; // tabId -> ruleId
 var bleCorsExpectedOriginByTab = {}; // tabId -> origin of the URL the tab was
 // opened for, same "reload/SPA-nav vs actually left the page" distinction as
@@ -1016,7 +1086,7 @@ var bleCorsExpectedOriginByTab = {}; // tabId -> origin of the URL the tab was
 function startBleCorsRule(tabId, playgroundSuffix) {
   var previousRuleId = bleCorsRuleIdByTab[tabId];
   return new Promise(function (resolve, reject) {
-    nextUniqueSessionRuleId(BLE_CORS_RULE_ID_START, function (ruleId) {
+    nextUniqueSessionRuleId(BLE_CORS_RULE_ID_START, BLE_CORS_RULE_ID_END, function (ruleId) {
       chrome.declarativeNetRequest.updateSessionRules({
         addRules: [{
           id: ruleId,
@@ -1118,8 +1188,8 @@ function stopBleCorsRule(tabId) {
 
 var BLE_DATA_RULE_ID_START = 910001;
 var bleDataRuleIdsByTab = {}; // tabId -> [redirectRuleId, headerRuleId]
-var bleDataExpectedUrlByTab = {}; // tabId -> full URL the override was
-// applied for, same stale-cleanup role as bundleExpectedUrlByTab above.
+var bleDataExpectedOriginByTab = {}; // tabId -> the ORIGIN the override was
+// applied for, same stale-cleanup role as bundleExpectedOriginByTab above.
 
 function escapeRegexLiteral(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -1128,7 +1198,7 @@ function escapeRegexLiteral(s) {
 function startBleDataOverrideRule(tabId, currentHost, alphaHost, stc, ctx) {
   var previousRuleIds = bleDataRuleIdsByTab[tabId];
   return new Promise(function (resolve, reject) {
-    nextUniqueSessionRuleIds(BLE_DATA_RULE_ID_START, 2, function (ruleIds) {
+    nextUniqueSessionRuleIds(BLE_DATA_RULE_ID_START, BUNDLE_RULE_ID_START, 2, function (ruleIds) {
       var redirectRule = {
         id: ruleIds[0],
         priority: 1,
@@ -1176,13 +1246,22 @@ function startBleDataOverrideRule(tabId, currentHost, alphaHost, stc, ctx) {
 
 function stopBleDataOverrideRule(tabId) {
   var ruleIds = bleDataRuleIdsByTab[tabId];
-  delete bleDataExpectedUrlByTab[tabId];
-  if (!ruleIds || !ruleIds.length) return Promise.resolve();
+  delete bleDataExpectedOriginByTab[tabId];
   delete bleDataRuleIdsByTab[tabId];
-  return new Promise(function (resolve) {
-    chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: ruleIds }, function () {
-      void chrome.runtime.lastError; // ignore - rules may already be gone
-      resolve();
+  // Also query the browser's own live session rules for this tab/id-range,
+  // not just the in-memory map - a service-worker restart between Apply
+  // and Stop/navigation wipes bleDataRuleIdsByTab (plain JS variable) but
+  // NOT the actual declarativeNetRequest session rules (those persist
+  // across SW restarts within the same browser session), so trusting the
+  // memory map alone can silently leave a real rule behind uncleared.
+  return getOwnSessionRuleIdsForTab(tabId, BLE_DATA_RULE_ID_START, BUNDLE_RULE_ID_START).then(function (liveIds) {
+    var allIds = (ruleIds || []).concat(liveIds).filter(function (id, i, arr) { return arr.indexOf(id) === i; });
+    if (!allIds.length) return;
+    return new Promise(function (resolve) {
+      chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: allIds }, function () {
+        void chrome.runtime.lastError; // ignore - rules may already be gone
+        resolve();
+      });
     });
   });
 }
@@ -1193,9 +1272,13 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   var tabId = sender.tab.id;
   var alphaHost = msg.alphaHost, stc = msg.stc, ctx = msg.ctx;
   if (!alphaHost || !stc || !ctx) { sendResponse({ ok: false, error: 'missing alphaHost, stc, or ctx' }); return false; }
-  var currentHost;
-  try { currentHost = new URL(sender.tab.url).hostname; } catch (e) { sendResponse({ ok: false, error: 'could not read current tab URL' }); return false; }
-  if (sender.tab.url) bleDataExpectedUrlByTab[tabId] = sender.tab.url;
+  var currentHost, currentOrigin;
+  try {
+    var u = new URL(sender.tab.url);
+    currentHost = u.hostname;
+    currentOrigin = u.origin;
+  } catch (e) { sendResponse({ ok: false, error: 'could not read current tab URL' }); return false; }
+  if (currentOrigin) bleDataExpectedOriginByTab[tabId] = currentOrigin;
   startBleDataOverrideRule(tabId, currentHost, alphaHost, stc, ctx).then(function () {
     sendResponse({ ok: true });
   }).catch(function (err) {
@@ -1214,9 +1297,18 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
 chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   if (!msg || msg.type !== 'lgt-ble-data-status') return false;
   if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
-  var ruleIds = bleDataRuleIdsByTab[sender.tab.id] || [];
-  sendResponse({ ok: true, active: ruleIds.length > 0 });
-  return false;
+  var tabId = sender.tab.id;
+  // Derive truth from the browser's own live session rules, not just the
+  // in-memory map (see stopBleDataOverrideRule comment above for why the
+  // map alone is unsafe after a service-worker restart) - resync the map
+  // from whatever is actually still registered so later stop/reapply
+  // calls stay consistent.
+  getOwnSessionRuleIdsForTab(tabId, BLE_DATA_RULE_ID_START, BUNDLE_RULE_ID_START).then(function (liveIds) {
+    if (liveIds.length) bleDataRuleIdsByTab[tabId] = liveIds;
+    else delete bleDataRuleIdsByTab[tabId];
+    sendResponse({ ok: true, active: liveIds.length > 0 });
+  });
+  return true;
 });
 
 // ---------------------------------------------------------------------
@@ -1260,7 +1352,7 @@ var bundleExpectedUrlByTab = {}; // tabId -> the FULL URL (not just origin)
 // the tab was showing when Bundle Override was applied - see the
 // stale-cleanup logic in chrome.webNavigation.onBeforeNavigate above for
 // why this must be the whole URL, unlike the origin-only tracking used by
-// the Sportradar-spoof/BLE-CORS features.
+// BLE Data Override/Sportradar-spoof/BLE-CORS.
 var bundleMatchedByTab = {}; // tabId -> {ruleId, requestUrl, timestamp}[] -
 // populated by the onRuleMatchedDebug listener below, purely for the
 // Bundle tab's own "N request(s) redirected" status readout - the same
@@ -1295,10 +1387,15 @@ function fetchBundleIndexer(targetEnv) {
 // query - a bundle override can need several rules at once (one per
 // device x file), so calling the single-id helper repeatedly would mean
 // repeated round-trips and a theoretical race between them.
-function nextUniqueSessionRuleIds(startId, count, cb) {
+//
+// Same range-scoping requirement as nextUniqueSessionRuleId above (see
+// its comment for the full root-cause writeup) - `endIdExclusive` is
+// REQUIRED and the max-id scan is restricted to this feature's own
+// range, never the global max across all registered rules.
+function nextUniqueSessionRuleIds(startId, endIdExclusive, count, cb) {
   chrome.declarativeNetRequest.getSessionRules(function (rules) {
     var max = startId - 1;
-    (rules || []).forEach(function (r) { if (r.id > max) max = r.id; });
+    (rules || []).forEach(function (r) { if (r.id >= startId && r.id < endIdExclusive && r.id > max) max = r.id; });
     var ids = [];
     for (var i = 1; i <= count; i++) ids.push(max + i);
     cb(ids);
@@ -1386,7 +1483,7 @@ function startBundleOverrideRule(tabId, targetEnv, brandId) {
       // Worst case (2 devices x up to 4 files) is 8 rules - reserve that
       // many ids up front; buildBundleRedirectRules only consumes as many
       // as it actually needs.
-      nextUniqueSessionRuleIds(BUNDLE_RULE_ID_START, 8, function (ruleIds) {
+      nextUniqueSessionRuleIds(BUNDLE_RULE_ID_START, SR_SPOOF_RULE_ID_START, 8, function (ruleIds) {
         var built = buildBundleRedirectRules(indexerData, brandId, targetEnv, tabId, ruleIds);
         if (built.skippedNoBrand) { reject(new Error('Brand not found in ' + targetEnv + ' indexer.json')); return; }
         if (!built.rules.length) { reject(new Error('No bundle files found for this brand/env')); return; }
@@ -1407,13 +1504,20 @@ function startBundleOverrideRule(tabId, targetEnv, brandId) {
 function stopBundleOverrideRule(tabId) {
   var ruleIds = bundleRuleIdsByTab[tabId];
   delete bundleExpectedUrlByTab[tabId];
-  if (!ruleIds || !ruleIds.length) return Promise.resolve();
   delete bundleRuleIdsByTab[tabId];
   delete bundleMatchedByTab[tabId];
-  return new Promise(function (resolve) {
-    chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: ruleIds }, function () {
-      void chrome.runtime.lastError; // ignore - rules may already be gone
-      resolve();
+  // Same SW-restart-safe cleanup as stopBleDataOverrideRule above - query
+  // the browser's own live rules for this tab in our id range, not just
+  // the in-memory map, since a service-worker restart between Apply and
+  // Stop/navigation wipes the map but not the actual registered rules.
+  return getOwnSessionRuleIdsForTab(tabId, BUNDLE_RULE_ID_START, SR_SPOOF_RULE_ID_START).then(function (liveIds) {
+    var allIds = (ruleIds || []).concat(liveIds).filter(function (id, i, arr) { return arr.indexOf(id) === i; });
+    if (!allIds.length) return;
+    return new Promise(function (resolve) {
+      chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: allIds }, function () {
+        void chrome.runtime.lastError; // ignore - rules may already be gone
+        resolve();
+      });
     });
   });
 }
@@ -1465,9 +1569,17 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   if (!msg || msg.type !== 'lgt-bundle-status') return false;
   if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
   var tabId = sender.tab.id;
-  var ruleIds = bundleRuleIdsByTab[tabId] || [];
-  sendResponse({ ok: true, active: ruleIds.length > 0, ruleCount: ruleIds.length, matched: bundleMatchedByTab[tabId] || [] });
-  return false;
+  // Derive truth from the browser's own live session rules, not just the
+  // in-memory map (see stopBundleOverrideRule comment above for why the
+  // map alone is unsafe after a service-worker restart) - resync the map
+  // from whatever is actually still registered so later stop/reapply
+  // calls stay consistent.
+  getOwnSessionRuleIdsForTab(tabId, BUNDLE_RULE_ID_START, SR_SPOOF_RULE_ID_START).then(function (liveIds) {
+    if (liveIds.length) bundleRuleIdsByTab[tabId] = liveIds;
+    else delete bundleRuleIdsByTab[tabId];
+    sendResponse({ ok: true, active: liveIds.length > 0, ruleCount: liveIds.length, matched: bundleMatchedByTab[tabId] || [] });
+  });
+  return true;
 });
 
 // ---------------------------------------------------------------------
