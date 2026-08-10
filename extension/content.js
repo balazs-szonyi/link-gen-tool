@@ -2796,9 +2796,8 @@
     var row = el('div', { class: 'lgt-build-row' });
     var label = el('span', {}, ['Detecting sportsbook bundle\u2026']);
     var badge = el('span', { class: 'lgt-build-badge', style: 'display:none' }, ['']);
-    var copyBtn = el('button', { class: 'secondary', title: 'Copy the full bundle URL' }, ['Copy URL']);
     var verifyBtn = el('button', { class: 'secondary', title: 'Double-check against window.xSbState (requires exposeObgState=true)' }, ['Verify with page state']);
-    var actions = el('div', { class: 'lgt-build-actions' }, [copyBtn, verifyBtn]);
+    var actions = el('div', { class: 'lgt-build-actions' }, [verifyBtn]);
     row.appendChild(label);
     row.appendChild(badge);
     row.appendChild(actions);
@@ -2807,7 +2806,6 @@
     wrap.appendChild(verifyResult);
 
     var lastObserved = null;
-    copyBtn.disabled = true;
 
     function refresh() {
       chrome.runtime.sendMessage({ type: 'lgt-bundle-observed' }, function (res) {
@@ -2818,7 +2816,6 @@
         if (!o) {
           label.textContent = 'No sportsbook bundle detected on this tab yet.';
           badge.style.display = 'none';
-          copyBtn.disabled = true;
           return;
         }
         var pageEnv = (detectBrandAndEnv().environment || 'prod');
@@ -2853,10 +2850,18 @@
           // discarding a real, useful answer. Only fall back to the
           // honest "not encoded in URL" message when nothing resolved at
           // all.
+          // Show the actual detected brand (e.g. "nordicbet") instead of
+          // the generic literal word "sandbox" - background.js already
+          // resolves this from the sandbox link's own hostname (see
+          // detectBrandAndEnvFromPlaygroundHost) and always includes it
+          // on the observation object for this shape; "sandbox" remains
+          // only as a defensive fallback in the unlikely case it's ever
+          // missing.
+          var sandboxLabel = o.brand || 'sandbox';
           if (o.version) {
-            label.textContent = 'SB build: v' + o.version + (o.device ? ' (' + o.device + ')' : '') + ' [sandbox, ' + o.hostEnv.toUpperCase() + ']' + (mismatch ? ' \u2013 overridden from ' + pageEnv.toUpperCase() : '');
+            label.textContent = 'SB build: v' + o.version + (o.device ? ' (' + o.device + ')' : '') + ' [' + sandboxLabel + ', ' + o.hostEnv.toUpperCase() + ']' + (mismatch ? ' \u2013 overridden from ' + pageEnv.toUpperCase() : '');
           } else {
-            label.textContent = 'SB build: ' + o.hostEnv.toUpperCase() + ' (sandbox link \u2013 version/device not encoded in URL)' + (mismatch ? ' \u2013 overridden from ' + pageEnv.toUpperCase() : '');
+            label.textContent = 'SB build: ' + o.hostEnv.toUpperCase() + ' (' + sandboxLabel + ' sandbox link \u2013 version/device not encoded in URL)' + (mismatch ? ' \u2013 overridden from ' + pageEnv.toUpperCase() : '');
           }
         } else {
           label.textContent = 'SB build: v' + o.version + ' (' + o.device + ')' + (mismatch ? ' \u2013 overridden from ' + pageEnv.toUpperCase() : '');
@@ -2865,36 +2870,30 @@
         badge.className = 'lgt-build-badge ' + (mismatch ? 'mismatch' : 'match');
         badge.style.display = '';
         badge.title = o.url;
-        copyBtn.disabled = false;
       });
     }
     pollWhileExtensionValid(refresh, 3000);
 
-    copyBtn.addEventListener('click', function () {
-      if (!lastObserved) return;
-      navigator.clipboard.writeText(lastObserved.url);
-      var old = copyBtn.textContent;
-      copyBtn.textContent = 'Copied!';
-      setTimeout(function () { copyBtn.textContent = old; }, 1200);
-    });
-
     // Secondary, on-demand confirmation via window.xSbState - only
-    // meaningful on a link carrying exposeObgState=true. Injects a plain
-    // <script> tag (no chrome.scripting/"scripting" permission needed)
-    // that reads window.xSbState from the page's own (MAIN world)
-    // context and posts the result back via window.postMessage, since a
-    // content script's isolated world cannot read the page's own JS
-    // variables directly.
+    // meaningful on a link carrying exposeObgState=true.
     //
-    // FIXED 2026-08-10: this used to hang forever ("Checking
-    // window.xSbState...") with no way out if the injected script never
-    // ran or never posted back (e.g. a page CSP silently blocking inline
-    // scripts - never fully confirmed as THE cause, so the fix is
-    // deliberately cause-agnostic rather than betting on one specific
-    // root cause): a 5s timeout now always resolves the UI one way or
-    // another, and a securitypolicyviolation listener upgrades the
-    // message to a specific, actionable "blocked by page CSP" reason
-    // whenever that turns out to be the actual cause.
+    // REWRITTEN 2026-08-10: the previous implementation injected a plain
+    // <script> tag to read window.xSbState from the page's own (MAIN
+    // world) context, since a content script's isolated world cannot
+    // read the page's own JS variables directly - but that technique IS
+    // a DOM script element, so it's subject to the page's own script-src
+    // CSP. Confirmed live on a real sandbox link (strict CSP, no
+    // 'unsafe-inline') that this silently blocked the injected script
+    // every time, which is why the button always ended up showing the
+    // "No response after 5s" timeout message - NOT a rare edge case, but
+    // the normal outcome on any CSP-hardened page. Now delegates to
+    // background.js's chrome.scripting.executeScript({world:'MAIN'})
+    // (see its lgt-verify-xsbstate handler), which runs in the page's
+    // real JS context WITHOUT being subject to page CSP at all - no more
+    // <script> tag, postMessage roundtrip, or securitypolicyviolation
+    // heuristic needed. A short client-side timeout remains only as a
+    // defensive fallback in case the service worker itself is ever slow
+    // to respond.
     verifyBtn.addEventListener('click', function () {
       if (location.search.indexOf('exposeObgState=true') === -1) {
         verifyResult.style.display = '';
@@ -2904,52 +2903,18 @@
       verifyResult.style.display = '';
       verifyResult.textContent = 'Checking window.xSbState\u2026';
       var settled = false;
-      var cspViolation = null;
-      var timeoutId;
-
-      function cleanup() {
-        window.removeEventListener('message', onMsg);
-        document.removeEventListener('securitypolicyviolation', onCsp);
-        clearTimeout(timeoutId);
-      }
-
-      function onCsp(ev) {
-        // Record it but don't resolve immediately - a violation for some
-        // unrelated inline script elsewhere on the page shouldn't be
-        // misattributed; only used to enrich the message if we actually
-        // time out with no response.
-        cspViolation = ev.violatedDirective || ev.effectiveDirective || 'unknown-directive';
-      }
-
-      timeoutId = setTimeout(function () {
+      var timeoutId = setTimeout(function () {
         if (settled) return;
         settled = true;
-        cleanup();
-        verifyResult.textContent = cspViolation
-          ? ('No response from the page after 5s \u2013 likely blocked by the page\'s Content-Security-Policy (' + cspViolation + ').')
-          : 'No response from the page after 5s \u2013 the injected script may be blocked by the page\'s Content-Security-Policy, or window.xSbState may never be set on this page.';
+        verifyResult.textContent = 'No response from the background script after 5s \u2013 this should not normally happen; try reloading the extension.';
       }, 5000);
 
-      var script = document.createElement('script');
-      script.textContent = '(function(){try{' +
-        'var s=window.xSbState;' +
-        'if(!s){window.postMessage({__lgtXSbStateResult:true,ok:true,hasState:false},"*");return;}' +
-        // Exact field names for version/environment are unconfirmed (see
-        // REFERENCE.md - only sportsbook.statistics/scoreboard are
-        // documented) - best-effort guesses with a safe fallback to just
-        // listing top-level keys so this remains useful even if none of
-        // the guesses match the real shape.
-        'var version=(s.app&&s.app.version)||s.version||s.buildVersion||null;' +
-        'var environment=(s.app&&s.app.environment)||s.environment||null;' +
-        'window.postMessage({__lgtXSbStateResult:true,ok:true,hasState:true,version:version,environment:environment,keys:Object.keys(s)},"*");' +
-        '}catch(e){window.postMessage({__lgtXSbStateResult:true,ok:false,error:String(e)},"*");}})();';
-      function onMsg(ev) {
-        if (ev.source !== window || !ev.data || !ev.data.__lgtXSbStateResult) return;
+      chrome.runtime.sendMessage({ type: 'lgt-verify-xsbstate' }, function (d) {
+        void chrome.runtime.lastError;
         if (settled) return;
         settled = true;
-        cleanup();
-        var d = ev.data;
-        if (!d.ok) { verifyResult.textContent = 'xSbState check failed: ' + d.error; return; }
+        clearTimeout(timeoutId);
+        if (!d || !d.ok) { verifyResult.textContent = 'xSbState check failed: ' + ((d && d.error) || 'no response'); return; }
         if (!d.hasState) { verifyResult.textContent = 'window.xSbState is not present on this page.'; return; }
         if (d.version || d.environment) {
           var lines = ['xSbState: version=' + (d.version || '?') + ' environment=' + (d.environment || '?')];
@@ -2962,11 +2927,7 @@
         } else {
           verifyResult.textContent = 'xSbState present but no known version/environment field found. Top-level keys: ' + d.keys.join(', ');
         }
-      }
-      window.addEventListener('message', onMsg);
-      document.addEventListener('securitypolicyviolation', onCsp);
-      (document.head || document.documentElement).appendChild(script);
-      script.remove();
+      });
     });
 
     return wrap;

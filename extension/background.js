@@ -1564,6 +1564,52 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   return false;
 });
 
+// "Verify with page state" (2026-08-10, rewritten after live testing
+// found the ORIGINAL implementation's real root cause): content.js used
+// to inject a plain <script> tag to read window.xSbState from the
+// page's own MAIN-world context, since a content script's isolated
+// world cannot see the page's own JS variables directly. That technique
+// is a DOM script element, so it IS subject to the page's own
+// script-src CSP - confirmed live on a NordicBet QA sandbox link, whose
+// CSP is `script-src 'self' 'wasm-unsafe-eval' ...` with no
+// 'unsafe-inline', which silently blocked the injected script (a real
+// "Executing inline script violates ... Content-Security-Policy"
+// console error was captured). An earlier page.evaluate()-based probe
+// had misleadingly suggested the injection technique "worked" - that
+// call goes through the DevTools Protocol, which always bypasses page
+// CSP entirely, unlike an actual DOM <script> tag. The correct, official
+// fix is chrome.scripting.executeScript with world:'MAIN', which is
+// explicitly documented to run in the page's real JS context WITHOUT
+// being subject to the page's script-src CSP (it's not parsed as a
+// same-origin resource at all) - this can only be called from the
+// service worker (content scripts have no "scripting" permission
+// access), hence this message-based bridge.
+chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+  if (!msg || msg.type !== 'lgt-verify-xsbstate') return false;
+  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
+  chrome.scripting.executeScript({
+    target: { tabId: sender.tab.id },
+    world: 'MAIN',
+    func: function () {
+      var s = window.xSbState;
+      if (!s) return { ok: true, hasState: false };
+      // Exact field names for version/environment are unconfirmed (see
+      // REFERENCE.md - only sportsbook.statistics/scoreboard are
+      // documented) - best-effort guesses with a safe fallback to just
+      // listing top-level keys so this remains useful even if none of
+      // the guesses match the real shape.
+      var version = (s.app && s.app.version) || s.version || s.buildVersion || null;
+      var environment = (s.app && s.app.environment) || s.environment || null;
+      return { ok: true, hasState: true, version: version, environment: environment, keys: Object.keys(s) };
+    }
+  }).then(function (results) {
+    sendResponse((results && results[0] && results[0].result) || { ok: false, error: 'no result from executeScript' });
+  }, function (err) {
+    sendResponse({ ok: false, error: String((err && err.message) || err) });
+  });
+  return true; // keep sendResponse alive for the async executeScript call
+});
+
 // Opens a NEW tab for the given generated link with Sportradar spoofing
 // already active before the page starts loading (unlike "Embed here",
 // this acts on a brand-new tab it creates itself, not the current one -

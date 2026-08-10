@@ -60,12 +60,17 @@ brand page you're already logged into — no CLI, no headless automation.
   "Sportsbook Tool" bookmarklet's own "SB Version" field, both of which
   can silently show a stale/wrong value. Flags with an orange badge when
   the served environment differs from the page's own (i.e. a Bundle
-  override is active). Includes a "Copy URL" button for bug reports and
-  an optional, on-demand **"Verify with page state"** button that
-  cross-checks against `window.xSbState` (only useful on a link with
-  `exposeObgState=true`) for anyone who wants a second, independent
-  confirmation — resolves within 5 seconds either way (never hangs), and
-  reports a specific "blocked by page CSP" reason if that's detected.
+  override is active). An optional, on-demand **"Verify with page
+  state"** button cross-checks against `window.xSbState` (only useful on
+  a link with `exposeObgState=true`) for anyone who wants a second,
+  independent confirmation. It reads the page's real, live JS context via
+  `chrome.scripting.executeScript({world: 'MAIN'})` from the background
+  service worker — the officially-documented way to run code in a page's
+  actual context without being subject to that page's own
+  Content-Security-Policy (many sandbox pages ship a strict `script-src`
+  with no `unsafe-inline`, which silently blocked an earlier,
+  DOM-script-injection-based implementation of this check). Resolves
+  within a few seconds either way (never hangs indefinitely).
   Note: the internal `/dist/<label>/...` path segment in
   the bundle URL is *not* itself a reliable environment indicator (a
   brand's TEST site has been observed serving its bundle from a path
@@ -80,8 +85,11 @@ brand page you're already logged into — no CLI, no headless automation.
   environment's `indexer.json` (the same file the Bundle Override feature
   already fetches/caches): it checks whether any of the observed
   filenames match a brand's listed entry-point or facade chunk files, and
-  if so reports that build's version (e.g. `SB build: v8.1.5.4616-rc7c7784
-  [sandbox, QA]`). The lookup is scoped to the one brand detected from the
+  if so reports that build's version and the actual detected **brand
+  name** — e.g. `SB build: v8.1.5.4616-rc7c7784 [nordicbet, QA]` — instead
+  of the generic word "sandbox", since the brand is already unambiguous
+  from the link's own hostname.
+  The lookup is scoped to the one brand detected from the
   sandbox link's own hostname, since many chunk files are shared
   byte-for-byte across several/most brands (common vendor/framework code)
   — without that scoping the version would be ambiguous and unresolved.
@@ -89,8 +97,8 @@ brand page you're already logged into — no CLI, no headless automation.
   unambiguous on that axis too, which is uncommon since desktop/mobile
   builds usually share the exact same chunks; when nothing resolves yet
   (or the environment's indexer.json has no matching entry) the strip
-  falls back to the plain "sandbox link — version/device not encoded in
-  URL" label instead of guessing.
+  falls back to the plain "<brand> sandbox link — version/device not
+  encoded in URL" label instead of guessing.
 
 ## Install (bookmarklet)
 
@@ -387,10 +395,15 @@ is largely unchanged:
   positives on unrelated websites that happen to serve a similarly-named
   `/assets/main-*.js` file. The "Verify with page state"
   button requires `exposeObgState=true` on the URL; without it, clicking
-  the button just explains why it can't check. It always resolves within
-  5 seconds (never hangs), reporting a specific "blocked by page CSP"
-  reason if a `securitypolicyviolation` event fires in that window. The
-  exact version/environment field names inside `window.xSbState` aren't
+  the button just explains why it can't check. Since 1.14.0 it reads
+  `window.xSbState` via `chrome.scripting.executeScript({world: 'MAIN'})`
+  from the background service worker, which bypasses the page's own
+  Content-Security-Policy entirely (the documented Chrome-correct way to
+  run code in a page's real JS context) — an earlier
+  DOM-`<script>`-injection-based implementation silently failed forever
+  ("No response after 5s") on any page whose CSP lacked `unsafe-inline`,
+  which in practice was every sandbox page tested. The exact
+  version/environment field names inside `window.xSbState` aren't
   officially documented, so that secondary check falls back to listing
   the object's top-level keys if none of its best-effort field guesses
   match — the primary, always-on network-based reading doesn't depend on
