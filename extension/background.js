@@ -674,6 +674,10 @@ chrome.tabs.onUpdated.addListener(function (tabId, changeInfo) {
     }
     if (bleNavigatingAway) stopBleCorsRule(tabId);
   }
+  // Bundle Override's own stale-rule cleanup runs in
+  // chrome.webNavigation.onBeforeNavigate instead (see the comment there)
+  // - onUpdated's 'loading' event fires too late to reliably beat the new
+  // page's own first bundle-file request.
 });
 
 // ---------------------------------------------------------------------
@@ -903,6 +907,28 @@ function realBrandOriginBg(brandKey, environment) {
 if (chrome.webNavigation && chrome.webNavigation.onBeforeNavigate) {
   chrome.webNavigation.onBeforeNavigate.addListener(function (details) {
     if (details.frameId !== 0) return; // top-level navigations only
+
+    // Bundle Override stale-rule cleanup (2026-08-10 fix) - MUST run here,
+    // in onBeforeNavigate (fires before the navigation's own first request
+    // goes out), not in chrome.tabs.onUpdated's 'loading' event (which
+    // fires too late in practice: the async declarativeNetRequest rule
+    // removal was still in flight by the time the new page's first script
+    // request already matched the stale rule, confirmed by a live repro
+    // where the old removal-on-'loading' approach still let the override
+    // carry over - the whole point is to guarantee removal happens BEFORE
+    // any request the new page makes, not merely "eventually"). Placed
+    // ahead of the playground-host detection below and NOT gated on it,
+    // since Bundle Override must be cleared even if the tab is navigating
+    // away to something that isn't itself a recognized playground host.
+    if (bundleRuleIdsByTab[details.tabId]) {
+      var bundleExpectedUrl = bundleExpectedUrlByTab[details.tabId];
+      if (bundleExpectedUrl && details.url !== bundleExpectedUrl) {
+        stopBundleOverrideRule(details.tabId).catch(function (err) {
+          console.warn('[link-gen-tool] stale Bundle Override cleanup failed:', err);
+        });
+      }
+    }
+
     var hostname;
     try { hostname = new URL(details.url).hostname; } catch (e) { return; }
     var info = detectBrandAndEnvFromPlaygroundHost(hostname);
@@ -1053,6 +1079,11 @@ var BUNDLE_RULE_ID_START = 930001;
 var bundleRuleIdsByTab = {}; // tabId -> ruleId[] - an override can add up
 // to ~4 rules at once (2 devices x N files-per-device), unlike the single-
 // rule-per-tab features above, so this tracks an array, not one id.
+var bundleExpectedUrlByTab = {}; // tabId -> the FULL URL (not just origin)
+// the tab was showing when Bundle Override was applied - see the
+// stale-cleanup logic in chrome.webNavigation.onBeforeNavigate above for
+// why this must be the whole URL, unlike the origin-only tracking used by
+// the Sportradar-spoof/BLE-CORS features.
 var bundleMatchedByTab = {}; // tabId -> {ruleId, requestUrl, timestamp}[] -
 // populated by the onRuleMatchedDebug listener below, purely for the
 // Bundle tab's own "N request(s) redirected" status readout - the same
@@ -1199,6 +1230,7 @@ function startBundleOverrideRule(tabId, targetEnv, brandId, sandboxDevice) {
 
 function stopBundleOverrideRule(tabId) {
   var ruleIds = bundleRuleIdsByTab[tabId];
+  delete bundleExpectedUrlByTab[tabId];
   if (!ruleIds || !ruleIds.length) return Promise.resolve();
   delete bundleRuleIdsByTab[tabId];
   delete bundleMatchedByTab[tabId];
@@ -1232,6 +1264,13 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   var targetEnv = msg.targetEnv, brandId = msg.brandId;
   var sandboxDevice = (msg.sandboxDevice === 'desktop' || msg.sandboxDevice === 'mobile') ? msg.sandboxDevice : null;
   if (!targetEnv || !brandId) { sendResponse({ ok: false, error: 'missing targetEnv or brandId' }); return false; }
+  // Remember the exact URL the override was applied for (see the
+  // stale-cleanup logic in chrome.webNavigation.onBeforeNavigate above,
+  // and the comment on bundleExpectedUrlByTab above for why this is the
+  // whole URL, not just the origin) - Bundle Override is meant to be tied
+  // to one specific tested link, unlike the Sportradar-spoof/BLE-CORS
+  // domain-wide fixes.
+  if (sender.tab.url) bundleExpectedUrlByTab[tabId] = sender.tab.url;
   startBundleOverrideRule(tabId, targetEnv, brandId, sandboxDevice).then(function (result) {
     sendResponse({ ok: true, ruleCount: result.ruleCount });
   }).catch(function (err) {

@@ -377,7 +377,16 @@ is largely unchanged:
   Apply if the target page was already loaded before you applied the
   override (a `declarativeNetRequest` rule only affects requests made
   *after* it's registered, not ones already in flight or already
-  rendered).
+  rendered). Since 1.15.0, the override is also automatically cleared the
+  moment you navigate that same tab away to a genuinely different link
+  (`chrome.webNavigation.onBeforeNavigate`, fires before the new page's
+  own first request) — before this fix, an override applied once silently
+  kept redirecting the bundle on ANY later, unrelated navigation in that
+  tab, which could make an otherwise-fine link fail to load at all (a
+  mismatched env/version combination can break the app outright, not just
+  show a stale version label). A same-URL reload (F5) is unaffected and
+  still correctly preserves the override, matching the documented
+  "Apply, then reload the same page" workflow.
 - **Detected build strip**: only populates once the tab has actually
   requested a sportsbook bundle file — a lobby-only or non-sportsbook
   page will keep showing "No sportsbook bundle detected on this tab
