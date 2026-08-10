@@ -525,6 +525,53 @@
     return m[1] + stc + '/' + ctx + m[4];
   }
 
+  // Mints a fresh, ALPHA-valid BLE customer context from PROD - the exact
+  // same source and mechanism the bleSource sandbox-link option already
+  // uses (see generateLink's `apiEnv = opts.bleSource ? 'prod' : ...`) -
+  // but returns the raw {stc, ctx} pair instead of splicing it into a URL,
+  // since the "BLE Data" tab (buildModeE) needs it as declarativeNetRequest
+  // request-header VALUES, not as URL path segments. `device` matters here:
+  // the earlier device-mismatched-context investigation (see plan.md)
+  // found desktop and mobile are genuinely different context registrations
+  // on the backend - reusing a desktop-minted context for a page that's
+  // actually running as mobile (or vice versa) risks the same kind of
+  // failure, so the caller must mint for whichever device the override is
+  // actually being applied to.
+  function fetchFreshBleContext(brand, device, loggedIn, customerKeyFilter) {
+    var brandGuid = BRANDS[brand];
+    if (!brandGuid) return Promise.reject(new Error('Unknown brand: ' + brand));
+    var base = apiBase('prod');
+    var prefix = loggedIn ? 'logged-in' : 'logged-out';
+    var filter = (customerKeyFilter || '').toLowerCase();
+    return fetchInternal(base + '/api/customers/' + brandGuid)
+      .then(function (r) {
+        if (!r.ok) throw new Error('customers fetch failed: HTTP ' + r.status);
+        return r.json();
+      })
+      .then(function (customers) {
+        var keys = Object.keys(customers).filter(function (k) {
+          return k.toLowerCase().indexOf(prefix) === 0 && k.toLowerCase().indexOf(filter) !== -1;
+        });
+        if (keys.length === 0) {
+          var available = Object.keys(customers).filter(function (k) { return k.toLowerCase().indexOf(prefix) === 0; });
+          throw new Error('No customer key matched prefix "' + prefix + '" + filter "' + filter + '". Available: ' + available.join(', '));
+        }
+        var customerKey = keys[0];
+        var uri = base + '/api/user-context/' + customerKey +
+          '?brand=' + brandGuid + '&shouldUseSbIl=false&generateLinksPage=true&overrideIFrameBaseUrlWith=';
+        return fetchInternal(uri).then(function (r) {
+          if (!r.ok) throw new Error('user-context fetch failed: HTTP ' + r.status);
+          return r.json();
+        }).then(function (data) {
+          var ctxNode = ((data.data || {}).context || {})[device] || {};
+          var stc = (ctxNode.customerContext || {}).staticContextId;
+          var ctx = (ctxNode.customerContext || {}).userContextId;
+          if (!stc || !ctx) throw new Error('No BLE context found for device "' + device + '" in the user-context response.');
+          return { stc: stc, ctx: ctx, customerKey: customerKey };
+        });
+      });
+  }
+
   // ---------------------------------------------------------------------
   // Mode B: Live-Login Capture. Unlike the bookmarklet, capture itself
   // happens in background.js via chrome.webRequest (network layer) - this
@@ -1765,19 +1812,22 @@
     var tabB = el('div', { class: 'lgt-tab' }, ['Live Login']);
     var tabC = el('div', { class: 'lgt-tab' }, ['Credentials']);
     var tabD = el('div', { class: 'lgt-tab' }, ['Bundle']);
-    tabs.appendChild(tabA); tabs.appendChild(tabB); tabs.appendChild(tabC); tabs.appendChild(tabD);
+    var tabE = el('div', { class: 'lgt-tab' }, ['BLE Data']);
+    tabs.appendChild(tabA); tabs.appendChild(tabB); tabs.appendChild(tabC); tabs.appendChild(tabD); tabs.appendChild(tabE);
 
     var bodyA = buildModeA();
     var bodyB = buildModeB();
     var bodyC = buildModeC();
     var bodyD = buildModeD();
+    var bodyE = buildModeE();
     bodyB.style.display = 'none';
     bodyC.style.display = 'none';
     bodyD.style.display = 'none';
+    bodyE.style.display = 'none';
     bodyB.__lgtGoToCredentials = function () { tabC.click(); };
     bodyA.__lgtGoToCredentials = function () { tabC.click(); };
 
-    var pairs = [[tabA, bodyA], [tabB, bodyB], [tabC, bodyC], [tabD, bodyD]];
+    var pairs = [[tabA, bodyA], [tabB, bodyB], [tabC, bodyC], [tabD, bodyD], [tabE, bodyE]];
     pairs.forEach(function (pair) {
       pair[0].addEventListener('click', function () {
         pairs.forEach(function (p) {
@@ -1797,6 +1847,7 @@
     content.appendChild(bodyB);
     content.appendChild(bodyC);
     content.appendChild(bodyD);
+    content.appendChild(bodyE);
 
     panel.appendChild(title);
     panel.appendChild(content);
@@ -3062,6 +3113,135 @@
       // looked identical whether Apply/Disable was clicked.
       if (saved && saved.brand && BRANDS[saved.brand]) brandSel.value = saved.brand;
       refreshTargetEnv();
+    });
+
+    return wrap;
+  }
+
+  // Persists the BLE Data tab's own form controls (brand / device /
+  // logged-in), same rationale as BUNDLE_STATE_KEY above.
+  var BLE_DATA_STATE_KEY = 'lgt-ble-data-state-v1';
+
+  function saveBleDataState(partial) {
+    chrome.storage.local.get([BLE_DATA_STATE_KEY], function (res) {
+      var state = Object.assign({}, res && res[BLE_DATA_STATE_KEY], partial);
+      var obj = {};
+      obj[BLE_DATA_STATE_KEY] = state;
+      chrome.storage.local.set(obj);
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // Mode E: BLE Data Override - resolves the "22-es csapda" (catch-22)
+  // between Bundle Override (real brand pages only) and bleSource=1 (this
+  // tool's own standalone sandbox links only). See plan.md's "KUTATÁS
+  // EREDMÉNYE (2026-08-10, follow-up #3)" section for the full
+  // investigation - in short: every /api/sb/v1/* call (on a sandbox link
+  // AND on a real brand page alike) carries `x-sb-static-context-id` /
+  // `x-sb-user-context-id` request headers that alone determine which
+  // customer/session context the backend resolves data for. This tab
+  // mints a fresh, ALPHA-valid BLE context from PROD (the same source
+  // bleSource already uses) and applies it to THIS tab via
+  // declarativeNetRequest: redirect /api/sb/v1/* to the brand's ALPHA
+  // host, and rewrite those two context-id headers to the freshly minted
+  // pair - independent of, and combinable with, Bundle Override on the
+  // same tab.
+  // ---------------------------------------------------------------------
+
+  function buildModeE() {
+    var wrap = el('div', {});
+    var detected = detectBrandAndEnv();
+
+    var brandSel = el('select', {}, brandOptions(detected.brand || undefined));
+    var deviceSel = el('select', {}, [
+      el('option', { value: 'desktop' }, ['Desktop']),
+      el('option', { value: 'mobile' }, ['Mobile'])
+    ]);
+    var loggedInChk = el('input', { type: 'checkbox' });
+    var loggedInLabel = el('label', { style: 'display:flex;align-items:center;gap:6px;justify-content:flex-start' }, [loggedInChk, 'Logged in (only if this brand has a logged-in prod customer key)']);
+
+    var status = el('div', { class: 'lgt-log' }, ['Not active on this tab.']);
+
+    function alphaHostForBrand(brand) {
+      var suffix = PLAYGROUND_HOST_SUFFIX[brand];
+      return suffix ? ('d-cf.alpha.' + suffix) : null;
+    }
+
+    function refreshStatus() {
+      chrome.runtime.sendMessage({ type: 'lgt-ble-data-status' }, function (res) {
+        void chrome.runtime.lastError;
+        if (!res || !res.ok) return;
+        if (!res.active) status.textContent = 'Not active on this tab.';
+        // While active, leave whatever the last Apply already wrote
+        // (customer key / stc used) instead of overwriting it with a
+        // generic "Active" - more useful for the tester to see at a
+        // glance which context is currently applied.
+      });
+    }
+    pollWhileExtensionValid(refreshStatus, 3000);
+
+    var applyBtn = el('button', {
+      onclick: function () {
+        var brand = brandSel.value;
+        var device = deviceSel.value;
+        var alphaHost = alphaHostForBrand(brand);
+        if (!alphaHost) { status.textContent = 'This brand has no known playground host - cannot resolve an ALPHA target.'; return; }
+        status.textContent = 'Fetching a fresh BLE context from PROD...';
+        fetchFreshBleContext(brand, device, loggedInChk.checked, '').then(function (result) {
+          status.textContent = 'Applying (' + result.customerKey + ')...';
+          chrome.runtime.sendMessage({
+            type: 'lgt-ble-data-start', alphaHost: alphaHost, stc: result.stc, ctx: result.ctx
+          }, function (res) {
+            void chrome.runtime.lastError;
+            if (!res || !res.ok) { status.textContent = 'Failed: ' + ((res && res.error) || 'unknown error'); return; }
+            status.textContent = 'Active - ' + device + ' context ' + result.stc + ' -> ' + alphaHost + '. Reload the page if it was already loaded.';
+          });
+        }).catch(function (err) {
+          if (err && err.isVpnRequired) { showVpnRequiredPopup(err.message, function () { applyBtn.click(); }); status.textContent = err.message; return; }
+          status.textContent = 'Failed: ' + (err && err.message || err);
+        });
+      }
+    }, ['Apply']);
+
+    var disableBtn = el('button', {
+      onclick: function () {
+        chrome.runtime.sendMessage({ type: 'lgt-ble-data-stop' }, function () {
+          void chrome.runtime.lastError;
+          status.textContent = 'Not active on this tab.';
+        });
+      }
+    }, ['Disable']);
+
+    brandSel.addEventListener('change', function () { saveBleDataState({ brand: brandSel.value }); });
+    deviceSel.addEventListener('change', function () { saveBleDataState({ device: deviceSel.value }); });
+    loggedInChk.addEventListener('change', function () { saveBleDataState({ loggedIn: loggedInChk.checked }); });
+
+    wrap.appendChild(el('label', {}, ['Brand']));
+    wrap.appendChild(brandSel);
+    wrap.appendChild(el('label', {}, ['Device (must match how this page actually renders - desktop vs mobile context are different registrations)']));
+    wrap.appendChild(deviceSel);
+    wrap.appendChild(loggedInLabel);
+    wrap.appendChild(el('div', { style: 'display:flex;gap:6px;margin-top:6px' }, [applyBtn, disableBtn]));
+    wrap.appendChild(status);
+    wrap.appendChild(el('div', { class: 'lgt-hint', style: 'margin-top:8px' }, [
+      'Mints a fresh, ALPHA-valid BLE customer context from PROD and applies ' +
+      'it to THIS tab: redirects /api/sb/v1/* calls (event data, live-event ' +
+      'list, markets, etc.) to the brand\u2019s ALPHA host and rewrites the ' +
+      'context-id headers so ALPHA recognizes the request. Works on ANY ' +
+      'page - a real brand page (QA/TEST) or one of this tool\u2019s own ' +
+      'sandbox links - independently of, and combinable with, Bundle ' +
+      'Override on the same tab. Since the live-event list itself gets ' +
+      'redirected too, you don\u2019t need to manually navigate with a ' +
+      'borrowed eventId - just Apply, reload, and browse the live section ' +
+      'normally. Does NOT restore Match/Visual/Statistics tabs (those use a ' +
+      'separate realtime channel, a known, unrelated gap - see README).'
+    ]));
+
+    chrome.storage.local.get([BLE_DATA_STATE_KEY], function (res) {
+      var saved = res && res[BLE_DATA_STATE_KEY];
+      if (saved && saved.brand && BRANDS[saved.brand]) brandSel.value = saved.brand;
+      if (saved && saved.device) deviceSel.value = saved.device;
+      if (saved && saved.loggedIn) loggedInChk.checked = true;
     });
 
     return wrap;

@@ -60,6 +60,43 @@ brand page you're already logged into — no CLI, no headless automation.
   override" in `extension/background.js` for the implementation, or the
   `sb-bundle-override-tool` skill's `REFERENCE.md` for the original
   tool's own documentation.
+- **BLE Data** tab (Chrome extension only): gets you **fresh, live BLE
+  event data on ANY tab** — a real brand page (`test.nordicbet.com`,
+  `qa.nordicbet.com`, ...) or a standalone sandbox link — independent of
+  and freely combinable with the Bundle tab above. Solves the
+  "22-es csapda" catch-22: Bundle Override only works on real brand
+  pages, while the classic `bleSource=1` query flag only works on the
+  tool's own sandbox links (a real brand page ignores it entirely,
+  since it always talks to its own native BDE/TEST-QA backend
+  regardless of the URL). This tab reimplements the *effect* of
+  `bleSource` at the network layer instead of relying on the page's own
+  native handling of that flag, so it works on any page:
+  it redirects the current tab's `/api/sb/v1/*` REST calls
+  (`event-market`, `event-page-schema`, `widgets/view`,
+  `competitions/liveEvents`, ...) to the brand's **ALPHA** host, and
+  rewrites the `x-sb-static-context-id` / `x-sb-user-context-id` request
+  headers on those redirected calls to a fresh, ALPHA-valid context
+  minted from PROD (the same mechanism the Generate/Live Login tabs'
+  existing BLE-source option already uses) — both via a tab-scoped,
+  session-only `declarativeNetRequest` rule pair, cleared automatically
+  on navigation or tab close, exactly like the Bundle tab. Because
+  `competitions/liveEvents` is included, the page's own live-event list
+  becomes populated with real ALPHA events automatically — just Apply,
+  reload, and browse; no need to hand-craft a URL with an
+  alpha/prod-borrowed `eventId`. **Pick the Desktop/Mobile option
+  matching how the current page actually renders** — desktop and mobile
+  contexts are genuinely different backend registrations, and mixing
+  them can subtly break things (same reasoning as the Live Login tab's
+  desktop/mobile split, see "Known limitations" below). **Known gap**:
+  the Match/Visual/Statistics tabs and the interactive pitch tracker use
+  a *separate* realtime channel that this override doesn't touch — see
+  the `sbplayground-link-generator` skill's `REFERENCE.md` for that
+  limitation's own detail. **Practical combined workflow** (the actual
+  scenario this tab was built for): TEST env is down → open a QA brand
+  page → Bundle tab: Apply QA→TEST (to run TEST's own build against QA
+  infrastructure) → BLE Data tab: Apply (for fresh, live events instead
+  of QA's own stale/synthetic BDE catalogue) → reload once, both
+  overrides are active together.
 - **Detected build strip** (Chrome extension only, always visible above
   the tabs): shows the environment/version actually serving the current
   tab's sportsbook bundle, read from the real network request the
@@ -403,6 +440,20 @@ is largely unchanged:
   show a stale version label). A same-URL reload (F5) is unaffected and
   still correctly preserves the override, matching the documented
   "Apply, then reload the same page" workflow.
+- **BLE Data tab**: requires a page reload after Apply, same reason as
+  the Bundle tab (`declarativeNetRequest` only affects requests made
+  after registration). Cleared automatically on navigation to a
+  genuinely different link or on tab close, same mechanism as the
+  Bundle tab. Freely combinable with the Bundle tab on the same tab —
+  they touch entirely disjoint URL patterns (`/api/sb/v1/*` vs the
+  sportsbook JS bundle files) and don't interfere with each other.
+  Does **not** fix the separate, unrelated Match/Visual/Statistics-tab
+  gap (documented in the `sbplayground-link-generator` skill's
+  `REFERENCE.md`) — that data comes from a different realtime channel
+  this override doesn't touch. Mismatching the Desktop/Mobile selection
+  against how the page actually renders can subtly break things, since
+  desktop/mobile BLE contexts are genuinely different backend
+  registrations (same reasoning as the Live Login tab's device split).
 - **Detected build strip**: only populates once the tab has actually
   requested a sportsbook bundle file — a lobby-only or non-sportsbook
   page will keep showing "No sportsbook bundle detected on this tab

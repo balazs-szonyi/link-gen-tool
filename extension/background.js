@@ -929,6 +929,20 @@ if (chrome.webNavigation && chrome.webNavigation.onBeforeNavigate) {
       }
     }
 
+    // Same stale-rule cleanup, same reasoning, for BLE Data Override - its
+    // redirect rule is keyed to the CURRENT host at the time it was
+    // applied, so navigating to a genuinely different page (not just a
+    // same-URL reload) must clear it rather than leave a redirect rule
+    // targeting a host the tab is no longer on.
+    if (bleDataRuleIdsByTab[details.tabId]) {
+      var bleDataExpectedUrl = bleDataExpectedUrlByTab[details.tabId];
+      if (bleDataExpectedUrl && details.url !== bleDataExpectedUrl) {
+        stopBleDataOverrideRule(details.tabId).catch(function (err) {
+          console.warn('[link-gen-tool] stale BLE Data Override cleanup failed:', err);
+        });
+      }
+    }
+
     var hostname;
     try { hostname = new URL(details.url).hostname; } catch (e) { return; }
     var info = detectBrandAndEnvFromPlaygroundHost(hostname);
@@ -1044,6 +1058,168 @@ function stopBleCorsRule(tabId) {
 }
 
 // ---------------------------------------------------------------------
+// BLE Data Override - resolves the "22-es csapda" (catch-22) between
+// Bundle Override (only works on a real, brand-embedded page) and
+// bleSource=1 (only works on the tool's own standalone sandbox links):
+// this reimplements bleSource's effect at the NETWORK layer instead of
+// relying on the frontend's own bleSource query-flag handling, which only
+// exists in the standalone sandbox build - a real brand page has no
+// concept of bleSource at all and always talks to its own native (BDE)
+// backend regardless of the URL.
+//
+// Root-caused via live Playwright header inspection (2026-08-10): EVERY
+// `/api/sb/v1/*` call (event-page-schema, competitions/liveEvents,
+// widgets/view, event-market, most-popular-competitions, ...) - on a
+// sandbox link AND on a real brand page alike - carries two request
+// headers that alone determine which customer/session context the
+// backend resolves data for: `x-sb-static-context-id` and
+// `x-sb-user-context-id`. On a real brand page these are populated from
+// the page's own native (BDE) session, not from anything in the URL.
+// `brandid`/`x-sb-country-code`/etc. are brand-level, not
+// context-specific, and `sessiontoken` was confirmed (byte-for-byte
+// identical across three completely independent sessions, decoding to an
+// all-1s placeholder GUID) to be a static, non-secret placeholder - none
+// of those need touching.
+//
+// The fix is therefore two declarativeNetRequest rules per tab, mirroring
+// exactly the redirect+modifyHeaders combination the Sportradar spoof
+// above already uses (a redirect action and a modifyHeaders action cannot
+// live in the same rule, but two rules of different action types CAN both
+// apply to the same logical request, evaluated in different network
+// phases):
+//   1. redirect `/api/sb/v1/*` from the tab's OWN current host to the
+//      brand's ALPHA playground host (regex-substitution, preserving the
+//      full path+query unchanged) - restricted to a regex that requires
+//      the CURRENT host literally, so once a request has been redirected
+//      to the alpha host the rule no longer matches it (no redirect loop,
+//      and no accidental effect on unrelated hosts).
+//   2. on requests actually reaching that alpha host, overwrite the two
+//      context-id request headers to a caller-supplied ALPHA-valid
+//      stc/ctx pair (freshly minted from PROD via the exact same
+//      mechanism the Generate/Live-Login tabs' own bleSource option
+//      already uses - see content.js's `apiEnv = opts.bleSource ? 'prod'
+//      : ...`), plus a defensive Access-Control-Allow-Origin: '*'
+//      response-header rewrite (alpha's own CORS response was confirmed
+//      permissive by a direct curl probe, so this is redundant safety net
+//      more than a required fix, same reasoning as the existing BLE CORS
+//      fix above).
+//
+// Bonus effect (not originally planned, discovered during research): since
+// competitions/liveEvents is also redirected, the widget's own live-event
+// list becomes populated with ALPHA's real events automatically - the
+// user does not need to manually navigate with an alpha/prod-borrowed
+// eventId in the URL at all, just apply the override and browse normally.
+//
+// Fully independent of Bundle Override - both can be active on the same
+// tab at once (separate rule-id ranges, separate tracking maps), and
+// works identically whether the tab is a real brand page or one of this
+// tool's own sandbox links.
+// ---------------------------------------------------------------------
+
+var BLE_DATA_RULE_ID_START = 910001;
+var bleDataRuleIdsByTab = {}; // tabId -> [redirectRuleId, headerRuleId]
+var bleDataExpectedUrlByTab = {}; // tabId -> full URL the override was
+// applied for, same stale-cleanup role as bundleExpectedUrlByTab above.
+
+function escapeRegexLiteral(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function startBleDataOverrideRule(tabId, currentHost, alphaHost, stc, ctx) {
+  var previousRuleIds = bleDataRuleIdsByTab[tabId];
+  return new Promise(function (resolve, reject) {
+    nextUniqueSessionRuleIds(BLE_DATA_RULE_ID_START, 2, function (ruleIds) {
+      var redirectRule = {
+        id: ruleIds[0],
+        priority: 1,
+        action: {
+          type: 'redirect',
+          redirect: { regexSubstitution: 'https://' + alphaHost + '/api/sb/v1/\\1' }
+        },
+        condition: {
+          regexFilter: '^https?://' + escapeRegexLiteral(currentHost) + '/api/sb/v1/(.*)$',
+          resourceTypes: ['xmlhttprequest'],
+          tabIds: [tabId]
+        }
+      };
+      var headerRule = {
+        id: ruleIds[1],
+        priority: 1,
+        action: {
+          type: 'modifyHeaders',
+          requestHeaders: [
+            { header: 'x-sb-static-context-id', operation: 'set', value: stc },
+            { header: 'x-sb-user-context-id', operation: 'set', value: ctx }
+          ],
+          responseHeaders: [
+            { header: 'Access-Control-Allow-Origin', operation: 'set', value: '*' },
+            { header: 'Access-Control-Allow-Credentials', operation: 'remove' }
+          ]
+        },
+        condition: {
+          urlFilter: '||' + alphaHost + '/api/sb/v1/*',
+          resourceTypes: ['xmlhttprequest'],
+          tabIds: [tabId]
+        }
+      };
+      chrome.declarativeNetRequest.updateSessionRules({
+        addRules: [redirectRule, headerRule],
+        removeRuleIds: previousRuleIds || []
+      }, function () {
+        if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
+        bleDataRuleIdsByTab[tabId] = [redirectRule.id, headerRule.id];
+        resolve();
+      });
+    });
+  });
+}
+
+function stopBleDataOverrideRule(tabId) {
+  var ruleIds = bleDataRuleIdsByTab[tabId];
+  delete bleDataExpectedUrlByTab[tabId];
+  if (!ruleIds || !ruleIds.length) return Promise.resolve();
+  delete bleDataRuleIdsByTab[tabId];
+  return new Promise(function (resolve) {
+    chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: ruleIds }, function () {
+      void chrome.runtime.lastError; // ignore - rules may already be gone
+      resolve();
+    });
+  });
+}
+
+chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+  if (!msg || msg.type !== 'lgt-ble-data-start') return false;
+  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
+  var tabId = sender.tab.id;
+  var alphaHost = msg.alphaHost, stc = msg.stc, ctx = msg.ctx;
+  if (!alphaHost || !stc || !ctx) { sendResponse({ ok: false, error: 'missing alphaHost, stc, or ctx' }); return false; }
+  var currentHost;
+  try { currentHost = new URL(sender.tab.url).hostname; } catch (e) { sendResponse({ ok: false, error: 'could not read current tab URL' }); return false; }
+  if (sender.tab.url) bleDataExpectedUrlByTab[tabId] = sender.tab.url;
+  startBleDataOverrideRule(tabId, currentHost, alphaHost, stc, ctx).then(function () {
+    sendResponse({ ok: true });
+  }).catch(function (err) {
+    sendResponse({ ok: false, error: String(err && err.message || err) });
+  });
+  return true;
+});
+
+chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+  if (!msg || msg.type !== 'lgt-ble-data-stop') return false;
+  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
+  stopBleDataOverrideRule(sender.tab.id).then(function () { sendResponse({ ok: true }); });
+  return true;
+});
+
+chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+  if (!msg || msg.type !== 'lgt-ble-data-status') return false;
+  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
+  var ruleIds = bleDataRuleIdsByTab[sender.tab.id] || [];
+  sendResponse({ ok: true, active: ruleIds.length > 0 });
+  return false;
+});
+
+// ---------------------------------------------------------------------
 // Bundle override - redirects a brand's sportsbook bundle (main-*.js, and
 // any other per-device file the target env's indexer.json lists) to a
 // DIFFERENT environment's build (e.g. run the QA build while browsing a
@@ -1067,6 +1243,7 @@ function stopBleCorsRule(tabId) {
 // enforced by the Bundle tab's own env-select options in content.js (it
 // only ever offers the one same-layer alternative), not re-validated here.
 // ---------------------------------------------------------------------
+
 
 var BUNDLE_INDEXER_URLS = {
   test: 'https://d-cf.test.sbplayground1.net/dist/test/xp/widgets/sportsbook/indexer.json',
