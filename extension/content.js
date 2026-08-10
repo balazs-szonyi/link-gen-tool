@@ -203,6 +203,23 @@
 
   var ENV_LABELS = ['test', 'qa', 'alpha', 'prod'];
 
+  // Env -> layer, for the Bundle tab: only QA<->TEST (BLE) or ALPHA<->PROD
+  // (BDE) overrides are ever offered, since the two layers' bundle formats
+  // are incompatible (see the sb-bundle-override-tool skill's
+  // REFERENCE.md Anti-patterns) - mixing them loads a broken build with
+  // no explicit runtime error, so this is enforced in the UI rather than
+  // left to the user to know/remember.
+  var BUNDLE_LAYER = { test: 'ble', qa: 'ble', alpha: 'bde', prod: 'bde' };
+  function bundleLayerPartner(env) {
+    var layer = BUNDLE_LAYER[env];
+    if (!layer) return null;
+    var partner = null;
+    Object.keys(BUNDLE_LAYER).forEach(function (e) {
+      if (e !== env && BUNDLE_LAYER[e] === layer) partner = e;
+    });
+    return partner;
+  }
+
   // Item 14: brands with no plain user/pass login at all (Swedish
   // BankID / Danish MitID-CPR or similar step-up auth) - auto-login is
   // fundamentally impossible for these, so both the Generate tab's
@@ -1712,17 +1729,20 @@
     var tabA = el('div', { class: 'lgt-tab active' }, ['Generate']);
     var tabB = el('div', { class: 'lgt-tab' }, ['Live Login']);
     var tabC = el('div', { class: 'lgt-tab' }, ['Credentials']);
-    tabs.appendChild(tabA); tabs.appendChild(tabB); tabs.appendChild(tabC);
+    var tabD = el('div', { class: 'lgt-tab' }, ['Bundle']);
+    tabs.appendChild(tabA); tabs.appendChild(tabB); tabs.appendChild(tabC); tabs.appendChild(tabD);
 
     var bodyA = buildModeA();
     var bodyB = buildModeB();
     var bodyC = buildModeC();
+    var bodyD = buildModeD();
     bodyB.style.display = 'none';
     bodyC.style.display = 'none';
+    bodyD.style.display = 'none';
     bodyB.__lgtGoToCredentials = function () { tabC.click(); };
     bodyA.__lgtGoToCredentials = function () { tabC.click(); };
 
-    var pairs = [[tabA, bodyA], [tabB, bodyB], [tabC, bodyC]];
+    var pairs = [[tabA, bodyA], [tabB, bodyB], [tabC, bodyC], [tabD, bodyD]];
     pairs.forEach(function (pair) {
       pair[0].addEventListener('click', function () {
         pairs.forEach(function (p) {
@@ -1740,6 +1760,7 @@
     content.appendChild(bodyA);
     content.appendChild(bodyB);
     content.appendChild(bodyC);
+    content.appendChild(bodyD);
 
     panel.appendChild(title);
     panel.appendChild(content);
@@ -2709,6 +2730,115 @@
     wrap.appendChild(el('label', {}, ['Saved credentials']));
     wrap.appendChild(list);
     wrap.__lgtCredList = list;
+    return wrap;
+  }
+
+  // Persists the Bundle tab's own form controls (brand / current
+  // environment), same rationale as GEN_STATE_KEY above - a page reload
+  // rebuilds the whole panel from scratch and shouldn't reset these.
+  var BUNDLE_STATE_KEY = 'lgt-bundle-state-v1';
+
+  function saveBundleState(partial) {
+    chrome.storage.local.get([BUNDLE_STATE_KEY], function (res) {
+      var state = Object.assign({}, res && res[BUNDLE_STATE_KEY], partial);
+      var obj = {};
+      obj[BUNDLE_STATE_KEY] = state;
+      chrome.storage.local.set(obj);
+    });
+  }
+
+  // "Bundle" tab - overrides this brand's sportsbook JS bundle (main-*.js)
+  // on THIS tab to run a different, same-layer environment's build
+  // (QA<->TEST or ALPHA<->PROD), via background.js's
+  // lgt-bundle-start/stop/status messages (see background.js's "Bundle
+  // override" section for the actual declarativeNetRequest mechanism).
+  // Deliberately independent of the Generate tab per user decision - the
+  // user applies this manually to whichever tab the panel happens to be
+  // open in, it never auto-applies to a newly generated/opened link.
+  function buildModeD() {
+    var wrap = el('div', {});
+    var detected = detectBrandAndEnv();
+
+    var brandSel = el('select', {}, brandOptions(detected.brand || undefined));
+    var curEnvSel = el('select', {}, ENV_LABELS.map(function (e) { return el('option', { value: e }, [e]); }));
+    if (detected.environment) curEnvSel.value = detected.environment;
+
+    var targetEnvBadge = el('div', { class: 'lgt-hint' }, ['']);
+    function refreshTargetEnv() {
+      var partner = bundleLayerPartner(curEnvSel.value);
+      targetEnvBadge.textContent = partner
+        ? ('Target build: ' + partner.toUpperCase() + ' (same layer as ' + curEnvSel.value.toUpperCase() + ')')
+        : 'Unknown layer for this environment.';
+      return partner;
+    }
+
+    var status = el('div', { class: 'lgt-log' }, ['Not active on this tab.']);
+
+    function refreshStatus() {
+      chrome.runtime.sendMessage({ type: 'lgt-bundle-status' }, function (res) {
+        void chrome.runtime.lastError;
+        if (!res || !res.ok) return;
+        status.textContent = res.active
+          ? ('Active (' + res.ruleCount + ' rule(s)) - ' + res.matched.length + ' request(s) redirected so far.')
+          : 'Not active on this tab.';
+      });
+    }
+    setInterval(refreshStatus, 3000);
+    refreshStatus();
+
+    var applyBtn = el('button', {
+      onclick: function () {
+        var brand = brandSel.value;
+        var brandGuid = BRANDS[brand];
+        var targetEnv = refreshTargetEnv();
+        if (!brandGuid) { status.textContent = 'Unknown brand.'; return; }
+        if (!targetEnv) { status.textContent = 'Could not determine a same-layer target environment.'; return; }
+        status.textContent = 'Applying...';
+        chrome.runtime.sendMessage({ type: 'lgt-bundle-start', targetEnv: targetEnv, brandId: brandGuid }, function (res) {
+          void chrome.runtime.lastError;
+          if (!res || !res.ok) { status.textContent = 'Failed: ' + ((res && res.error) || 'unknown error'); return; }
+          status.textContent = 'Active (' + res.ruleCount + ' rule(s) applied) - reload the page if it was already loaded.';
+        });
+      }
+    }, ['Apply']);
+
+    var disableBtn = el('button', {
+      onclick: function () {
+        chrome.runtime.sendMessage({ type: 'lgt-bundle-stop' }, function () {
+          void chrome.runtime.lastError;
+          status.textContent = 'Not active on this tab.';
+        });
+      }
+    }, ['Disable']);
+
+    brandSel.addEventListener('change', function () { saveBundleState({ brand: brandSel.value }); });
+    curEnvSel.addEventListener('change', function () { refreshTargetEnv(); saveBundleState({ environment: curEnvSel.value }); });
+
+    wrap.appendChild(el('label', {}, ['Brand']));
+    wrap.appendChild(brandSel);
+    wrap.appendChild(el('label', {}, ['Current environment (what this tab is actually on)']));
+    wrap.appendChild(curEnvSel);
+    wrap.appendChild(targetEnvBadge);
+    wrap.appendChild(el('div', { style: 'display:flex;gap:6px;margin-top:6px' }, [applyBtn, disableBtn]));
+    wrap.appendChild(status);
+    wrap.appendChild(el('div', { class: 'lgt-hint', style: 'margin-top:8px' }, [
+      'Redirects this brand\u2019s sportsbook bundle (main-*.js) on THIS tab ' +
+      'to the other environment in the same layer (QA\u2194TEST or ' +
+      'ALPHA\u2194PROD). Only works within the same layer - mixing layers ' +
+      'loads a broken build with no error. Reload the page after Apply if ' +
+      'it was already open. Avoid running the standalone "Sportsbook ' +
+      'Bundle Override Tool" extension at the same time in the same tab.'
+    ]));
+
+    chrome.storage.local.get([BUNDLE_STATE_KEY], function (res) {
+      var saved = res && res[BUNDLE_STATE_KEY];
+      if (saved) {
+        if (saved.brand && BRANDS[saved.brand]) brandSel.value = saved.brand;
+        if (saved.environment && ENV_LABELS.indexOf(saved.environment) !== -1) curEnvSel.value = saved.environment;
+      }
+      refreshTargetEnv();
+    });
+
     return wrap;
   }
 

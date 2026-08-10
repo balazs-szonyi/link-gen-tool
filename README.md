@@ -33,6 +33,21 @@ brand page you're already logged into — no CLI, no headless automation.
   "Why not a shared cross-origin vault?" below). The first credential you
   ever save on a domain becomes its default automatically; automation
   always uses the current default so it never blocks waiting for input.
+- **Bundle** tab (Chrome extension only): redirects the current tab's
+  sportsbook JS bundle (`main-*.js`) to a **different, same-layer**
+  environment's build — QA↔TEST or ALPHA↔PROD — without a deploy. Ports
+  the mechanism of the separate, standalone "Sportsbook Bundle Override
+  Tool" (`BetssonGroup/sb-bundle-override-tool`) directly into this
+  extension so you don't need to load a second extension side by side.
+  Auto-detects brand/environment from the page you're currently on; only
+  ever offers the one valid same-layer target (mixing QA/TEST with
+  ALPHA/PROD loads a broken build with no explicit error, so this isn't
+  even selectable). Scoped to the one tab you click Apply in via a
+  session-only `declarativeNetRequest` rule — never affects any other
+  tab or site, and is cleared automatically when that tab closes or you
+  click Disable. See "Bundle override" in `extension/background.js` for
+  the implementation, or the `sb-bundle-override-tool` skill's
+  `REFERENCE.md` for the original tool's own documentation.
 
 ## Install (bookmarklet)
 
@@ -71,8 +86,9 @@ every brand domain — no manual sync-code step needed.
 3. Open `chrome://extensions` in Chrome, enable **Developer mode** (top
    right), click **Load unpacked**, and select the extracted folder.
 4. Click the extension's toolbar icon on any page to toggle the panel —
-   same three tabs (Generate / Live Login / Credentials) as the
-   bookmarklet, same UI.
+   the same Generate / Live Login / Credentials tabs as the bookmarklet,
+   plus an extension-only fourth **Bundle** tab (see "What it does"
+   above).
 
 Chrome-only; not published to the Chrome Web Store (internal tool, ZIP/
 unpacked distribution only). The bookmarklet is unaffected and continues
@@ -299,4 +315,16 @@ is largely unchanged:
   same as the bookmarklet's.
 - Chrome only; not published to the Chrome Web Store — unpacked/ZIP
   install only (see "Install (Chrome extension)" above).
+- **Bundle tab**: only works within the same environment layer (QA↔TEST
+  or ALPHA↔PROD) — this is enforced by only offering the one valid
+  target, not a limitation to work around. If the standalone "Sportsbook
+  Bundle Override Tool" extension is also loaded, avoid enabling both at
+  the same time on the same tab/site — both extensions register their
+  own `declarativeNetRequest` rules for the same bundle URLs, and running
+  both simultaneously is untested and could produce confusing, order-
+  dependent redirect behavior. Requires a page reload after clicking
+  Apply if the target page was already loaded before you applied the
+  override (a `declarativeNetRequest` rule only affects requests made
+  *after* it's registered, not ones already in flight or already
+  rendered).
 

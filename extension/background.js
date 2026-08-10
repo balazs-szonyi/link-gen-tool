@@ -633,6 +633,7 @@ chrome.tabs.onRemoved.addListener(function (tabId) {
   stopEmbedRule(tabId);
   stopSrSpoofRule(tabId);
   stopBleCorsRule(tabId);
+  stopBundleOverrideRule(tabId);
   keepAttachedTabs.delete(tabId);
 });
 chrome.tabs.onUpdated.addListener(function (tabId, changeInfo) {
@@ -1014,6 +1015,218 @@ function stopBleCorsRule(tabId) {
     });
   });
 }
+
+// ---------------------------------------------------------------------
+// Bundle override - redirects a brand's sportsbook bundle (main-*.js, and
+// any other per-device file the target env's indexer.json lists) to a
+// DIFFERENT environment's build (e.g. run the QA build while browsing a
+// TEST page, or ALPHA while browsing PROD), without a deploy. This ports
+// the mechanism of the separate, standalone "Sportsbook Bundle Override
+// Tool" (BetssonGroup/sb-bundle-override-tool) directly into this
+// extension, so testers don't need to load a second extension side by
+// side. See the `sb-bundle-override-tool` Copilot CLI skill's
+// REFERENCE.md for the original tool's own documented mechanism - this
+// reimplementation follows the same indexer.json-driven redirect
+// approach, but scopes every rule to ONE explicitly-targeted tab (session
+// rules + `tabIds` condition, exactly like the three declarativeNetRequest
+// features above) rather than the standalone tool's browser-wide dynamic
+// rules - so it can never affect a tab/site other than the one the user
+// applied it to, and two people running this feature in different tabs
+// never collide with each other.
+//
+// Only ever override within the SAME environment layer - QA<->TEST (BLE)
+// or ALPHA<->PROD (BDE). The two layers' bundle formats are incompatible;
+// mixing them loads a broken build with no explicit runtime error. This is
+// enforced by the Bundle tab's own env-select options in content.js (it
+// only ever offers the one same-layer alternative), not re-validated here.
+// ---------------------------------------------------------------------
+
+var BUNDLE_INDEXER_URLS = {
+  test: 'https://d-cf.test.sbplayground1.net/dist/test/xp/widgets/sportsbook/indexer.json',
+  qa: 'https://d-cf.qa.sbplayground1.net/dist/qa/xp/widgets/sportsbook/indexer.json',
+  alpha: 'https://d-cf.alpha.sbplayground1.net/dist/alpha/xp/widgets/sportsbook/indexer.json',
+  prod: 'https://d-cf.sbplayground1.net/dist/prod/xp/widgets/sportsbook/indexer.json'
+};
+
+var BUNDLE_RULE_ID_START = 930001;
+var bundleRuleIdsByTab = {}; // tabId -> ruleId[] - an override can add up
+// to ~4 rules at once (2 devices x N files-per-device), unlike the single-
+// rule-per-tab features above, so this tracks an array, not one id.
+var bundleMatchedByTab = {}; // tabId -> {ruleId, requestUrl, timestamp}[] -
+// populated by the onRuleMatchedDebug listener below, purely for the
+// Bundle tab's own "N request(s) redirected" status readout - the same
+// verification role the standalone tool's Service Worker console log
+// plays (see REFERENCE.md "Debugging").
+
+var bundleIndexerCache = {}; // targetEnv -> {ts, data} - avoids re-fetching
+// indexer.json on every single Apply click while the Bundle tab stays
+// open; intentionally not persisted anywhere and lost on a service-worker
+// restart, which just means the next Apply re-fetches - never stale
+// beyond BUNDLE_INDEXER_CACHE_MS.
+var BUNDLE_INDEXER_CACHE_MS = 5 * 60 * 1000;
+
+function fetchBundleIndexer(targetEnv) {
+  var cached = bundleIndexerCache[targetEnv];
+  if (cached && (Date.now() - cached.ts) < BUNDLE_INDEXER_CACHE_MS) {
+    return Promise.resolve(cached.data);
+  }
+  var url = BUNDLE_INDEXER_URLS[targetEnv];
+  if (!url) return Promise.reject(new Error('Unknown target env: ' + targetEnv));
+  return fetch(url).then(function (r) {
+    if (!r.ok) throw new Error('indexer.json fetch failed: HTTP ' + r.status);
+    return r.json();
+  }).then(function (data) {
+    bundleIndexerCache[targetEnv] = { ts: Date.now(), data: data };
+    return data;
+  });
+}
+
+// Same service-worker-restart-safe id allocation as nextUniqueSessionRuleId
+// above, but returns `count` sequential ids from a single getSessionRules
+// query - a bundle override can need several rules at once (one per
+// device x file), so calling the single-id helper repeatedly would mean
+// repeated round-trips and a theoretical race between them.
+function nextUniqueSessionRuleIds(startId, count, cb) {
+  chrome.declarativeNetRequest.getSessionRules(function (rules) {
+    var max = startId - 1;
+    (rules || []).forEach(function (r) { if (r.id > max) max = r.id; });
+    var ids = [];
+    for (var i = 1; i <= count; i++) ids.push(max + i);
+    cb(ids);
+  });
+}
+
+// Builds one declarativeNetRequest redirect rule per bundle file listed in
+// the target env's indexer.json for this brand (device-agnostic - iterates
+// whatever `js` array entries actually exist, so it keeps working whether
+// a build ships one file (just main-*.js, as observed live 2026-08) or
+// splits out extra files like polyfills-*.js in some other build - no
+// hardcoded file-name assumption). Some brands' indexer entries list
+// relative paths (e.g. "/dist/alpha/.../main-HASH.js") rather than a full
+// URL (confirmed live 2026-08 - most brands use an absolute, brand-owned
+// CDN host, but at least one observed entry was host-relative) - those
+// are resolved against the TARGET env's own indexer host, never a
+// hardcoded one, since a relative path always means "same host as the
+// indexer.json that listed it."
+function buildBundleRedirectRules(indexerData, brandId, targetEnv, tabId, ruleIds) {
+  var entry = indexerData && indexerData[brandId];
+  if (!entry) return { rules: [], skippedNoBrand: true };
+  var indexerOrigin = '';
+  try { indexerOrigin = new URL(BUNDLE_INDEXER_URLS[targetEnv]).origin; } catch (e) { /* leave empty */ }
+  var rules = [];
+  var idIdx = 0;
+  ['desktop', 'mobile'].forEach(function (device) {
+    var deviceEntry = entry[device];
+    var files = (deviceEntry && deviceEntry.js) || [];
+    files.forEach(function (fileUrl) {
+      var filename = fileUrl.split('/').pop();
+      var prefixMatch = /^([a-zA-Z0-9]+)-/.exec(filename);
+      var prefix = prefixMatch ? prefixMatch[1] : null;
+      if (!prefix) return; // unexpected filename shape - skip rather than
+      // build a rule that could match too broadly.
+      var targetUrl = /^https?:\/\//i.test(fileUrl) ? fileUrl : (indexerOrigin + fileUrl);
+      if (idIdx >= ruleIds.length) return; // safety - should never happen,
+      // ruleIds is pre-sized to the exact needed count by the caller.
+      rules.push({
+        id: ruleIds[idIdx++],
+        priority: 1,
+        action: { type: 'redirect', redirect: { url: targetUrl } },
+        condition: {
+          urlFilter: '*' + brandId + '*/' + device + '/files/' + prefix + '-*.js',
+          resourceTypes: ['script'],
+          tabIds: [tabId]
+        }
+      });
+    });
+  });
+  return { rules: rules, skippedNoBrand: false };
+}
+
+function startBundleOverrideRule(tabId, targetEnv, brandId) {
+  var previousRuleIds = bundleRuleIdsByTab[tabId]; // swap atomically, same
+  // reasoning as the other three declarativeNetRequest features above -
+  // re-applying (e.g. switching target env without disabling first) must
+  // not leave the old rules alongside the new ones.
+  return fetchBundleIndexer(targetEnv).then(function (indexerData) {
+    return new Promise(function (resolve, reject) {
+      // Worst case (2 devices x up to 4 files) is 8 rules - reserve that
+      // many ids up front; buildBundleRedirectRules only consumes as many
+      // as it actually needs.
+      nextUniqueSessionRuleIds(BUNDLE_RULE_ID_START, 8, function (ruleIds) {
+        var built = buildBundleRedirectRules(indexerData, brandId, targetEnv, tabId, ruleIds);
+        if (built.skippedNoBrand) { reject(new Error('Brand not found in ' + targetEnv + ' indexer.json')); return; }
+        if (!built.rules.length) { reject(new Error('No bundle files found for this brand/env')); return; }
+        chrome.declarativeNetRequest.updateSessionRules({
+          addRules: built.rules,
+          removeRuleIds: previousRuleIds || []
+        }, function () {
+          if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
+          bundleRuleIdsByTab[tabId] = built.rules.map(function (r) { return r.id; });
+          bundleMatchedByTab[tabId] = []; // reset the log for a fresh override
+          resolve({ ruleCount: built.rules.length });
+        });
+      });
+    });
+  });
+}
+
+function stopBundleOverrideRule(tabId) {
+  var ruleIds = bundleRuleIdsByTab[tabId];
+  if (!ruleIds || !ruleIds.length) return Promise.resolve();
+  delete bundleRuleIdsByTab[tabId];
+  delete bundleMatchedByTab[tabId];
+  return new Promise(function (resolve) {
+    chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: ruleIds }, function () {
+      void chrome.runtime.lastError; // ignore - rules may already be gone
+      resolve();
+    });
+  });
+}
+
+// Verification hook mirroring the standalone tool's Service Worker console
+// log (REFERENCE.md "Debugging") - requires the `declarativeNetRequestFeedback`
+// permission (a dev/unpacked-only API, fine here since this extension is
+// always sideloaded, never published to the Chrome Web Store).
+if (chrome.declarativeNetRequest.onRuleMatchedDebug) {
+  chrome.declarativeNetRequest.onRuleMatchedDebug.addListener(function (info) {
+    var ruleId = info && info.rule && info.rule.ruleId;
+    if (typeof ruleId !== 'number' || ruleId < BUNDLE_RULE_ID_START || ruleId >= BUNDLE_RULE_ID_START + 100000) return; // not one of ours
+    var tabId = info.request && info.request.tabId;
+    if (tabId == null || !bundleMatchedByTab[tabId]) return;
+    bundleMatchedByTab[tabId].push({ ruleId: ruleId, requestUrl: info.request.url, timestamp: Date.now() });
+    if (bundleMatchedByTab[tabId].length > 50) bundleMatchedByTab[tabId].shift();
+  });
+}
+
+chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+  if (!msg || msg.type !== 'lgt-bundle-start') return false;
+  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
+  var tabId = sender.tab.id;
+  var targetEnv = msg.targetEnv, brandId = msg.brandId;
+  if (!targetEnv || !brandId) { sendResponse({ ok: false, error: 'missing targetEnv or brandId' }); return false; }
+  startBundleOverrideRule(tabId, targetEnv, brandId).then(function (result) {
+    sendResponse({ ok: true, ruleCount: result.ruleCount });
+  }).catch(function (err) {
+    sendResponse({ ok: false, error: String(err && err.message || err) });
+  });
+  return true;
+});
+
+chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+  if (!msg || msg.type !== 'lgt-bundle-stop') return false;
+  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
+  stopBundleOverrideRule(sender.tab.id).then(function () { sendResponse({ ok: true }); });
+  return true;
+});
+
+chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+  if (!msg || msg.type !== 'lgt-bundle-status') return false;
+  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
+  var tabId = sender.tab.id;
+  var ruleIds = bundleRuleIdsByTab[tabId] || [];
+  sendResponse({ ok: true, active: ruleIds.length > 0, ruleCount: ruleIds.length, matched: bundleMatchedByTab[tabId] || [] });
+  return false;
+});
 
 // Opens a NEW tab for the given generated link with Sportradar spoofing
 // already active before the page starts loading (unlike "Embed here",
