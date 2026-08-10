@@ -2812,7 +2812,10 @@
     }, ['Disable']);
 
     brandSel.addEventListener('change', function () { saveBundleState({ brand: brandSel.value }); });
-    curEnvSel.addEventListener('change', function () { refreshTargetEnv(); saveBundleState({ environment: curEnvSel.value }); });
+    // Environment is intentionally never persisted - see the restore
+    // comment below for why (it must always reflect the live page, not a
+    // remembered value from a different tab/environment).
+    curEnvSel.addEventListener('change', function () { refreshTargetEnv(); });
 
     wrap.appendChild(el('label', {}, ['Brand']));
     wrap.appendChild(brandSel);
@@ -2832,10 +2835,16 @@
 
     chrome.storage.local.get([BUNDLE_STATE_KEY], function (res) {
       var saved = res && res[BUNDLE_STATE_KEY];
-      if (saved) {
-        if (saved.brand && BRANDS[saved.brand]) brandSel.value = saved.brand;
-        if (saved.environment && ENV_LABELS.indexOf(saved.environment) !== -1) curEnvSel.value = saved.environment;
-      }
+      // Only restore the remembered BRAND (a genuine cross-page preference).
+      // The environment must NEVER be restored from a previous page's saved
+      // value - it means "what THIS tab is actually on", so it has to keep
+      // reflecting detectBrandAndEnv()'s live, host-based result for the
+      // current page. Restoring a stale saved environment here was the bug
+      // reported 2026-08-10: on a real QA page the dropdown kept showing a
+      // leftover "test" from an earlier tab, which made Apply compute QA as
+      // the "other" target - i.e. redirect QA to QA, a silent no-op that
+      // looked identical whether Apply/Disable was clicked.
+      if (saved && saved.brand && BRANDS[saved.brand]) brandSel.value = saved.brand;
       refreshTargetEnv();
     });
 
