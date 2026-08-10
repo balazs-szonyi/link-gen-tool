@@ -109,6 +109,24 @@ function attachDebugger(tabId) {
       if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
       resolve();
     });
+  }).then(function () {
+    // Fixes the 0a race condition: a tab created with active:false has
+    // never been visible, so Chrome doesn't route keyboard/mouse focus to
+    // it and (on some pages) delays compositing - trusted CDP input then
+    // has nothing to hit-test/focus against until the user manually
+    // clicks the tab, at which point it suddenly becomes real. Emulation.
+    // setFocusEmulationEnabled is the CDP-documented fix for exactly this
+    // ("simulate a focused and active page, even if the browser window is
+    // not visible") - it makes document.hasFocus()/:focus-visible and
+    // real DOM/input-widget focus behave as if the tab were frontmost,
+    // without ever actually stealing the user's real window/tab focus.
+    // Page.setWebLifecycleState('active') additionally guards against
+    // Chrome's own page-freezing/backgrounding heuristics interfering
+    // mid-sequence. Both are best-effort (older Chrome builds or odd page
+    // states could reject either) - a rejection here should never break
+    // the actual login attempt, just fall back to the pre-fix behavior.
+    return sendDebuggerCommand(tabId, 'Emulation.setFocusEmulationEnabled', { enabled: true }).catch(function () {})
+      .then(function () { return sendDebuggerCommand(tabId, 'Page.setWebLifecycleState', { state: 'active' }).catch(function () {}); });
   });
 }
 
@@ -176,8 +194,20 @@ function trustedKey(tabId, keyName) {
     .then(function () { return sendDebuggerCommand(tabId, 'Input.dispatchKeyEvent', up); });
 }
 
+// Tabs whose debugger/focus-emulation is being held attached for an
+// entire silent-job lifetime (see lgt-debugger-keepalive-start/stop
+// below) - runTrustedSequence must neither re-attach (attach() on an
+// already-attached-by-us tab is a needless extra round trip and, on some
+// Chrome builds, briefly re-flashes the "started debugging" infobar) nor
+// detach when it's done (that would tear down the very focus-emulation
+// the keepalive call was meant to hold for the WHOLE job, not just one
+// click/type sequence).
+var keepAttachedTabs = new Set();
+
 function runTrustedSequence(tabId, actions) {
-  return attachDebugger(tabId).then(function () {
+  var keptAttached = keepAttachedTabs.has(tabId);
+  var attachStep = keptAttached ? Promise.resolve() : attachDebugger(tabId);
+  return attachStep.then(function () {
     var chain = Promise.resolve();
     actions.forEach(function (action) {
       chain = chain.then(function () {
@@ -187,14 +217,59 @@ function runTrustedSequence(tabId, actions) {
         return Promise.resolve();
       }).then(function () { return sleep(action.delayAfter || 80); });
     });
+    function maybeDetach() { return keptAttached ? Promise.resolve() : detachDebugger(tabId); }
     return chain.then(
-      function () { return detachDebugger(tabId).then(function () { return { ok: true }; }); },
-      function (err) { return detachDebugger(tabId).then(function () { return { ok: false, error: String(err && err.message || err) }; }); }
+      function () { return maybeDetach().then(function () { return { ok: true }; }); },
+      function (err) { return maybeDetach().then(function () { return { ok: false, error: String(err && err.message || err) }; }); }
     );
   }, function (err) {
     return { ok: false, error: String(err && err.message || err) };
   });
 }
+
+// Item (2026-08-07, second follow-up): the 0a race-condition fix above
+// (Emulation.setFocusEmulationEnabled + Page.setWebLifecycleState) was
+// only ever applied for the brief attachDebugger/detachDebugger window
+// around the ACTUAL trusted click/type sequence - not during the much
+// longer waitForUsernameFieldOrAlreadyLoggedIn / awaitCapture polling
+// that happens before and after it. User-confirmed 2026-08-07: an
+// entirely silent (minimized-window) live-login job simply never
+// progresses at all - not just slowly - until the window is manually
+// clicked/focused, exactly the un-fixed 0a symptom, just relocated to a
+// different phase of the flow than the one the original fix covered.
+// content.js's resumeLiveLoginJobIfPending now calls
+// lgt-debugger-keepalive-start right when a SILENT job begins (before
+// any polling starts) and lgt-debugger-keepalive-stop once the job
+// settles (success or failure alike, every exit path) - holding the
+// focus-emulated/active state for the polling phases too, not just the
+// type/click moment.
+chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+  if (!msg || msg.type !== 'lgt-debugger-keepalive-start') return false;
+  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
+  var tabId = sender.tab.id;
+  // A mobile-emulated job (see setupMobileEmulation above) already
+  // attached the debugger and added this tab to keepAttachedTabs before
+  // its content script ever started running - re-attaching here would
+  // just error ("Another debugger is already attached") for no benefit;
+  // this call's real job (holding the attach for the whole job) is
+  // already satisfied, so just confirm ok.
+  if (keepAttachedTabs.has(tabId)) { sendResponse({ ok: true }); return false; }
+  attachDebugger(tabId).then(
+    function () { keepAttachedTabs.add(tabId); sendResponse({ ok: true }); },
+    function (err) { sendResponse({ ok: false, error: String(err && err.message || err) }); }
+  );
+  return true;
+});
+
+chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+  if (!msg || msg.type !== 'lgt-debugger-keepalive-stop') return false;
+  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
+  var tabId = sender.tab.id;
+  keepAttachedTabs.delete(tabId);
+  detachDebugger(tabId).then(function () { sendResponse({ ok: true }); });
+  return true;
+});
+
 
 chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   if (!msg || msg.type !== 'lgt-trusted-sequence') return false;
@@ -207,15 +282,177 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
 // auto live-login flow (see content.js's startLiveLoginJob /
 // resumeLiveLoginJobIfPending) - chrome.tabs is only callable from the
 // service worker, not a content script, hence these two small relays.
+// Keep-alive ping for the live-login flow (see content.js's KeepAlive
+// helper for the full rationale) - a trivial round-trip whose only
+// purpose is to be a genuine wake/activity event for this MV3 service
+// worker, so it doesn't idle-terminate mid-login and miss the
+// chrome.webRequest.onSendHeaders event(s) that the whole capture
+// mechanism depends on.
+chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+  if (!msg || msg.type !== 'lgt-keepalive') return false;
+  sendResponse({ ok: true });
+  return false;
+});
+
+// ---------------------------------------------------------------------
+// Mobile device emulation for the Live-Login+BLE capture flow.
+//
+// Root cause (confirmed 2026-08-07, user-diagnosed): the addon's Live
+// Login flow ran exactly ONE real login (always in a normal/desktop-
+// shaped tab) and spliced that ONE captured stc/ctx into BOTH the
+// desktop and mobile generated links. But a real login on the brand's
+// live site captures a DEVICE-SCOPED context - logging in from a mobile
+// viewport yields a genuinely different stc/ctx than a desktop viewport
+// (confirmed directly: manually capturing stc/ctx from nordicbet.com in
+// a real mobile viewport gave a different pair than the addon's
+// desktop-captured one, and splicing that manually-mobile-captured pair
+// into the same link template worked, while the desktop-captured pair
+// reused for the mobile link broke it - CORS net::ERR_FAILED on the
+// alpha-routed competitions call, or no request firing at all). Fix:
+// run the whole login flow TWICE, once per device, with CDP-level
+// device emulation active for the mobile pass BEFORE the target URL
+// even starts loading (so the brand's real site serves its actual
+// mobile frontend/build from the very first request, not just a
+// resized desktop one) - see setupMobileEmulation below, and
+// content.js's runLiveLoginFallback/captureForDevice for the
+// orchestration of two sequential capture jobs.
+// ---------------------------------------------------------------------
+
+var MOBILE_EMULATION_UA = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36';
+var MOBILE_EMULATION_UA_METADATA = {
+  platform: 'Android',
+  platformVersion: '14.0.0',
+  architecture: '',
+  model: 'Pixel 8',
+  mobile: true
+};
+
+// Attaches the debugger, switches the tab to a mobile viewport/UA/touch
+// profile via CDP, then navigates it to the real target URL - all BEFORE
+// any page load happens, so the brand's site sees "mobile" from its very
+// first request rather than a desktop page that merely gets resized
+// afterward. Leaves the tab in `keepAttachedTabs` (same bookkeeping the
+// silent-job keepalive mechanism already uses) so content.js's later
+// lgt-debugger-keepalive-start call (sent once its own content script
+// loads) is recognized as already-held and skips re-attaching, and so
+// the existing lgt-debugger-keepalive-stop call (sent when the job
+// settles, success or failure) correctly detaches it at the end.
+function setupMobileEmulation(tabId, url) {
+  return attachDebugger(tabId).then(function () {
+    keepAttachedTabs.add(tabId);
+    return sendDebuggerCommand(tabId, 'Emulation.setDeviceMetricsOverride', {
+      width: 470, height: 944, deviceScaleFactor: 2, mobile: true
+    });
+  }).then(function () {
+    return sendDebuggerCommand(tabId, 'Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 }).catch(function () {});
+  }).then(function () {
+    return sendDebuggerCommand(tabId, 'Network.enable', {});
+  }).then(function () {
+    return sendDebuggerCommand(tabId, 'Network.setUserAgentOverride', {
+      userAgent: MOBILE_EMULATION_UA,
+      platform: 'Android',
+      userAgentMetadata: MOBILE_EMULATION_UA_METADATA
+    });
+  }).then(function () {
+    return sendDebuggerCommand(tabId, 'Page.navigate', { url: url });
+  });
+}
+
 // active:false keeps the tab out of the user's way for its whole (short)
 // lifetime; it closes itself via lgt-close-tab once its job settles
 // (success or failure alike - there's no reason to leave an inactive tab
 // open either way).
 chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   if (!msg || msg.type !== 'lgt-open-tab') return false;
-  chrome.tabs.create({ url: msg.url, active: false }, function (tab) {
-    if (chrome.runtime.lastError) { sendResponse({ ok: false, error: chrome.runtime.lastError.message }); return; }
-    sendResponse({ ok: true, tabId: tab && tab.id });
+  // msg.device (new): 'mobile' triggers setupMobileEmulation above before
+  // navigating to the real url; anything else (or omitted) is the
+  // existing desktop-shaped behavior, unchanged.
+  var wantMobile = msg.device === 'mobile';
+
+  function afterTabCreated(tabId) {
+    if (tabId == null) { sendResponse({ ok: false, error: 'tab not created' }); return; }
+    if (!wantMobile) { sendResponse({ ok: true, tabId: tabId }); return; }
+    setupMobileEmulation(tabId, msg.url).then(
+      function () { sendResponse({ ok: true, tabId: tabId }); },
+      function (err) { sendResponse({ ok: false, error: 'mobile emulation setup failed: ' + String(err && err.message || err) }); }
+    );
+  }
+
+  // msg.active (item 0b/0c): defaults to false (background/invisible) as
+  // before; content.js sets it true when the brand isn't yet proven to
+  // work silently, or when the user manually ticks "Show login tab".
+  if (msg.active) {
+    chrome.tabs.create({ url: wantMobile ? 'about:blank' : msg.url, active: true }, function (tab) {
+      if (chrome.runtime.lastError) { sendResponse({ ok: false, error: chrome.runtime.lastError.message }); return; }
+      afterTabCreated(tab && tab.id);
+    });
+    return true;
+  }
+  // Silent path: a plain active:false tab still lands in the CURRENT
+  // window's tab strip - visible (as a background/inactive tab), just not
+  // focused. User-confirmed 2026-08-07 this still doesn't read as
+  // "silent" (a new tab appearing at all, even unfocused, is exactly what
+  // this mode is supposed to avoid - only the Generate button's own
+  // loader should indicate anything is happening). Opening it in its own,
+  // separately minimized window instead keeps it out of the current
+  // window's tab strip entirely.
+  //
+  // A v1.9.7 attempt to avoid minimizing (positioning the window off any
+  // real monitor instead, top/left: -32000) was reverted the same day -
+  // Chrome's own chrome.windows.create validation rejects bounds where
+  // less than 50% of the window overlaps a real display ("Invalid value
+  // for bounds. Bounds must be at least 50% within visible screen space"),
+  // so that approach cannot work at all as a fully-invisible option; it
+  // isn't a workaround, it's a hard platform rule (deliberately closing
+  // exactly this kind of "genuinely invisible window" loophole for
+  // anti-abuse reasons). `state: 'minimized'` set at creation time (not as
+  // a later update) is what actually avoids an on-screen flash on most
+  // Chrome/OS combinations - a create-then-minimize as two steps reliably
+  // flashes the new window on screen first.
+  //
+  // Trade-off this reintroduces: a minimized window's page has
+  // document.visibilityState = 'hidden', which pauses/heavily throttles
+  // requestAnimationFrame - some brands' login-modal mount/animate-in
+  // apparently depends on rAF timing, which can occasionally make an
+  // already-slow modal mount even more slowly while minimized (see the
+  // un-minimize "nudge" during the slow-mount retry wait in content.js's
+  // attemptAutoLogin, which mitigates this without giving up full
+  // invisibility for the common/fast case).
+  chrome.windows.create({ url: wantMobile ? 'about:blank' : msg.url, focused: false, state: 'minimized' }, function (win) {
+    if (chrome.runtime.lastError || !win) { sendResponse({ ok: false, error: chrome.runtime.lastError ? chrome.runtime.lastError.message : 'window not created' }); return; }
+    var tab = win.tabs && win.tabs[0];
+    if (tab && tab.id != null) { afterTabCreated(tab.id); return; }
+    // Some Chrome versions don't populate `tabs` on the just-created
+    // Window object - fall back to a tab query scoped to the new window.
+    chrome.tabs.query({ windowId: win.id }, function (tabs) {
+      var t = tabs && tabs[0];
+      afterTabCreated(t && t.id);
+    });
+  });
+  return true;
+});
+
+// Item (2026-08-07 follow-up): lets the job tab's OWN content script pull
+// itself briefly out of 'minimized' state (without stealing focus) when a
+// login modal is taking unusually long to mount - see the "nudge" call
+// in content.js's attemptAutoLogin. Restoring 'normal' state clears
+// document.visibilityState's 'hidden' flag (restoring full-rate
+// requestAnimationFrame) for the duration of the slow-mount retry wait;
+// re-minimizing afterward (msg.state === 'minimized') puts it back out of
+// sight once that wait resolves either way. Harmless no-op if the tab is
+// actually in a visible/active tab already (forceVisible / already-proven
+// brand path) - updating an already-normal, unfocused-by-request window's
+// state to 'normal' again does nothing.
+chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+  if (!msg || msg.type !== 'lgt-window-set-state') return false;
+  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
+  var state = msg.state === 'minimized' ? 'minimized' : 'normal';
+  chrome.tabs.get(sender.tab.id, function (tab) {
+    if (chrome.runtime.lastError || !tab || tab.windowId == null) { sendResponse({ ok: false, error: 'no window' }); return; }
+    chrome.windows.update(tab.windowId, { state: state, focused: false }, function () {
+      void chrome.runtime.lastError; // ignore - e.g. window already closed
+      sendResponse({ ok: true });
+    });
   });
   return true;
 });
@@ -242,7 +479,14 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   chrome.tabs.update(sender.tab.id, { active: true }, function (tab) {
     if (chrome.runtime.lastError) { sendResponse({ ok: false, error: chrome.runtime.lastError.message }); return; }
     if (tab && tab.windowId != null) {
-      chrome.windows.update(tab.windowId, { focused: true }, function () {
+      // state: 'normal' is required here, not just focused: true - the
+      // silent path above opens the tab in its own state:'minimized'
+      // window, and focused:true alone does not reliably restore a
+      // minimized window on every platform (it can end up "focused" but
+      // still minimized/invisible). top/left reposition it to a sane
+      // on-screen spot in case anything nudged it (see lgt-window-set-
+      // state) to an unusual position first.
+      chrome.windows.update(tab.windowId, { focused: true, state: 'normal', top: 40, left: 40 }, function () {
         void chrome.runtime.lastError;
         sendResponse({ ok: true });
       });
@@ -294,34 +538,56 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
 // ---------------------------------------------------------------------
 
 var EMBED_RULE_ID_START = 900001;
-var embedRuleIdCounter = EMBED_RULE_ID_START;
 var embedRuleIdByTab = {}; // tabId -> ruleId
 
+// MV3 service workers are ephemeral - they can be unloaded and restarted
+// at any time (e.g. after ~30s idle), which resets any in-memory counter
+// back to its starting value. The declarativeNetRequest session rules
+// themselves, however, survive that restart (they're only cleared on
+// browser restart or extension reload) - so a naive ++counter approach
+// WILL eventually collide with an already-registered rule id from a
+// previous service-worker lifetime and fail with "Rule with id ... does
+// not have a unique ID" (confirmed live 2026-08-07, on the Sportradar-spoof
+// rule below). Querying the actually-registered session rules for the
+// current max id, instead of trusting any in-memory counter, is immune to
+// this regardless of how many times the service worker has restarted.
+function nextUniqueSessionRuleId(startId, cb) {
+  chrome.declarativeNetRequest.getSessionRules(function (rules) {
+    var max = startId - 1;
+    (rules || []).forEach(function (r) { if (r.id > max) max = r.id; });
+    cb(max + 1);
+  });
+}
+
 function startEmbedRule(tabId, origin) {
-  var ruleId = ++embedRuleIdCounter;
+  var previousRuleId = embedRuleIdByTab[tabId]; // swap atomically instead of
+  // leaking the old rule - without this, re-clicking "Embed here" in the
+  // same tab would leave a stale rule alongside the new one.
   return new Promise(function (resolve, reject) {
-    chrome.declarativeNetRequest.updateSessionRules({
-      addRules: [{
-        id: ruleId,
-        priority: 1,
-        action: {
-          type: 'modifyHeaders',
-          responseHeaders: [
-            { header: 'x-frame-options', operation: 'remove' },
-            { header: 'content-security-policy', operation: 'remove' }
-          ]
-        },
-        condition: {
-          urlFilter: origin + '/*',
-          resourceTypes: ['sub_frame'],
-          tabIds: [tabId]
-        }
-      }],
-      removeRuleIds: []
-    }, function () {
-      if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
-      embedRuleIdByTab[tabId] = ruleId;
-      resolve();
+    nextUniqueSessionRuleId(EMBED_RULE_ID_START, function (ruleId) {
+      chrome.declarativeNetRequest.updateSessionRules({
+        addRules: [{
+          id: ruleId,
+          priority: 1,
+          action: {
+            type: 'modifyHeaders',
+            responseHeaders: [
+              { header: 'x-frame-options', operation: 'remove' },
+              { header: 'content-security-policy', operation: 'remove' }
+            ]
+          },
+          condition: {
+            urlFilter: origin + '/*',
+            resourceTypes: ['sub_frame'],
+            tabIds: [tabId]
+          }
+        }],
+        removeRuleIds: previousRuleId ? [previousRuleId] : []
+      }, function () {
+        if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
+        embedRuleIdByTab[tabId] = ruleId;
+        resolve();
+      });
     });
   });
 }
@@ -366,10 +632,46 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
 chrome.tabs.onRemoved.addListener(function (tabId) {
   stopEmbedRule(tabId);
   stopSrSpoofRule(tabId);
+  stopBleCorsRule(tabId);
+  keepAttachedTabs.delete(tabId);
 });
 chrome.tabs.onUpdated.addListener(function (tabId, changeInfo) {
   if (changeInfo.status === 'loading' && embedRuleIdByTab[tabId]) stopEmbedRule(tabId);
-  if (changeInfo.status === 'loading' && srSpoofRuleIdByTab[tabId]) stopSrSpoofRule(tabId);
+  if (changeInfo.status === 'loading' && srSpoofRuleIdByTab[tabId]) {
+    // Every navigation (including our OWN deliberate about:blank -> target-
+    // URL hop right after the rule is added, and every later manual
+    // reload/F5 of the same page) fires a 'loading' status change here, not
+    // just "user navigated to a different, unrelated site". Naively
+    // stopping the rule on ANY 'loading' event was removing it the instant
+    // the real navigation began (or on every refresh), so the page's first
+    // Sportradar requests always ran unspoofed and showed the licensing
+    // error before the fix could ever apply - confirmed by the user
+    // (2026-08-07). Only tear the rule down when the tab is actually
+    // navigating to a DIFFERENT origin than the one it was opened for;
+    // same-origin reloads/SPA navigations (changeInfo.url absent, or same
+    // origin) must keep the rule alive.
+    var expectedOrigin = srSpoofExpectedOriginByTab[tabId];
+    var navigatingAway = false;
+    if (changeInfo.url && expectedOrigin) {
+      try { navigatingAway = new URL(changeInfo.url).origin !== expectedOrigin; }
+      catch (e) { navigatingAway = false; }
+    }
+    if (navigatingAway) stopSrSpoofRule(tabId);
+  }
+  if (changeInfo.status === 'loading' && bleCorsRuleIdByTab[tabId]) {
+    // Same "same-origin reload/SPA-nav vs. actually left the page" logic as
+    // the Sportradar-spoof cleanup above - a fresh bleSource=1 navigation to
+    // the SAME origin re-adds its own replacement rule via onBeforeNavigate
+    // anyway, so only tear down here when the tab has genuinely moved to a
+    // different origin.
+    var bleExpectedOrigin = bleCorsExpectedOriginByTab[tabId];
+    var bleNavigatingAway = false;
+    if (changeInfo.url && bleExpectedOrigin) {
+      try { bleNavigatingAway = new URL(changeInfo.url).origin !== bleExpectedOrigin; }
+      catch (e) { bleNavigatingAway = false; }
+    }
+    if (bleNavigatingAway) stopBleCorsRule(tabId);
+  }
 });
 
 // ---------------------------------------------------------------------
@@ -393,43 +695,78 @@ chrome.tabs.onUpdated.addListener(function (tabId, changeInfo) {
 // ---------------------------------------------------------------------
 
 var SR_SPOOF_RULE_ID_START = 950001;
-var srSpoofRuleIdCounter = SR_SPOOF_RULE_ID_START;
 var srSpoofRuleIdByTab = {}; // tabId -> ruleId
+var srSpoofExpectedOriginByTab = {}; // tabId -> origin of the URL the tab was
+// opened for, so the onUpdated cleanup listener can tell "still on the same
+// page (reload/SPA nav)" apart from "user actually navigated to a different
+// site in this tab" (see that listener for why this distinction matters).
 
 function startSrSpoofRule(tabId, spoofOrigin, requestDomains) {
-  var ruleId = ++srSpoofRuleIdCounter;
+  var previousRuleId = srSpoofRuleIdByTab[tabId]; // swap atomically below instead of
+  // leaking the old rule - without this, re-navigating the same tab through
+  // this function twice (e.g. auto-detect firing again on a reload, or a
+  // brand switch in the same tab) would leave a stale rule alongside the
+  // new one, and declarativeNetRequest's behavior with two same-priority
+  // modifyHeaders rules matching the same request is not something to rely
+  // on.
   return new Promise(function (resolve, reject) {
-    chrome.declarativeNetRequest.updateSessionRules({
-      addRules: [{
-        id: ruleId,
-        priority: 1,
-        action: {
-          type: 'modifyHeaders',
-          requestHeaders: [
-            { header: 'origin', operation: 'set', value: spoofOrigin },
-            { header: 'referer', operation: 'set', value: spoofOrigin + '/' }
-          ]
-        },
-        condition: {
-          // requestDomains matches the domain itself AND its subdomains,
-          // so this one entry reaches both widgets.sir.sportradar.com and
-          // lmt.fn.sportradar.com without listing each subdomain.
-          // (Overridable only for tests - production callers never pass
-          // this third argument, so real usage always targets Sportradar/
-          // Betradar exactly as documented.)
-          requestDomains: requestDomains || ['sportradar.com', 'betradar.com'],
-          // Deliberately narrow to the data/script-fetching resource
-          // types the widget actually uses for the licensing/gismo calls
-          // - script/stylesheet/image loads don't need spoofed headers.
-          resourceTypes: ['xmlhttprequest', 'other'],
-          tabIds: [tabId]
-        }
-      }],
-      removeRuleIds: []
-    }, function () {
-      if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
-      srSpoofRuleIdByTab[tabId] = ruleId;
-      resolve();
+    nextUniqueSessionRuleId(SR_SPOOF_RULE_ID_START, function (ruleId) {
+      chrome.declarativeNetRequest.updateSessionRules({
+        addRules: [{
+          id: ruleId,
+          priority: 1,
+          action: {
+            type: 'modifyHeaders',
+            requestHeaders: [
+              { header: 'origin', operation: 'set', value: spoofOrigin },
+              { header: 'referer', operation: 'set', value: spoofOrigin + '/' }
+            ],
+            // The request-header spoof above is only half the fix. Sportradar's
+            // /licensing endpoint issues a signed access token that BAKES IN
+            // whatever Origin it saw (confirmed by base64-decoding the token's
+            // `data` field: {"o":"<spoofOrigin>",...}) and every later data
+            // call (e.g. lmt.fn.sportradar.com/.../gismo/match_info/{id}) - which
+            // is initiated by script running INSIDE the Sportradar iframe, not
+            // by this tab's top-level page - echoes that same spoofed origin
+            // back as its own Access-Control-Allow-Origin response header.
+            // Chrome's actual CORS enforcement compares that ACAO value
+            // against the TAB's real, true origin (not the spoofed request
+            // header we just set), so without this second half every such XHR
+            // is blocked client-side with "Access-Control-Allow-Origin header
+            // has a value ... that is not equal to the supplied origin" -
+            // confirmed via live testing 2026-08-07. Rewriting the response
+            // ACAO to '*' happens at the network layer before Chrome's CORS
+            // check runs, so it satisfies that check unconditionally.
+            responseHeaders: [
+              { header: 'Access-Control-Allow-Origin', operation: 'set', value: '*' },
+              { header: 'Access-Control-Allow-Credentials', operation: 'remove' }
+            ]
+          },
+          condition: {
+            // requestDomains matches the domain itself AND its subdomains,
+            // so this one entry reaches both widgets.sir.sportradar.com and
+            // lmt.fn.sportradar.com without listing each subdomain.
+            // (Overridable only for tests - production callers never pass
+            // this third argument, so real usage always targets Sportradar/
+            // Betradar exactly as documented.)
+            requestDomains: requestDomains || ['sportradar.com', 'betradar.com'],
+            // Deliberately no initiatorDomains restriction here - the
+            // licensing check's own follow-up data calls are initiated by
+            // script running inside the Sportradar iframe itself (not by
+            // this tab's top-level sportsbook page), so scoping initiators
+            // to the sportsbook's own domain would silently fail to rewrite
+            // those later requests even though it correctly rewrote the
+            // first /licensing call (confirmed by live testing 2026-08-07).
+            resourceTypes: ['xmlhttprequest', 'sub_frame', 'script', 'image', 'websocket', 'ping', 'other'],
+            tabIds: [tabId]
+          }
+        }],
+        removeRuleIds: previousRuleId ? [previousRuleId] : []
+      }, function () {
+        if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
+        srSpoofRuleIdByTab[tabId] = ruleId;
+        resolve();
+      });
     });
   });
 }
@@ -438,6 +775,238 @@ function stopSrSpoofRule(tabId) {
   var ruleId = srSpoofRuleIdByTab[tabId];
   if (!ruleId) return Promise.resolve();
   delete srSpoofRuleIdByTab[tabId];
+  delete srSpoofExpectedOriginByTab[tabId];
+  return new Promise(function (resolve) {
+    chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [ruleId] }, function () {
+      void chrome.runtime.lastError; // ignore - rule may already be gone
+      resolve();
+    });
+  });
+}
+
+// ---------------------------------------------------------------------
+// Auto-apply Sportradar spoofing on every matching navigation - no button
+// click needed, so a plain page open/reload/paste-URL is covered exactly
+// like the standalone POC extension's always-on static rule was (the user
+// reported the button-triggered, per-click flow above still lost the race
+// on a normal open/refresh because it only ever ran AFTER the user
+// explicitly clicked "Open (Sportradar-enabled)" - confirmed 2026-08-07).
+// This listens at the earliest available navigation hook
+// (webNavigation.onBeforeNavigate fires before the navigation's own
+// request is sent) and sets up the SAME tab-scoped session rule used
+// above, purely from the destination URL - no content script, no message
+// round-trip from page JS, so there's nothing left in the page's own load
+// sequence that could possibly outrace it.
+// ---------------------------------------------------------------------
+
+var SR_SPOOF_SETTING_KEY = 'lgt-sr-spoof-enabled'; // MUST match content.js's key
+
+// Mirror of content.js's BRAND_DOMAINS (real production domain per brand).
+// Duplicated here (rather than imported) because this needs to run from a
+// pure navigation event in the service worker, independent of whether/when
+// any content script for that tab has run - see comment block above.
+var BRAND_DOMAINS = {
+  arcticbet: 'arcticbet.com',
+  betfirst: 'betfirst.be',
+  bethard: 'bethard.com',
+  bets10: 'bets10.com',
+  betsafe: 'betsafe.com',
+  betsmith: 'betsmith.com',
+  betsolid: 'betsolid.com',
+  betsson: 'betsson.com',
+  betssonarcb: 'betsson.bet.ar',
+  betssonbr: 'betsson.bet.br',
+  betssondk: 'betsson.dk',
+  betssones: 'betsson.es',
+  betssongr: 'betsson.gr',
+  betssonmx: 'betsson.mx',
+  btsarba: 'betsson.bet.ar',
+  btsarbacity: 'betsson.bet.ar',
+  cherry: 'cherry.se',
+  guts: 'guts.com',
+  hovarda: 'hovarda.com',
+  ibet: 'ibet.com',
+  inkabet: 'inkabet.pe',
+  jetbahis: 'jetbahis.com',
+  mobilbahis: 'mobilbahis.com',
+  nordicbet: 'nordicbet.com',
+  nordicbetdk: 'nordicbet.dk',
+  playgurus: 'playgurus.com',
+  rexbet: 'rexbet.com',
+  rizk: 'rizk.com',
+  spelklubben: 'spelklubben.se',
+  triobet: 'triobet.com'
+};
+
+// Playground hostname suffix per brand (from the sbplayground-link-
+// generator skill's BRAND_DOMAINS.md "prod playground base host" column,
+// e.g. "d-cf.test.ndbplayground.net" for nordicbet -> suffix
+// "ndbplayground.net"). Brands with obfuscated/rotating hex playground
+// hosts (bets10, hovarda, jetbahis, rexbet, spino) and brands with no
+// stable/known playground host (firestorm, firestormsg, sandbox, triobet)
+// are deliberately omitted - there is no reliable hostname pattern to
+// match for them, so auto-detection simply does not fire for those brands
+// (same silent no-op as realBrandOrigin returning null for an unresolvable
+// brand elsewhere in this feature).
+var PLAYGROUND_HOST_SUFFIX = {
+  arcticbet: 'arcticbetplayground.net',
+  betfirst: 'betfirstplayground.net',
+  bethard: 'bethardplayground.net',
+  betsafe: 'bsfplayground.net',
+  betsmith: 'betsmithplayground.net',
+  betsolid: 'betsolidplayground.net',
+  betsson: 'btsplayground.net',
+  betssonarcb: 'btsarcbplayground.net',
+  betssonbr: 'btsbrplayground.net',
+  betssondk: 'btsdkplayground.net',
+  betssones: 'btsesplayground.net',
+  betssongr: 'btsgrplayground.net',
+  betssonmx: 'btsmxplayground.net',
+  btsarba: 'btsarbaplayground.net',
+  btsarbacity: 'btsarbacityplayground.net',
+  cherry: 'cherryplayground.net',
+  guts: 'gutsplayground.net',
+  ibet: 'ibetplayground.net',
+  inkabet: 'inkabetplayground.net',
+  mobilbahis: 'mbaplayground.net',
+  nordicbet: 'ndbplayground.net',
+  nordicbetdk: 'ndbdkplayground.net',
+  playgurus: 'pgplayground.net',
+  rizk: 'rizkplayground.net',
+  spelklubben: 'spelklubbenplayground.net'
+};
+
+function detectBrandAndEnvFromPlaygroundHost(hostname) {
+  hostname = (hostname || '').toLowerCase();
+  var brand = null;
+  Object.keys(PLAYGROUND_HOST_SUFFIX).forEach(function (key) {
+    var suffix = PLAYGROUND_HOST_SUFFIX[key];
+    if (hostname === suffix || hostname.slice(-(suffix.length + 1)) === '.' + suffix) brand = key;
+  });
+  if (!brand) return null;
+  var env = 'prod';
+  ['test', 'qa', 'alpha'].forEach(function (e) {
+    if (hostname.indexOf('.' + e + '.') !== -1 || hostname.indexOf(e + '.') === 0) env = e;
+  });
+  return { brand: brand, environment: env };
+}
+
+function realBrandOriginBg(brandKey, environment) {
+  var domain = BRAND_DOMAINS[brandKey];
+  if (!domain) return null;
+  var prefix = (environment && environment !== 'prod') ? (environment + '.') : '';
+  return 'https://www.' + prefix + domain;
+}
+
+if (chrome.webNavigation && chrome.webNavigation.onBeforeNavigate) {
+  chrome.webNavigation.onBeforeNavigate.addListener(function (details) {
+    if (details.frameId !== 0) return; // top-level navigations only
+    var hostname;
+    try { hostname = new URL(details.url).hostname; } catch (e) { return; }
+    var info = detectBrandAndEnvFromPlaygroundHost(hostname);
+    if (!info) return;
+
+    // bleSource=1 mobile CORS fix - see comment block above startBleCorsRule.
+    // Deliberately independent of the Sportradar-spoof machinery below (does
+    // NOT require a resolvable real brand domain/spoofOrigin - it only needs
+    // the playground suffix, which every entry in PLAYGROUND_HOST_SUFFIX
+    // already has); only gated on the URL actually carrying bleSource=1.
+    var isBleSource = false;
+    try { isBleSource = new URL(details.url).searchParams.get('bleSource') === '1'; } catch (e) { /* ignore */ }
+    if (isBleSource) {
+      var playgroundSuffix = PLAYGROUND_HOST_SUFFIX[info.brand];
+      if (playgroundSuffix) {
+        var bleTabId = details.tabId;
+        try { bleCorsExpectedOriginByTab[bleTabId] = new URL(details.url).origin; } catch (e) { /* ignore */ }
+        startBleCorsRule(bleTabId, playgroundSuffix).catch(function (err) {
+          console.warn('[link-gen-tool] auto bleSource CORS fix failed:', err);
+        });
+      }
+    }
+
+    var spoofOrigin = realBrandOriginBg(info.brand, info.environment);
+    if (!spoofOrigin) return;
+    chrome.storage.local.get([SR_SPOOF_SETTING_KEY], function (res) {
+      var enabled = !res || typeof res[SR_SPOOF_SETTING_KEY] !== 'boolean' || res[SR_SPOOF_SETTING_KEY];
+      if (!enabled) return;
+      var tabId = details.tabId;
+      try { srSpoofExpectedOriginByTab[tabId] = new URL(details.url).origin; } catch (e) { /* ignore */ }
+      startSrSpoofRule(tabId, spoofOrigin).catch(function (err) {
+        console.warn('[link-gen-tool] auto Sportradar spoof failed:', err);
+      });
+    });
+  });
+}
+
+// ---------------------------------------------------------------------
+// bleSource=1 mobile CORS fix - when a bleSource=1 link's frontend routes
+// certain REST calls (e.g. /api/sb/v1/competitions) to the brand's alpha
+// desktop CDN host (d-cf.alpha.<brand>playground.net) regardless of
+// whether the page itself is being browsed on the DESKTOP (d-cf.) or
+// MOBILE (m-cf.) CDN host, a mobile bleSource link ends up making a
+// cross-origin fetch from m-cf.<env>.<brand>playground.net to
+// d-cf.alpha.<brand>playground.net. That response's own
+// Access-Control-Allow-Origin does not include the mobile host, so Chrome
+// blocks it client-side with a real CORS error (confirmed live 2026-08-07,
+// NordicBet QA mobile bleSource link: clicking into an event silently did
+// nothing because this blocked competitions/subcategories call apparently
+// gates the event route's own rendering). This is a genuine bug in the
+// sportsbook FE bundle's own bleSource routing (it doesn't respect which
+// CDN host the page itself is on) - not something a differently-built link
+// could avoid, and not fixable by changing any query param.
+//
+// Same declarativeNetRequest technique as the Sportradar spoof above,
+// but simpler: no Origin/Referer spoof is needed (the real origin is
+// legitimate), just rewriting the response's Access-Control-Allow-Origin
+// to '*' so Chrome's CORS check passes unconditionally. Scoped to the
+// one tab and the one brand's playground domain family (all subdomains,
+// via requestDomains matching), and only ever activated for a navigation
+// whose URL actually carries bleSource=1 - a plain (non-bleSource) link
+// never needs this and should not have its CORS behavior touched at all.
+// ---------------------------------------------------------------------
+
+var BLE_CORS_RULE_ID_START = 970001;
+var bleCorsRuleIdByTab = {}; // tabId -> ruleId
+var bleCorsExpectedOriginByTab = {}; // tabId -> origin of the URL the tab was
+// opened for, same "reload/SPA-nav vs actually left the page" distinction as
+// srSpoofExpectedOriginByTab above.
+
+function startBleCorsRule(tabId, playgroundSuffix) {
+  var previousRuleId = bleCorsRuleIdByTab[tabId];
+  return new Promise(function (resolve, reject) {
+    nextUniqueSessionRuleId(BLE_CORS_RULE_ID_START, function (ruleId) {
+      chrome.declarativeNetRequest.updateSessionRules({
+        addRules: [{
+          id: ruleId,
+          priority: 1,
+          action: {
+            type: 'modifyHeaders',
+            responseHeaders: [
+              { header: 'Access-Control-Allow-Origin', operation: 'set', value: '*' },
+              { header: 'Access-Control-Allow-Credentials', operation: 'remove' }
+            ]
+          },
+          condition: {
+            requestDomains: [playgroundSuffix],
+            resourceTypes: ['xmlhttprequest', 'sub_frame', 'script', 'image', 'websocket', 'ping', 'other'],
+            tabIds: [tabId]
+          }
+        }],
+        removeRuleIds: previousRuleId ? [previousRuleId] : []
+      }, function () {
+        if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
+        bleCorsRuleIdByTab[tabId] = ruleId;
+        resolve();
+      });
+    });
+  });
+}
+
+function stopBleCorsRule(tabId) {
+  var ruleId = bleCorsRuleIdByTab[tabId];
+  if (!ruleId) return Promise.resolve();
+  delete bleCorsRuleIdByTab[tabId];
+  delete bleCorsExpectedOriginByTab[tabId];
   return new Promise(function (resolve) {
     chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [ruleId] }, function () {
       void chrome.runtime.lastError; // ignore - rule may already be gone
@@ -455,10 +1024,26 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   var url = msg.url;
   var spoofOrigin = msg.spoofOrigin;
   if (!url || !spoofOrigin) { sendResponse({ ok: false, error: 'missing url or spoofOrigin' }); return false; }
-  chrome.tabs.create({ url: url, active: true }, function (tab) {
+  // IMPORTANT: do NOT pass `url` to tabs.create directly. Doing so starts the
+  // real navigation (and therefore the page's first Sportradar /licensing
+  // request) IMMEDIATELY, in parallel with this extension call - the
+  // declarativeNetRequest rule below was only being added inside the
+  // tabs.create callback, i.e. AFTER that navigation had already started, so
+  // the page's very first load routinely beat the rule and rendered the
+  // licensing error before the spoof ever took effect (confirmed by the
+  // user: page loads with the error before the addon "does its job" -
+  // 2026-08-07). Fix: open a blank tab first, register the session rule for
+  // that tabId while nothing has requested anything yet, THEN navigate the
+  // (still-blank) tab to the real URL via tabs.update - guaranteeing the
+  // rule is already active before the first Sportradar request fires.
+  chrome.tabs.create({ url: 'about:blank', active: true }, function (tab) {
     if (chrome.runtime.lastError || !tab) { sendResponse({ ok: false, error: (chrome.runtime.lastError && chrome.runtime.lastError.message) || 'failed to open tab' }); return; }
+    try { srSpoofExpectedOriginByTab[tab.id] = new URL(url).origin; } catch (e) { /* leave unset - cleanup listener degrades to "never auto-stop" */ }
     startSrSpoofRule(tab.id, spoofOrigin).then(function () {
-      sendResponse({ ok: true, tabId: tab.id });
+      chrome.tabs.update(tab.id, { url: url }, function () {
+        if (chrome.runtime.lastError) { sendResponse({ ok: false, error: chrome.runtime.lastError.message }); return; }
+        sendResponse({ ok: true, tabId: tab.id });
+      });
     }).catch(function (err) {
       sendResponse({ ok: false, error: String(err && err.message || err) });
     });

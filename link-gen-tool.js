@@ -155,6 +155,48 @@
       passwordSelector: 'input[type="password"]',
       submitSelector: 'button[type="submit"]',
       sportsbookNavText: /m-bahis|spor/i
+    },
+    // betsson/betsafe/betssongr share NordicBet's exact same OBG platform
+    // markup - confirmed 2026-08-07 via live login on all three real sites
+    // (isLoggedIn=true, authentication-transaction 201, wallet/balance
+    // calls succeeded) using the shared QA credential "User1" from the OBG
+    // Sportsbook TA user-accounts wiki. Not universal - failed on Rizk.
+    betsson: {
+      loginPath: '/en/login',
+      usernameSelector: 'input[name="email"], input#email-input, input[type="email"]',
+      passwordSelector: 'input[name="password"], input[type="password"]',
+      submitSelector: '[data-test-id="account-login-btn-1-button"], button[type="submit"]',
+      sportsbookNavText: /sportsbook/i
+    },
+    betsafe: {
+      loginPath: '/en/login',
+      usernameSelector: 'input[name="email"], input#email-input, input[type="email"]',
+      passwordSelector: 'input[name="password"], input[type="password"]',
+      submitSelector: '[data-test-id="account-login-btn-1-button"], button[type="submit"]',
+      // First submit click can land while React still shows a stale
+      // "Fill in this field" validation state even with both fields
+      // filled - a second click (no re-typing) goes through.
+      sportsbookNavText: /sportsbook/i
+    },
+    betssongr: {
+      loginPath: '/en/login',
+      usernameSelector: 'input[name="email"], input#email-input, input[type="email"]',
+      passwordSelector: 'input[name="password"], input[type="password"]',
+      submitSelector: '[data-test-id="account-login-btn-1-button"], button[type="submit"]',
+      sportsbookNavText: /sportsbook/i
+    },
+    // betssones: CREDENTIAL-VERIFIED 2026-08-08 (isLoggedIn confirmed).
+    // Real path is /login (NOT /es/login). IMPORTANT: identical OBG
+    // markup did NOT imply shared credential membership - arcticbet,
+    // betsmith, betsolid, betssonmx were live-tested with this same
+    // credential and ALL FAILED despite matching markup. See
+    // REFERENCE.md's "Brand credential/login status summary".
+    betssones: {
+      loginPath: '/login',
+      usernameSelector: 'input[name="email"], input#email-input, input[type="email"]',
+      passwordSelector: 'input[name="password"], input[type="password"]',
+      submitSelector: '[data-test-id="account-login-btn-1-button"], button[type="submit"]',
+      sportsbookNavText: /sportsbook/i
     }
   };
 

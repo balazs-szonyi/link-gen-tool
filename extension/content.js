@@ -124,6 +124,15 @@
   // (confirmed 2026-08-05 on NordicBet/test; see the sbplayground-link-
   // generator skill's REFERENCE.md "hard navigation breaks the session"
   // pitfall - live-login-poc.mjs works around it the same way).
+  // betsson/betsafe/betssongr share NordicBet's exact same OBG platform
+  // markup (#email-input/#password-input, account-login-btn-1-button) -
+  // confirmed 2026-08-07 via chrome-devtools live login on all three real
+  // sites (isLoggedIn=true, authentication-transaction 201, wallet/balance
+  // calls succeeded afterward) using the shared QA credential "User1"
+  // (obg.e2e.test.sb+01@gmail.com) from the OBG Sportsbook TA user-
+  // accounts wiki - that credential/password is valid across these OBG
+  // brands (NOT brand-specific as first assumed), but is NOT universal:
+  // it failed on Rizk (a different, non-OBG platform/brand family).
   var LOGIN_SELECTORS = {
     nordicbet: {
       loginPath: '/en/login',
@@ -141,10 +150,73 @@
       // same caveat as the rest of this brand's entry) - matches the
       // "M-BAHIS" top-nav tab from the skill's worked example.
       sportsbookNavPattern: /m-bahis/i
+    },
+    betsson: {
+      loginPath: '/en/login',
+      usernameSelector: 'input[name="email"], input#email-input, input[type="email"]',
+      passwordSelector: 'input[name="password"], input[type="password"]',
+      submitSelector: '[data-test-id="account-login-btn-1-button"], button[type="submit"]',
+      sportsbookNavPattern: /^sportsbook$/i
+    },
+    betsafe: {
+      loginPath: '/en/login',
+      usernameSelector: 'input[name="email"], input#email-input, input[type="email"]',
+      passwordSelector: 'input[name="password"], input[type="password"]',
+      submitSelector: '[data-test-id="account-login-btn-1-button"], button[type="submit"]',
+      // Observed 2026-08-07: the first submit click can land while the
+      // React form still shows a stale "Fill in this field" validation
+      // state even though both fields already hold the typed value - a
+      // second click (no re-typing needed) goes through. attemptAutoLogin
+      // already retries submit once on failure via trustedAutoLoginSubmit,
+      // so no extra code change was needed for this brand specifically.
+      sportsbookNavPattern: /^sportsbook$/i
+    },
+    betssongr: {
+      loginPath: '/en/login',
+      usernameSelector: 'input[name="email"], input#email-input, input[type="email"]',
+      passwordSelector: 'input[name="password"], input[type="password"]',
+      submitSelector: '[data-test-id="account-login-btn-1-button"], button[type="submit"]',
+      sportsbookNavPattern: /^sportsbook$/i
+    },
+    // betssones: CREDENTIAL-VERIFIED 2026-08-08 (authentication-transaction
+    // 201, logged-in state confirmed - "Hola, Gabrio" welcome + balance
+    // widget). Same OBG markup as above, but real login path is /login,
+    // NOT /es/login like most other brands' /en/login convention.
+    // IMPORTANT: identical markup did NOT imply shared-credential
+    // membership for every OBG-styled brand - arcticbet, betsmith,
+    // betsolid, and betssonmx were all live-tested with this exact same
+    // credential on 2026-08-08 and ALL FAILED ("provided email/username
+    // or password is not valid" / "no son válidos"), despite using the
+    // byte-identical login form. Do NOT add those four to LOGIN_SELECTORS
+    // on the assumption that matching markup means matching credential -
+    // each brand must be individually credential-tested. See REFERENCE.md
+    // "Brand credential/login status summary" for the full per-brand
+    // results table.
+    betssones: {
+      loginPath: '/login',
+      usernameSelector: 'input[name="email"], input#email-input, input[type="email"]',
+      passwordSelector: 'input[name="password"], input[type="password"]',
+      submitSelector: '[data-test-id="account-login-btn-1-button"], button[type="submit"]',
+      sportsbookNavPattern: /^sportsbook$/i
     }
   };
 
   var ENV_LABELS = ['test', 'qa', 'alpha', 'prod'];
+
+  // Item 14: brands with no plain user/pass login at all (Swedish
+  // BankID / Danish MitID-CPR or similar step-up auth) - auto-login is
+  // fundamentally impossible for these, so both the Generate tab's
+  // live-login fallback and the Live Login tab's Auto-login button
+  // short-circuit straight to "open the real login page for the user to
+  // complete by hand" instead of silently attempting (and failing) a
+  // normal credential-based flow. Source: sbplayground-link-generator
+  // skill's REFERENCE.md brand-credential-status table.
+  var SPECIAL_AUTH_BRANDS = {
+    bethard: 'Swedish BankID',
+    nordicbetdk: 'Danish MitID/CPR',
+    betssondk: 'Danish MitID/CPR',
+    spelklubben: 'Swedish BankID (shares account with the casino product)'
+  };
 
   // Builds the URL to the brand's REAL login page (not the sbplayground
   // internal test harness) for a given environment - used to open the
@@ -178,6 +250,29 @@
 
 
   // ---------------------------------------------------------------------
+  // Settings - small persisted extension-wide toggles, chrome.storage.local
+  // (shared across every brand domain, same as the Vault below). Currently
+  // just the one flag: whether the "Open (Sportradar-enabled)" button/spoof
+  // feature is offered at all. Defaults to enabled (it's a fix, not a risky
+  // experiment) but some environments/users may want to turn it off - e.g.
+  // if it ever interferes with unrelated Sportradar traffic in the same tab
+  // - so it's not hardcoded on.
+  // ---------------------------------------------------------------------
+
+  var SR_SPOOF_SETTING_KEY = 'lgt-sr-spoof-enabled';
+  var srSpoofSettingCache = true; // optimistic default until storage read resolves
+  var srSpoofChkRef = null; // set by buildModeA once the checkbox exists, so the
+  // async storage read below (which may resolve AFTER buildPanel() already ran
+  // synchronously at content-script load) can still correct the checkbox's
+  // displayed state instead of leaving it stuck on the optimistic default.
+  chrome.storage.local.get([SR_SPOOF_SETTING_KEY], function (res) {
+    if (res && typeof res[SR_SPOOF_SETTING_KEY] === 'boolean') {
+      srSpoofSettingCache = res[SR_SPOOF_SETTING_KEY];
+      if (srSpoofChkRef) srSpoofChkRef.checked = srSpoofSettingCache;
+    }
+  });
+
+  // ---------------------------------------------------------------------
   // Vault - chrome.storage.local, extension-scoped so it is automatically
   // shared across every brand domain (unlike the bookmarklet's per-origin
   // localStorage, which needed a manual Export/Import sync code). No
@@ -189,9 +284,23 @@
   var Vault = (function () {
     function uid() { return 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
 
+    // Migration (item 8): older records saved before the brand-matrix
+    // feature have no `brands` field at all - treat that as "unassigned"
+    // ([]), not "works for every brand", so nothing is silently assumed
+    // to apply to a brand the user never actually confirmed it for.
+    function migrate(list) {
+      var changed = false;
+      list.forEach(function (c) {
+        if (!Array.isArray(c.brands)) { c.brands = []; changed = true; }
+      });
+      return changed;
+    }
+
     function readAll(cb) {
       chrome.storage.local.get([VAULT_KEY], function (res) {
-        cb((res && res[VAULT_KEY]) || []);
+        var list = (res && res[VAULT_KEY]) || [];
+        if (migrate(list)) { writeAll(list, function () { cb(list); }); return; }
+        cb(list);
       });
     }
 
@@ -203,15 +312,36 @@
 
     return {
       getAll: function (cb) { readAll(cb); },
-      save: function (label, username, password, cb) {
+      // brands: string[] of brand keys this credential is confirmed/
+      // claimed to work for - defaults to [] (unassigned) when omitted so
+      // existing callers (pre-matrix) keep working unchanged.
+      save: function (label, username, password, brands, cb) {
         readAll(function (list) {
-          list.push({ id: uid(), label: label, username: username, password: password, isDefault: list.length === 0 });
+          list.push({ id: uid(), label: label, username: username, password: password, isDefault: list.length === 0, brands: brands || [] });
           writeAll(list, cb);
         });
       },
       setDefault: function (id, cb) {
         readAll(function (list) {
           list.forEach(function (c) { c.isDefault = (c.id === id); });
+          writeAll(list, cb);
+        });
+      },
+      // Item 11: replaces a credential's whole brand list in one write
+      // (called from the "Brands" checkbox-matrix editor).
+      setBrands: function (id, brands, cb) {
+        readAll(function (list) {
+          var c = list.find(function (x) { return x.id === id; });
+          if (c) c.brands = brands || [];
+          writeAll(list, cb);
+        });
+      },
+      // Item 9's "unlink just this brand" option - removes one brand key
+      // from a credential's list without touching anything else about it.
+      unlinkBrand: function (id, brandKey, cb) {
+        readAll(function (list) {
+          var c = list.find(function (x) { return x.id === id; });
+          if (c) c.brands = (c.brands || []).filter(function (b) { return b !== brandKey; });
           writeAll(list, cb);
         });
       },
@@ -228,6 +358,21 @@
         readAll(function (list) {
           cb(list.find(function (c) { return c.isDefault; }) || list[0] || null);
         });
+      },
+      // Item 12/3: credentials explicitly matrix-linked to a given brand.
+      // Deliberately does NOT fall back to "every credential" when the
+      // list is empty - an empty result here is the trigger for the
+      // item-3 "no credential linked to this brand yet" conflict prompt,
+      // not a silent guess.
+      getForBrand: function (brandKey, cb) {
+        readAll(function (list) {
+          cb(list.filter(function (c) { return (c.brands || []).indexOf(brandKey) !== -1; }));
+        });
+      },
+      getById: function (id, cb) {
+        readAll(function (list) {
+          cb(list.find(function (c) { return c.id === id; }) || null);
+        });
       }
     };
   })();
@@ -242,6 +387,36 @@
     return 'https://internal.' + env + '.sbplayground1.net';
   }
 
+  // Chrome's fetch() rejects with a bare `TypeError: Failed to fetch` for
+  // DNS failures / connection-refused / timeouts - there's no finer-grained
+  // reason available at this layer, but for an internal-only host that
+  // only routes over the VPN, this specific rejection shape is a safe,
+  // high-confidence "you're probably not on the VPN" signal. Genuine
+  // HTTP-level failures (brand typo -> 404, real backend 500) already
+  // throw their own explicitly-worded Error via the `r.ok` checks below
+  // and never reach this classifier at all, so they're never
+  // misidentified as a VPN problem.
+  function isVpnLikeNetworkError(err) {
+    return !!err && err.name === 'TypeError' && /Failed to fetch|NetworkError|Load failed/i.test(err.message || '');
+  }
+
+  // Thin wrapper around fetch() for every internal.*.sbplayground1.net
+  // call - tags a classified connectivity failure with isVpnRequired so
+  // callers can show the "First connect VPN!" popup without each having
+  // to re-implement isVpnLikeNetworkError's detection themselves.
+  function fetchInternal(url) {
+    return fetch(url).catch(function (err) {
+      if (isVpnLikeNetworkError(err)) {
+        var host = (url.match(/^https:\/\/([^/]+)/) || [])[1] || url;
+        var vpnErr = new Error('Could not reach ' + host + ' - not connected to the VPN?');
+        vpnErr.isVpnRequired = true;
+        vpnErr.vpnHost = host;
+        throw vpnErr;
+      }
+      throw err;
+    });
+  }
+
   // Upfront check so the Generate tab's live-login fallback (see
   // buildModeA) doesn't have to sniff generateLink()'s error string to
   // decide whether a brand has a real logged-in test customer at all.
@@ -251,12 +426,21 @@
   function hasLoggedInCustomerKey(brand, environment) {
     var brandGuid = BRANDS[brand];
     if (!brandGuid) return Promise.resolve(false);
-    return fetch(apiBase(environment) + '/api/customers/' + brandGuid)
+    return fetchInternal(apiBase(environment) + '/api/customers/' + brandGuid)
       .then(function (r) { return r.ok ? r.json() : {}; })
       .then(function (customers) {
         return Object.keys(customers || {}).some(function (k) { return k.toLowerCase().indexOf('logged-in') === 0; });
       })
-      .catch(function () { return false; });
+      .catch(function (err) {
+        // A VPN-connectivity failure is NOT "this brand has no logged-in
+        // key" - swallowing it here would silently mislead
+        // runGenerateFlow into wastefully attempting a live-login
+        // fallback instead of surfacing the real problem immediately.
+        // Any other (non-network) error keeps today's conservative
+        // silent-false fallback.
+        if (err && err.isVpnRequired) throw err;
+        return false;
+      });
   }
 
   function generateLink(opts) {
@@ -268,7 +452,7 @@
     var prefix = opts.loggedIn ? 'logged-in' : 'logged-out';
     var filter = (opts.customerKeyFilter || '').toLowerCase();
 
-    return fetch(base + '/api/customers/' + brandGuid)
+    return fetchInternal(base + '/api/customers/' + brandGuid)
       .then(function (r) {
         if (!r.ok) throw new Error('customers fetch failed: HTTP ' + r.status);
         return r.json();
@@ -284,7 +468,7 @@
         var customerKey = keys[0];
         var uri = base + '/api/user-context/' + customerKey +
           '?brand=' + brandGuid + '&shouldUseSbIl=false&generateLinksPage=true&overrideIFrameBaseUrlWith=';
-        return fetch(uri).then(function (r) {
+        return fetchInternal(uri).then(function (r) {
           if (!r.ok) throw new Error('user-context fetch failed: HTTP ' + r.status);
           return r.json();
         }).then(function (data) {
@@ -378,6 +562,35 @@
   var LIVE_LOGIN_CACHE_KEY = 'lgt-live-login-cache';
   var LIVE_LOGIN_CACHE_TTL_MS = 30 * 60 * 1000; // 30 min - conservative slice of the ~8-24h real validity (see REFERENCE.md)
 
+  // Per-brand "silent login proven to work" memory (item 0c). A brand's
+  // very first live-login always runs with the background tab briefly
+  // visible (today's default) as a safety net, since we don't yet know
+  // its selectors/credentials are correct - the moment ANY run for that
+  // brand reaches 'captured', we trust the (now fixed, see background.js
+  // attachDebugger) invisible background-tab mechanism to keep working
+  // and switch that brand to silent-by-default from then on. The manual
+  // "Show login tab" checkbox always overrides this remembered default in
+  // either direction for a single generation.
+  var SILENT_VERIFIED_KEY = 'lgt-silent-verified-brands';
+
+  function isBrandSilentVerified(brandKey, cb) {
+    chrome.storage.local.get([SILENT_VERIFIED_KEY], function (res) {
+      var map = (res && res[SILENT_VERIFIED_KEY]) || {};
+      cb(!!map[brandKey]);
+    });
+  }
+
+  function markBrandSilentVerified(brandKey) {
+    chrome.storage.local.get([SILENT_VERIFIED_KEY], function (res) {
+      var map = Object.assign({}, res && res[SILENT_VERIFIED_KEY]);
+      if (map[brandKey]) return; // already marked, avoid a redundant write
+      map[brandKey] = true;
+      var obj = {};
+      obj[SILENT_VERIFIED_KEY] = map;
+      chrome.storage.local.set(obj);
+    });
+  }
+
   var LiveLoginJob = (function () {
     function get(cb) {
       chrome.storage.local.get([LIVE_LOGIN_JOB_KEY], function (res) {
@@ -400,12 +613,31 @@
     }
     // Opens the background tab via background.js (content scripts cannot
     // call chrome.tabs.* directly) at the brand's real login page.
-    function start(brandKey, environment, cb) {
+    // `visible` (item 0b/0c): when false the tab is opened with
+    // active:false and stays that way for its whole life (relies on
+    // background.js's Emulation.setFocusEmulationEnabled fix so trusted
+    // input still works); when true the tab is opened active:true so the
+    // user can watch/diagnose the flow, e.g. for a brand not yet proven
+    // to work silently. `credentialId` (item 12): which Vault credential
+    // the OTHER tab (resumeLiveLoginJobIfPending, running in a completely
+    // separate content-script instance on the background tab's origin)
+    // should use - falls back to Vault.getDefault there when omitted, so
+    // existing/older callers are unaffected. `device` ('desktop' default,
+    // or 'mobile'): which generated link variant this capture is FOR -
+    // 'mobile' tells background.js's lgt-open-tab handler to switch the
+    // job tab to a real mobile viewport/UA (CDP device emulation) BEFORE
+    // navigating to the login page, so the brand's real site issues a
+    // genuinely mobile-scoped stc/ctx instead of a desktop one (see
+    // background.js's setupMobileEmulation for the full rationale - a
+    // single shared context spliced into both link variants was the
+    // confirmed 2026-08-07 root cause of "mobile bleSource link click
+    // does nothing").
+    function start(brandKey, environment, visible, credentialId, device, cb) {
       var url = realLoginUrl(brandKey, environment);
       if (!url) { cb({ ok: false, error: 'Brand "' + brandKey + '" is not live-login-capable (no login selectors known).' }); return; }
-      var job = { id: 'j' + Date.now().toString(36), brand: brandKey, environment: environment, status: 'starting', stc: null, ctx: null, error: null, createdAt: Date.now() };
+      var job = { id: 'j' + Date.now().toString(36), brand: brandKey, environment: environment, visible: !!visible, credentialId: credentialId || null, device: device || 'desktop', status: 'starting', stc: null, ctx: null, error: null, createdAt: Date.now() };
       write(job, function () {
-        chrome.runtime.sendMessage({ type: 'lgt-open-tab', url: url }, function (response) {
+        chrome.runtime.sendMessage({ type: 'lgt-open-tab', url: url, active: !!visible, device: job.device }, function (response) {
           if (chrome.runtime.lastError) { cb({ ok: false, error: chrome.runtime.lastError.message }); return; }
           if (!response || !response.ok) { cb({ ok: false, error: (response && response.error) || 'failed to open tab' }); return; }
           cb({ ok: true, job: job });
@@ -413,22 +645,37 @@
       });
     }
     // Live-updates via chrome.storage.onChanged - used by the Generate
-    // tab to reflect status without polling.
+    // tab to reflect status without polling. Returns the listener
+    // function so callers can (and must, once settled) unregister it via
+    // offChange - onChange used to be called once per generation click
+    // with no matching removeListener, so every click across a long QA
+    // session left one more permanently-attached listener behind (each
+    // old one is a harmless no-op thanks to its own closure's `settled`
+    // guard, but this was still an unbounded leak worth closing).
     function onChange(cb) {
-      chrome.storage.onChanged.addListener(function (changes, area) {
+      var listener = function (changes, area) {
         if (area !== 'local' || !changes[LIVE_LOGIN_JOB_KEY]) return;
         cb(changes[LIVE_LOGIN_JOB_KEY].newValue || null);
-      });
+      };
+      chrome.storage.onChanged.addListener(listener);
+      return listener;
     }
-    return { get: get, update: update, clear: clear, start: start, onChange: onChange };
+    function offChange(listener) {
+      if (listener) chrome.storage.onChanged.removeListener(listener);
+    }
+    return { get: get, update: update, clear: clear, start: start, onChange: onChange, offChange: offChange };
   })();
 
   var LiveLoginCache = (function () {
-    function keyFor(brand, environment) { return brand + ':' + environment; }
-    function get(brand, environment, cb) {
+    // Keyed per device too (not just brand:environment) - a desktop and
+    // mobile capture for the same brand/environment are genuinely
+    // different contexts (see the "device" note on LiveLoginJob.start
+    // above) and must never be cross-served from cache.
+    function keyFor(brand, environment, device) { return brand + ':' + environment + ':' + (device || 'desktop'); }
+    function get(brand, environment, device, cb) {
       chrome.storage.local.get([LIVE_LOGIN_CACHE_KEY], function (res) {
         var map = (res && res[LIVE_LOGIN_CACHE_KEY]) || {};
-        var entry = map[keyFor(brand, environment)];
+        var entry = map[keyFor(brand, environment, device)];
         if (entry && (Date.now() - entry.capturedAt) < LIVE_LOGIN_CACHE_TTL_MS) {
           cb(entry);
         } else {
@@ -436,10 +683,10 @@
         }
       });
     }
-    function set(brand, environment, stc, ctx, cb) {
+    function set(brand, environment, device, stc, ctx, cb) {
       chrome.storage.local.get([LIVE_LOGIN_CACHE_KEY], function (res) {
         var map = (res && res[LIVE_LOGIN_CACHE_KEY]) || {};
-        map[keyFor(brand, environment)] = { stc: stc, ctx: ctx, capturedAt: Date.now() };
+        map[keyFor(brand, environment, device)] = { stc: stc, ctx: ctx, capturedAt: Date.now() };
         var obj = {};
         obj[LIVE_LOGIN_CACHE_KEY] = map;
         chrome.storage.local.set(obj, function () { if (cb) cb(); });
@@ -447,6 +694,39 @@
     }
     return { get: get, set: set };
   })();
+
+  // Playground (sbplayground iframe test-host) suffixes - mirrors
+  // background.js's PLAYGROUND_HOST_SUFFIX (kept in sync manually; used
+  // there for the Sportradar-spoof auto-detect feature, needed here too
+  // so detectBrandAndEnv/Auto-login recognize a brand while the user is
+  // on the iframe test page, not just its real production domain - item 7).
+  var PLAYGROUND_HOST_SUFFIX = {
+    arcticbet: 'arcticbetplayground.net',
+    betfirst: 'betfirstplayground.net',
+    bethard: 'bethardplayground.net',
+    betsafe: 'bsfplayground.net',
+    betsmith: 'betsmithplayground.net',
+    betsolid: 'betsolidplayground.net',
+    betsson: 'btsplayground.net',
+    betssonarcb: 'btsarcbplayground.net',
+    betssonbr: 'btsbrplayground.net',
+    betssondk: 'btsdkplayground.net',
+    betssones: 'btsesplayground.net',
+    betssongr: 'btsgrplayground.net',
+    betssonmx: 'btsmxplayground.net',
+    btsarba: 'btsarbaplayground.net',
+    btsarbacity: 'btsarbacityplayground.net',
+    cherry: 'cherryplayground.net',
+    guts: 'gutsplayground.net',
+    ibet: 'ibetplayground.net',
+    inkabet: 'inkabetplayground.net',
+    mobilbahis: 'mbaplayground.net',
+    nordicbet: 'ndbplayground.net',
+    nordicbetdk: 'ndbdkplayground.net',
+    playgurus: 'pgplayground.net',
+    rizk: 'rizkplayground.net',
+    spelklubben: 'spelklubbenplayground.net'
+  };
 
   function detectBrandAndEnv() {
     var host = location.hostname.toLowerCase();
@@ -463,6 +743,16 @@
         brand = key;
       }
     });
+    // Fall back to the playground-host suffix map when the real brand
+    // domain didn't match - covers the case where the user is on a
+    // generated iframe test link (e.g. d-cf.test.ndbplayground.net)
+    // rather than the brand's own production/test site.
+    if (!brand) {
+      Object.keys(PLAYGROUND_HOST_SUFFIX).forEach(function (key) {
+        var suffix = PLAYGROUND_HOST_SUFFIX[key];
+        if (host === suffix || host.slice(-(suffix.length + 1)) === '.' + suffix) brand = key;
+      });
+    }
     return { brand: brand, environment: env };
   }
 
@@ -950,6 +1240,15 @@
       // site succeeded but took ~12s total for the whole login+capture
       // sequence in a fast test environment - a real user's slower
       // network/machine could plausibly exceed the old, tighter budgets.
+      // The post-login landing page (e.g. NordicBet's plain "/en") can show
+      // its own cookie-consent banner even when the earlier login-page
+      // dismissal already ran - it's a different route/component tree, and
+      // some consent SDKs re-check per-page. An undismissed banner can
+      // silently intercept the click meant for the Sportsbook nav link
+      // exactly like the already-documented login-form case
+      // (tryDismissCookieBanner's comment) - looks identical to "capture is
+      // just slow" in the logs, so dismiss proactively before searching.
+      tryDismissCookieBanner(log);
       awaitCapture(5000).then(function (already) {
         if (already) return resolve(true);
         if (!pattern) {
@@ -957,17 +1256,35 @@
           resolve(false);
           return;
         }
+        var startPath = location.pathname;
         var start = Date.now();
-        (function pollNav() {
-          var linkEl = findSportsbookNavLink(pattern);
-          if (linkEl) {
-            var c = centerOf(linkEl);
-            sendTrustedSequence([{ type: 'click', x: c.x, y: c.y }]).then(function () {
+        function clickAndAwait(linkEl, allowRetry) {
+          var c = centerOf(linkEl);
+          sendTrustedSequence([{ type: 'click', x: c.x, y: c.y }]).then(function () {
+            // Verify the click actually navigated somewhere before waiting
+            // the full capture budget - a banner/overlay intercepting the
+            // click leaves location.pathname unchanged, which otherwise
+            // isn't distinguishable from "the capture is just slow" in the
+            // logs. One retry (with a fresh banner-dismiss attempt) covers
+            // a banner that only appeared after the first search/click.
+            setTimeout(function () {
+              if (allowRetry && location.pathname === startPath) {
+                log('Click on the Sportsbook nav link did not navigate anywhere yet (still on ' + startPath + ') - a cookie banner or overlay may have intercepted it; retrying once...');
+                tryDismissCookieBanner(log);
+                var retryEl = findSportsbookNavLink(pattern);
+                if (retryEl) return clickAndAwait(retryEl, false);
+              }
               awaitCapture(20000).then(function (ok) {
                 if (!ok) log('Navigated to Sportsbook, but no stc/ctx captured yet - it may still be loading; check the Live Login tab.');
                 resolve(ok);
               });
-            });
+            }, 1500);
+          });
+        }
+        (function pollNav() {
+          var linkEl = findSportsbookNavLink(pattern);
+          if (linkEl) {
+            clickAndAwait(linkEl, true);
             return;
           }
           if (Date.now() - start > 7000) {
@@ -1003,7 +1320,7 @@
     } catch (e) {}
   }
 
-  function attemptAutoLogin(brandKey, username, password, log) {
+  function attemptAutoLogin(brandKey, username, password, log, isSilentWindow) {
     var sel = LOGIN_SELECTORS[brandKey];
     if (!sel) {
       log('No known login selectors for brand "' + brandKey + '". Log in manually - capture stays passive and automatic.');
@@ -1043,7 +1360,33 @@
       if (result.alreadyLoggedIn || result.field) return result;
       log('Still waiting for the username field (this environment can be slow to mount the login form) - trying a bit longer...');
       tryDismissCookieBanner(log);
-      return waitForUsernameFieldOrAlreadyLoggedIn(sel, 15000);
+      // Nudge: if this job is running in the silent/minimized background
+      // window, a minimized page's document.visibilityState is 'hidden',
+      // which Chrome uses to pause/heavily throttle
+      // requestAnimationFrame - and this modal's own mount/animate-in
+      // apparently depends on rAF timing (confirmed by a 2026-08-07
+      // screenshot: the field WAS present once the window got
+      // un-minimized for the failure view, despite "not found" during the
+      // minimized wait). Briefly restoring 'normal' state (still
+      // unfocused - doesn't steal input focus or flash to the front) for
+      // just this second, slower-mount wait gives rAF a chance to run at
+      // full rate without giving up full invisibility for the common/fast
+      // case above. Re-minimized again once this second wait resolves,
+      // regardless of outcome - see the .then below. Guarded by
+      // isSilentWindow (only true for the actual background-window job -
+      // see resumeLiveLoginJobIfPending's call site) since the manual
+      // "Auto-login" button in the Live Login tab runs in the user's own
+      // CURRENT foreground window, where forcing state:'normal'+
+      // focused:false would defocus whatever the user is actively doing.
+      if (isSilentWindow) {
+        try { chrome.runtime.sendMessage({ type: 'lgt-window-set-state', state: 'normal' }); } catch (e) {}
+      }
+      return waitForUsernameFieldOrAlreadyLoggedIn(sel, 15000).then(function (secondResult) {
+        if (isSilentWindow) {
+          try { chrome.runtime.sendMessage({ type: 'lgt-window-set-state', state: 'minimized' }); } catch (e) {}
+        }
+        return secondResult;
+      });
     }).then(function (result) {
       if (result.alreadyLoggedIn) {
         log('Already logged in (redirected away from the login page before any form appeared, most likely because a valid session already existed here from earlier browsing) - skipping straight to Sportsbook capture.');
@@ -1103,6 +1446,26 @@
   // Panel UI
   // ---------------------------------------------------------------------
 
+  // Turns a raw JS error into a user-actionable message for the log/status
+  // areas. "Extension context invalidated." is a real, expected Chrome
+  // occurrence - it's what chrome.runtime/chrome.storage calls throw in a
+  // content script whose extension was reloaded/updated (e.g. via
+  // chrome://extensions "Reload") while this tab's panel was already
+  // injected from the OLD version. It is NOT a bug in the tool's own
+  // logic - the fix is simply to reload the page so a fresh content
+  // script attaches to the new extension context - but the raw browser
+  // message gives no hint of that, so it repeatedly confused a user who
+  // updated the extension without also refreshing an already-open tab
+  // (2026-08-07). Reused everywhere a chrome.* call's rejection is shown
+  // directly to the user.
+  function friendlyErrorMessage(err) {
+    var raw = String(err && err.message || err || '');
+    if (/Extension context invalidated/i.test(raw)) {
+      return 'The addon was just updated/reloaded - this tab is still running the OLD version. Reload this page (F5) and try again.';
+    }
+    return raw;
+  }
+
   function el(tag, attrs, children) {
     var node = document.createElement(tag);
     Object.keys(attrs || {}).forEach(function (k) {
@@ -1115,6 +1478,88 @@
       else if (c) node.appendChild(c);
     });
     return node;
+  }
+
+  // A single, reused "First connect VPN!" modal - shown whenever a
+  // user-initiated Generate/Live-Login action's internal.*.sbplayground1.net
+  // call fails with a classified VPN/connectivity error (see
+  // isVpnLikeNetworkError above). Appended directly to document.body (not
+  // inside #lgt-panel) so it stays visible regardless of which panel tab
+  // is active or whether the panel is minimized/collapsed. Deliberately
+  // reactive-only per the user's explicit choice - there is no background
+  // polling, this only ever appears as the direct result of a real failed
+  // fetch. Retry re-invokes whatever action just failed; a repeat failure
+  // just calls this again naturally, no extra state machine needed.
+  var vpnPopupEls = null;
+  function showVpnRequiredPopup(message, retryFn) {
+    if (!vpnPopupEls) {
+      var style = document.createElement('style');
+      style.id = 'lgt-vpn-popup-style';
+      style.textContent = [
+        '#lgt-vpn-popup-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:2147483647;',
+        'display:flex;align-items:center;justify-content:center;font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}',
+        '#lgt-vpn-popup{background:#101320;color:#f6f7fb;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.5);',
+        'padding:20px;width:320px;text-align:center;border:1px solid #ff6600}',
+        '#lgt-vpn-popup h4{margin:0 0 8px;font-size:16px}',
+        '#lgt-vpn-popup p{margin:0 0 14px;color:#9aa3b8;font-size:12px;word-break:break-word}',
+        '#lgt-vpn-popup .lgt-row{display:flex;gap:8px}',
+        '#lgt-vpn-popup button{flex:1;padding:8px;border:none;border-radius:6px;font-weight:600;cursor:pointer}',
+        '#lgt-vpn-popup .lgt-vpn-retry{background:#ff6600;color:#101320}',
+        '#lgt-vpn-popup .lgt-vpn-close{background:#2b3350;color:#f6f7fb}'
+      ].join('');
+      document.head.appendChild(style);
+
+      var msgEl = el('p', {}, ['']);
+      var retryBtn = el('button', { class: 'lgt-vpn-retry' }, ['Retry']);
+      var closeBtn = el('button', { class: 'lgt-vpn-close' }, ['Close']);
+      var box = el('div', { id: 'lgt-vpn-popup' }, [
+        el('h4', {}, ['\uD83D\uDD12 First connect VPN!']),
+        msgEl,
+        el('div', { class: 'lgt-row' }, [retryBtn, closeBtn])
+      ]);
+      var backdrop = el('div', {
+        id: 'lgt-vpn-popup-backdrop', style: 'display:none',
+        onclick: function (e) { if (e.target === backdrop) hide(); }
+      }, [box]);
+      (document.body || document.documentElement).appendChild(backdrop);
+
+      var currentRetry = null;
+      function hide() { backdrop.style.display = 'none'; currentRetry = null; }
+      retryBtn.addEventListener('click', function () {
+        var fn = currentRetry;
+        hide();
+        if (fn) fn();
+      });
+      closeBtn.addEventListener('click', hide);
+
+      vpnPopupEls = { backdrop: backdrop, msgEl: msgEl, show: function (msg, fn) {
+        msgEl.textContent = msg || 'Couldn\'t reach the internal sbplayground1.net API.';
+        currentRetry = fn || null;
+        backdrop.style.display = 'flex';
+      } };
+    }
+    vpnPopupEls.show(message, retryFn);
+  }
+
+  // Item 8/11: a compact, scrollable checkbox matrix over every known
+  // brand key (BRANDS), used both when creating a credential and when
+  // editing an existing one's brand list later. Returns the wrapper
+  // element with a __lgtGetSelected() accessor instead of wiring its own
+  // save button, so callers can decide when/how to persist the result.
+  function buildBrandMatrix(selected) {
+    selected = selected || [];
+    var wrap = el('div', { class: 'lgt-brand-matrix' });
+    var checks = {};
+    Object.keys(BRANDS).sort().forEach(function (key) {
+      var chk = el('input', { type: 'checkbox' });
+      chk.checked = selected.indexOf(key) !== -1;
+      checks[key] = chk;
+      wrap.appendChild(el('label', { class: 'lgt-checkbox-row lgt-brand-matrix-row' }, [chk, ' ' + key]));
+    });
+    wrap.__lgtGetSelected = function () {
+      return Object.keys(checks).filter(function (k) { return checks[k].checked; });
+    };
+    return wrap;
   }
 
   // Lets the user pick the panel up by its header (title bar) and drop it
@@ -1150,56 +1595,117 @@
     document.addEventListener('mouseup', function () { dragging = false; });
   }
 
+  var PANEL_OPEN_KEY = 'lgt-panel-open';
+  var PANEL_COLLAPSED_KEY = 'lgt-panel-collapsed';
+
+  var THEME_KEY = 'lgt-theme';
+
   function buildPanel() {
     var style = document.createElement('style');
     style.id = 'lgt-panel-style';
     style.textContent = [
+      // Colors are CSS custom properties so the dark/light toggle below
+      // can just switch a class on #lgt-panel instead of needing two
+      // separate copies of every rule.
+      '#lgt-panel{--lgt-bg:#101320;--lgt-fg:#f6f7fb;--lgt-tab-bg:#1c2233;--lgt-accent:#ff6600;',
+      '--lgt-accent-fg:#101320;--lgt-muted:#9aa3b8;--lgt-input-bg:#1c2233;--lgt-input-border:#2b3350;',
+      '--lgt-secondary-bg:#2b3350;}',
+      '#lgt-panel.lgt-theme-light{--lgt-bg:#f4f5f9;--lgt-fg:#1b1f2b;--lgt-tab-bg:#e4e7f0;--lgt-accent:#ff6600;',
+      '--lgt-accent-fg:#ffffff;--lgt-muted:#5a6178;--lgt-input-bg:#ffffff;--lgt-input-border:#c7cce0;',
+      '--lgt-secondary-bg:#dde1ee;}',
       '#lgt-panel{position:fixed;top:20px;right:20px;width:360px;max-height:88vh;overflow:auto;',
-      'background:#101320;color:#f6f7fb;font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;',
+      'background:var(--lgt-bg);color:var(--lgt-fg);font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;',
       'border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.4);z-index:2147483647;padding:14px;}',
       '#lgt-panel h3{margin:0 0 8px;font-size:15px;display:flex;justify-content:space-between;align-items:center}',
       '#lgt-panel .lgt-header-actions{display:flex;align-items:center;gap:10px;flex:none}',
       '#lgt-panel .lgt-tabs{display:flex;gap:6px;margin-bottom:10px}',
-      '#lgt-panel .lgt-tab{flex:1;text-align:center;padding:6px;border-radius:6px;background:#1c2233;cursor:pointer}',
-      '#lgt-panel .lgt-tab.active{background:#ff6600;color:#101320;font-weight:600}',
-      '#lgt-panel label{display:block;margin:8px 0 3px;color:#9aa3b8;font-size:11px;text-transform:uppercase}',
-      '#lgt-panel select,#lgt-panel input{width:100%;box-sizing:border-box;padding:6px;border-radius:5px;border:1px solid #2b3350;background:#1c2233;color:#f6f7fb}',
+      '#lgt-panel .lgt-tab{flex:1;text-align:center;padding:6px;border-radius:6px;background:var(--lgt-tab-bg);cursor:pointer}',
+      '#lgt-panel .lgt-tab.active{background:var(--lgt-accent);color:var(--lgt-accent-fg);font-weight:600}',
+      '#lgt-panel label{display:block;margin:8px 0 3px;color:var(--lgt-muted);font-size:11px;text-transform:uppercase}',
+      '#lgt-panel select,#lgt-panel input{width:100%;box-sizing:border-box;padding:6px;border-radius:5px;border:1px solid var(--lgt-input-border);background:var(--lgt-input-bg);color:var(--lgt-fg)}',
       // Checkbox rows (BLE source / Force fresh): without this, the
       // generic "select,input{width:100%}" rule above stretches the
       // checkbox itself to fill the whole row (inputs match it too),
       // which is what was pushing the label text out of a clean
       // left-aligned line. Pin the checkbox to its natural size and lay
       // the row out as a simple left-aligned flex row instead.
-      '#lgt-panel input[type=checkbox]{width:auto;flex:0 0 auto;margin:0;accent-color:#ff6600}',
+      '#lgt-panel input[type=checkbox]{width:auto;flex:0 0 auto;margin:0;accent-color:var(--lgt-accent)}',
       '#lgt-panel .lgt-checkbox-row{display:flex;align-items:center;justify-content:flex-start;gap:8px;',
       'text-transform:none;margin-top:8px;text-align:left}',
-      '#lgt-panel button{margin-top:10px;width:100%;padding:8px;border:none;border-radius:6px;background:#ff6600;color:#101320;font-weight:600;cursor:pointer}',
-      '#lgt-panel button.secondary{background:#2b3350;color:#f6f7fb;margin-top:6px}',
+      '#lgt-panel button{margin-top:10px;width:100%;padding:8px;border:none;border-radius:6px;background:var(--lgt-accent);color:var(--lgt-accent-fg);font-weight:600;cursor:pointer}',
+      '#lgt-panel button.secondary{background:var(--lgt-secondary-bg);color:var(--lgt-fg);margin-top:6px}',
       '#lgt-panel .lgt-row{display:flex;gap:8px}',
       '#lgt-panel .lgt-row > *{flex:1}',
-      '#lgt-panel .lgt-result{margin-top:10px;background:#1c2233;border-radius:6px;padding:8px;word-break:break-all;font-size:11px}',
-      '#lgt-panel .lgt-log{margin-top:8px;font-size:11px;color:#9aa3b8;white-space:pre-wrap}',
-      '#lgt-panel .lgt-close,#lgt-panel .lgt-min{cursor:pointer;color:#9aa3b8}',
+      '#lgt-panel .lgt-result{margin-top:10px;background:var(--lgt-tab-bg);border-radius:6px;padding:8px;word-break:break-all;font-size:11px}',
+      '#lgt-panel .lgt-log{margin-top:8px;font-size:11px;color:var(--lgt-muted);white-space:pre-wrap}',
+      '#lgt-panel .lgt-close,#lgt-panel .lgt-min,#lgt-panel .lgt-theme-toggle{cursor:pointer;color:var(--lgt-muted)}',
       '#lgt-panel .lgt-min{font-weight:700}',
       // Collapsed ("_"-minimized): only the header stays visible, the
       // panel shrinks to fit since its content is removed from layout.
       '#lgt-panel.lgt-collapsed .lgt-content{display:none}',
       '#lgt-panel.lgt-collapsed h3{margin-bottom:0}',
-      '#lgt-panel .lgt-cred{display:flex;justify-content:space-between;align-items:center;background:#1c2233;padding:6px;border-radius:5px;margin-top:6px}',
-      '#lgt-panel .lgt-cred.default{border:1px solid #ff6600}',
-      '#lgt-panel .lgt-cred button{width:auto;margin:0;padding:3px 8px;font-size:11px}'
+      '#lgt-panel .lgt-cred{display:flex;justify-content:space-between;align-items:center;background:var(--lgt-tab-bg);padding:6px;border-radius:5px;margin-top:6px}',
+      '#lgt-panel .lgt-cred.default{border:1px solid var(--lgt-accent)}',
+      '#lgt-panel .lgt-cred button{width:auto;margin:0;padding:3px 8px;font-size:11px}',
+      // Item 5: Brands/Delete (and Set default, when present) sat flush
+      // against each other with no breathing room since .lgt-cred button
+      // above zeroes their margin for the compact row layout - restore
+      // spacing on the actions container itself instead.
+      '#lgt-panel .lgt-cred-actions{display:flex;gap:6px}',
+      // Item 8/11: scrollable brand checkbox matrix (credential creation
+      // form + per-credential "Brands" editor panel) - kept compact since
+      // there are 30+ brands to list.
+      '#lgt-panel .lgt-brand-matrix{max-height:140px;overflow-y:auto;background:var(--lgt-tab-bg);border-radius:5px;padding:6px;margin-top:6px}',
+      '#lgt-panel .lgt-brand-matrix-row{margin-top:2px;font-size:11px}',
+      '#lgt-panel .lgt-cred-brands{margin-top:4px;font-size:10px;color:var(--lgt-muted)}',
+      // Items 2/3/12: inline credential-resolution prompt on the
+      // Generate tab (only shown when there is a genuine choice to make).
+      '#lgt-panel .lgt-cred-resolve{margin-top:8px;background:var(--lgt-tab-bg);border-radius:6px;padding:8px}',
+      '#lgt-panel .lgt-cred-resolve select,#lgt-panel .lgt-cred-resolve input,#lgt-panel .lgt-cred-resolve button{width:100%;margin-top:4px}',
+      '#lgt-panel .lgt-hint{font-size:11px;color:var(--lgt-muted)}',
+      // Item 15: small availability badge next to the logged-in toggle.
+      // Sits below the select now (not inside the label - see item 4
+      // fix), so it can't change the label's own height/wrap and throw
+      // this column out of vertical alignment with the Environment
+      // column's plain single-line label.
+      '#lgt-panel .lgt-cred-badge{display:block;font-size:10px;margin-top:4px;padding:1px 6px;border-radius:8px;white-space:nowrap;width:fit-content}',
+      '#lgt-panel .lgt-cred-badge.has{background:#1e7e34;color:#fff}',
+      '#lgt-panel .lgt-cred-badge.none{background:#a02020;color:#fff}'
     ].join('');
     document.head.appendChild(style);
 
     var panel = el('div', { id: 'lgt-panel', style: 'display:none' });
     var titleText = el('span', {}, ['Link Gen Tool ', el('span', { style: 'opacity:.5;font-weight:400;font-size:10px' }, [VERSION])]);
+    var themeBtn = el('span', {
+      class: 'lgt-theme-toggle', title: 'Toggle dark/light mode',
+      onclick: function () {
+        var next = panel.classList.contains('lgt-theme-light') ? 'dark' : 'light';
+        applyTheme(next);
+        var obj = {};
+        obj[THEME_KEY] = next;
+        chrome.storage.local.set(obj);
+      }
+    }, ['\u25D1']);
+    function applyTheme(mode) {
+      panel.classList.toggle('lgt-theme-light', mode === 'light');
+      themeBtn.textContent = mode === 'light' ? '\u25D0' : '\u25D1';
+    }
+    chrome.storage.local.get([THEME_KEY], function (res) {
+      if (res && res[THEME_KEY] === 'light') applyTheme('light');
+    });
     var minBtn = el('span', {
       class: 'lgt-min', title: 'Minimize', onclick: function () {
         panel.classList.toggle('lgt-collapsed');
+        try { sessionStorage.setItem(PANEL_COLLAPSED_KEY, panel.classList.contains('lgt-collapsed') ? '1' : '0'); } catch (e) {}
       }
     }, ['_']);
-    var closeBtn = el('span', { class: 'lgt-close', title: 'Close', onclick: function () { panel.style.display = 'none'; } }, ['x']);
-    var headerActions = el('div', { class: 'lgt-header-actions' }, [minBtn, closeBtn]);
+    var closeBtn = el('span', {
+      class: 'lgt-close', title: 'Close', onclick: function () {
+        panel.style.display = 'none';
+        try { sessionStorage.setItem(PANEL_OPEN_KEY, '0'); } catch (e) {}
+      }
+    }, ['x']);
+    var headerActions = el('div', { class: 'lgt-header-actions' }, [themeBtn, minBtn, closeBtn]);
     var title = el('h3', {}, [titleText, headerActions]);
     makeDraggable(panel, title);
     var tabs = el('div', { class: 'lgt-tabs' });
@@ -1213,6 +1719,8 @@
     var bodyC = buildModeC();
     bodyB.style.display = 'none';
     bodyC.style.display = 'none';
+    bodyB.__lgtGoToCredentials = function () { tabC.click(); };
+    bodyA.__lgtGoToCredentials = function () { tabC.click(); };
 
     var pairs = [[tabA, bodyA], [tabB, bodyB], [tabC, bodyC]];
     pairs.forEach(function (pair) {
@@ -1237,15 +1745,50 @@
     panel.appendChild(content);
     (document.body || document.documentElement).appendChild(panel);
     panel.__lgtSwitchToLiveLogin = function () { tabB.click(); };
+    panel.__lgtSwitchToCredentials = function () { tabC.click(); };
     panel.__lgtAutoLoginBtn = bodyB.__lgtAutoLoginBtn;
-    panel.__lgtShow = function () { panel.style.display = ''; };
-    panel.__lgtToggle = function () { panel.style.display = panel.style.display === 'none' ? '' : 'none'; };
+    panel.__lgtShow = function () {
+      panel.style.display = '';
+      try { sessionStorage.setItem(PANEL_OPEN_KEY, '1'); } catch (e) {}
+    };
+    panel.__lgtToggle = function () {
+      var willShow = panel.style.display === 'none';
+      panel.style.display = willShow ? '' : 'none';
+      try { sessionStorage.setItem(PANEL_OPEN_KEY, willShow ? '1' : '0'); } catch (e) {}
+    };
+    // Restore panel open/collapsed state after a same-tab reload -
+    // sessionStorage survives a normal reload of the same origin/tab (but
+    // not a brand-new tab or a different site), so this reopens the panel
+    // exactly where the user left it without leaking that state to
+    // unrelated tabs/sites (unlike a chrome.storage.local flag, which
+    // would be shared globally across every open tab).
+    try {
+      if (sessionStorage.getItem(PANEL_COLLAPSED_KEY) === '1') panel.classList.add('lgt-collapsed');
+      if (sessionStorage.getItem(PANEL_OPEN_KEY) === '1') panel.style.display = '';
+    } catch (e) {}
     return panel;
   }
 
   function brandOptions(selected) {
     return Object.keys(BRANDS).sort().map(function (k) {
       return el('option', Object.assign({ value: k }, k === selected ? { selected: 'selected' } : {}), [k]);
+    });
+  }
+
+  // Persists the Generate tab's own form controls (brand/environment/
+  // login-state/BLE/force-fresh/customer-key) so a page reload - which
+  // rebuilds the whole panel from scratch, same as a first open - doesn't
+  // silently reset every dropdown back to its default. Deliberately a
+  // single flat "last used" snapshot (not per-brand) since these are all
+  // meant to reflect "what was I just doing", not brand-specific settings.
+  var GEN_STATE_KEY = 'lgt-gen-state-v1';
+
+  function saveGenState(partial) {
+    chrome.storage.local.get([GEN_STATE_KEY], function (res) {
+      var state = Object.assign({}, res && res[GEN_STATE_KEY], partial);
+      var obj = {};
+      obj[GEN_STATE_KEY] = state;
+      chrome.storage.local.set(obj);
     });
   }
 
@@ -1256,8 +1799,54 @@
     var loginSel = el('select', {}, [el('option', { value: 'out' }, ['logged-out']), el('option', { value: 'in' }, ['logged-in'])]);
     var bleChk = el('input', { type: 'checkbox' });
     var forceFreshChk = el('input', { type: 'checkbox' });
+    var forceVisibleChk = el('input', { type: 'checkbox' });
     var result = el('div', { class: 'lgt-result', style: 'display:none' });
     var log = el('div', { class: 'lgt-log' });
+    // Items 2/3/12: inline area used only while resolving which saved
+    // credential to use for a logged-in live-login generation - hidden
+    // whenever nothing needs the user's input (single/no-choice cases
+    // resolve silently without ever showing this).
+    var credResolveArea = el('div', { class: 'lgt-cred-resolve', style: 'display:none' });
+
+    // 2026-08-07: three fixed, persistent row containers inside `result`
+    // (instead of wiping+rebuilding `result.innerHTML` on every click) so
+    // the split Desktop/Mobile buttons (see refreshGenerateButtonMode
+    // below) can update just ONE device's row without touching whatever
+    // the OTHER device's button rendered on a previous click - per user
+    // decision, clicking Desktop then Mobile (or vice versa) keeps both
+    // rows visible side by side, it does not clear the other one.
+    var desktopRowContainer = el('div', { style: 'display:none' });
+    var mobileRowContainer = el('div', { style: 'display:none' });
+    var brandRowContainer = el('div', { style: 'display:none' });
+    result.appendChild(desktopRowContainer);
+    result.appendChild(mobileRowContainer);
+    result.appendChild(brandRowContainer);
+
+    // Guards against stale-row leakage across an unrelated selection
+    // change: if the user switches brand/environment/login-state/BLE
+    // between clicks, the next click must start from a clean slate (a
+    // Desktop-only click for a NEW brand must not leave a Mobile row from
+    // a DIFFERENT, previous brand still sitting next to it) - only a
+    // repeat click for the SAME selection is allowed to keep the other
+    // device's existing row untouched.
+    var lastRenderedResultKey = null;
+    function resultKeyFor(brand, environment, loggedIn, bleSource) {
+      return brand + '|' + environment + '|' + (loggedIn ? '1' : '0') + '|' + (bleSource ? '1' : '0');
+    }
+    function ensureFreshResultFor(key) {
+      if (key === lastRenderedResultKey) return;
+      lastRenderedResultKey = key;
+      [desktopRowContainer, mobileRowContainer, brandRowContainer].forEach(function (c) {
+        c.innerHTML = '';
+        c.style.display = 'none';
+      });
+    }
+    function setRowContainer(container, label, link, rowBrand, rowEnvironment) {
+      container.innerHTML = '';
+      container.appendChild(renderLinkRow(label, link, rowBrand, rowEnvironment));
+      container.style.display = '';
+      result.style.display = '';
+    }
 
     // Customer dropdown - lists every customer key the brand actually has
     // for the current environment/login-state (same data the internal
@@ -1272,6 +1861,12 @@
       customerSelect
     ]);
     var customerFetchToken = 0;
+    // Set once from restored state (see restoreGenState below) and
+    // consumed exactly once by the first refreshCustomerOptions() run
+    // after restore - a later brand/env/login-state change should NOT
+    // keep re-applying a stale restored customer key onto an unrelated
+    // brand's option list.
+    var pendingRestoreCustomerKey = null;
 
     function refreshCustomerOptions() {
       var brand = brandSel.value;
@@ -1280,7 +1875,7 @@
       if (!brandGuid) { customerWrap.style.display = 'none'; return; }
       var apiEnv = bleChk.checked ? 'prod' : envSel.value;
       var prefix = loginSel.value === 'in' ? 'logged-in' : 'logged-out';
-      fetch(apiBase(apiEnv) + '/api/customers/' + brandGuid)
+      fetchInternal(apiBase(apiEnv) + '/api/customers/' + brandGuid)
         .then(function (r) { return r.ok ? r.json() : {}; })
         .then(function (customers) {
           if (token !== customerFetchToken) return; // superseded by a newer selection
@@ -1290,11 +1885,16 @@
           customerSelect.innerHTML = '';
           if (keys.length <= 1) {
             customerWrap.style.display = 'none';
+            pendingRestoreCustomerKey = null;
             return;
           }
           keys.forEach(function (k) {
             customerSelect.appendChild(el('option', { value: k }, [(customers[k] || {}).label || k]));
           });
+          if (pendingRestoreCustomerKey && keys.indexOf(pendingRestoreCustomerKey) !== -1) {
+            customerSelect.value = pendingRestoreCustomerKey;
+          }
+          pendingRestoreCustomerKey = null;
           customerWrap.style.display = '';
         })
         .catch(function () {
@@ -1303,11 +1903,33 @@
         });
     }
 
-    brandSel.addEventListener('change', refreshCustomerOptions);
-    envSel.addEventListener('change', refreshCustomerOptions);
-    loginSel.addEventListener('change', refreshCustomerOptions);
-    bleChk.addEventListener('change', refreshCustomerOptions);
-    refreshCustomerOptions();
+    brandSel.addEventListener('change', function () { saveGenState({ brand: brandSel.value }); refreshCustomerOptions(); });
+    envSel.addEventListener('change', function () { saveGenState({ environment: envSel.value }); refreshCustomerOptions(); });
+    loginSel.addEventListener('change', function () { saveGenState({ loginState: loginSel.value }); refreshCustomerOptions(); });
+    bleChk.addEventListener('change', function () { saveGenState({ bleSource: bleChk.checked }); refreshCustomerOptions(); });
+    forceFreshChk.addEventListener('change', function () { saveGenState({ forceFresh: forceFreshChk.checked }); });
+    forceVisibleChk.addEventListener('change', function () { saveGenState({ forceVisible: forceVisibleChk.checked }); });
+    customerSelect.addEventListener('change', function () { saveGenState({ customerKey: customerSelect.value }); });
+
+    // Restore whatever was last used before doing the very first
+    // customer-options fetch, so that fetch already reflects the
+    // restored brand/environment/login-state instead of the hardcoded
+    // defaults followed immediately by a second, redundant fetch.
+    chrome.storage.local.get([GEN_STATE_KEY], function (res) {
+      var saved = res && res[GEN_STATE_KEY];
+      if (saved) {
+        if (saved.brand && BRANDS[saved.brand]) brandSel.value = saved.brand;
+        if (saved.environment && ENV_LABELS.indexOf(saved.environment) !== -1) envSel.value = saved.environment;
+        if (saved.loginState === 'in' || saved.loginState === 'out') loginSel.value = saved.loginState;
+        if (typeof saved.bleSource === 'boolean') bleChk.checked = saved.bleSource;
+        if (typeof saved.forceFresh === 'boolean') forceFreshChk.checked = saved.forceFresh;
+        if (typeof saved.forceVisible === 'boolean') forceVisibleChk.checked = saved.forceVisible;
+        if (saved.customerKey) pendingRestoreCustomerKey = saved.customerKey;
+      }
+      refreshCustomerOptions();
+      if (typeof refreshCredBadge === 'function') refreshCredBadge();
+      if (typeof refreshGenerateButtonMode === 'function') refreshGenerateButtonMode();
+    });
 
     // Falls back to '' (let generateLink() auto-pick the first match) when
     // the dropdown is hidden/empty, otherwise passes the exact selected
@@ -1317,22 +1939,52 @@
       return customerWrap.style.display !== 'none' && customerSelect.value ? customerSelect.value : '';
     }
 
-    var btn = el('button', {
-      onclick: function () {
-        result.style.display = 'none';
-        log.textContent = 'Generating...';
+    // Item 0b: while a (possibly slow, background-tab) live-login job is
+    // in flight, show a spinner-like busy state on whichever button(s)
+    // exist instead of leaving them clickable with no feedback - most
+    // relevant for the silent-login path, where there's no visible tab at
+    // all to otherwise show progress. `generationInProgress` lets
+    // refreshGenerateButtonMode() (below) avoid swapping the button row
+    // out from under an in-flight click.
+    var generationInProgress = false;
+
+    // 2026-08-07: single shared implementation for the plain "Generate"
+    // button AND the split "Generate Desktop"/"Generate Mobile" buttons -
+    // `devices` says which device(s) a live-login fallback (if one is
+    // needed at all) should capture: ['desktop','mobile'] for the single
+    // button (today's behavior, unchanged), or a single-element array for
+    // a split button (only that device's login runs, roughly halving the
+    // wait compared to always doing both). The logged-out and
+    // static-customer-key paths ignore `devices` entirely - they always
+    // render both variants cheaply, exactly as before, since there is no
+    // live-login (and therefore no doubled cost) in either of those.
+    function runGenerateFlow(devices, clickedBtn, clickedLabel) {
+      // Named (not anonymous) so a VPN-popup Retry click can call this
+      // exact attempt again by referencing `attempt` from within its own
+      // closure, instead of needing a separately-tracked wrapper.
+      return function attempt() {
         var brand = brandSel.value;
         var environment = envSel.value;
         var loggedIn = loginSel.value === 'in';
         var bleSource = bleChk.checked;
         var forceFresh = forceFreshChk.checked;
 
+        ensureFreshResultFor(resultKeyFor(brand, environment, loggedIn, bleSource));
+        log.textContent = 'Generating...';
+
+        function setBtnBusy(busy) {
+          generationInProgress = busy;
+          [btn, desktopBtn, mobileBtn].forEach(function (b) { if (b) b.disabled = busy; });
+          if (clickedBtn) clickedBtn.textContent = busy ? (clickedLabel + '… ⏳') : clickedLabel;
+        }
+        setBtnBusy(true);
+
         function renderLinks(links) {
           log.textContent = 'Customer: ' + links.customerLabel;
-          result.style.display = '';
-          result.innerHTML = '';
-          result.appendChild(renderLinkRow('Desktop', links.desktop, brand, environment));
-          result.appendChild(renderLinkRow('Mobile', links.mobile, brand, environment));
+          setRowContainer(desktopRowContainer, 'Desktop', links.desktop, brand, environment);
+          setRowContainer(mobileRowContainer, 'Mobile', links.mobile, brand, environment);
+          setRowContainer(brandRowContainer, 'Brand page', realBrandOrigin(brand, environment), brand, environment);
+          setBtnBusy(false);
         }
 
         // BLE source (?bleSource=1) only makes sense together with a
@@ -1352,24 +2004,49 @@
         // frontend via the same host-rewrite + bleSource=1 mechanism the
         // static/simulated-customer BLE path already uses - see
         // runLiveLoginFallback below for the login-environment switch.
-        function spliceAndRender(stc, ctx, bleSourceWanted) {
+        // 2026-08-07: takes SEPARATE desktop/mobile stc+ctx pairs now (not
+        // one shared pair) - confirmed root cause of "mobile bleSource
+        // link click does nothing" was reusing a desktop-captured context
+        // for the mobile link too; a real login in a mobile viewport
+        // yields a genuinely different, device-scoped context on the
+        // backend. Either pair may be `null` (device not requested this
+        // run, see `devices` above) - that device's row is then simply
+        // left as-is (untouched, whatever a previous click rendered for
+        // it), never cleared.
+        function spliceAndRender(stcDesktop, ctxDesktop, stcMobile, ctxMobile, bleSourceWanted) {
           generateLink({ brand: brand, environment: environment, loggedIn: false, customerKeyFilter: '', bleSource: bleSourceWanted }).then(function (links) {
-            result.style.display = '';
-            result.innerHTML = '';
-            var d = spliceContext(links.desktop, stc, ctx);
-            var m = spliceContext(links.mobile, stc, ctx);
+            var suffix = bleSourceWanted ? ' + BLE' : '';
+            if (stcDesktop && ctxDesktop) {
+              var d = spliceContext(links.desktop, stcDesktop, ctxDesktop);
+              setRowContainer(desktopRowContainer, 'Desktop (live-login' + suffix + ')', d, brand, environment);
+            }
+            if (stcMobile && ctxMobile) {
+              var m = spliceContext(links.mobile, stcMobile, ctxMobile);
+              setRowContainer(mobileRowContainer, 'Mobile (live-login' + suffix + ')', m, brand, environment);
+            }
+            setRowContainer(brandRowContainer, 'Brand page', realBrandOrigin(brand, environment), brand, environment);
             if (bleSourceWanted) {
               log.textContent += ' (BLE source applied: logged in for real on prod - prod always serves live BLE events - rendered on the ' + environment + ' frontend with bleSource=1.)';
             }
-            result.appendChild(renderLinkRow('Desktop (live-login' + (bleSourceWanted ? ' + BLE' : '') + ')', d, brand, environment));
-            result.appendChild(renderLinkRow('Mobile (live-login' + (bleSourceWanted ? ' + BLE' : '') + ')', m, brand, environment));
+            setBtnBusy(false);
           }).catch(function (err) {
-            log.textContent = 'Error building final link: ' + err.message;
+            log.textContent = 'Error building final link: ' + friendlyErrorMessage(err);
+            setBtnBusy(false);
+            // Cheap retry: the live-login capture already succeeded, so
+            // retrying just re-runs this same final splice/build step
+            // with the exact same already-captured stc/ctx - no repeat
+            // login needed.
+            if (err && err.isVpnRequired) {
+              showVpnRequiredPopup(err.message, function () {
+                setBtnBusy(true);
+                spliceAndRender(stcDesktop, ctxDesktop, stcMobile, ctxMobile, bleSourceWanted);
+              });
+            }
           });
         }
 
-        // Runs a one-time live login (cache -> background-tab job) for
-        // brands with no real logged-in test customer, splicing the
+        // Runs the live-login capture(s) (cache -> background-tab job)
+        // for brands with no real logged-in test customer, splicing the
         // captured stc/ctx into the normal logged-out link once done -
         // same mechanism the sbplayground-link-generator skill documents
         // as a manual workaround (REFERENCE.md), just automated here.
@@ -1382,59 +2059,203 @@
         // forceFreshWanted skips the 30-min cache and always runs a
         // brand-new capture, for cases where a guaranteed-fresh context
         // is needed regardless of cache age.
-        function runLiveLoginFallback(bleSourceWanted, forceFreshWanted) {
+        //
+        // 2026-08-07: runs the capture only for the requested
+        // `devicesToRun` (in order), instead of always both - the split
+        // Desktop/Mobile buttons pass a single-element array so only ONE
+        // login runs per click, roughly halving the wait when the user
+        // only needs one of the two link variants. Each pass is
+        // independently cache-checked (LiveLoginCache is keyed
+        // per-device) and independently subject to forceFreshWanted, so
+        // "Force fresh" on a Mobile-only click never disturbs a cached
+        // Desktop capture.
+        function runLiveLoginFallback(bleSourceWanted, forceFreshWanted, credentialId, devicesToRun) {
           var loginEnv = bleSourceWanted ? 'prod' : environment;
 
-          function startFreshCapture(reasonPrefix) {
-            log.textContent = (reasonPrefix || '') + 'Running a one-time live login on the real site (background tab, invisible)...';
-            var settled = false;
-            var deadline = Date.now() + 60000;
+          // Captures (or reuses a cached) stc/ctx for exactly one device.
+          // Calls onDone(stc, ctx) on success; on failure/timeout it
+          // updates the log and flips the buttons back to idle itself and
+          // simply never calls onDone, which naturally halts the
+          // requested-devices chain below without any extra bookkeeping.
+          function captureForDevice(device, onDone) {
+            function startFreshCapture(reasonPrefix) {
+              var settled = false;
+              var deadline = Date.now() + 60000;
 
-            LiveLoginJob.start(brand, loginEnv, function (startResult) {
-              if (!startResult.ok) {
-                log.textContent = 'Error starting live login: ' + startResult.error;
-                settled = true;
-                return;
-              }
-              LiveLoginJob.onChange(function (job) {
-                if (settled || !job) return;
-                if (job.status === 'logging-in') {
-                  log.textContent = 'Logging in on the real site...';
-                } else if (job.status === 'captured') {
-                  log.textContent = 'Captured live-login context!';
-                  spliceAndRender(job.stc, job.ctx, bleSourceWanted);
-                  LiveLoginJob.clear();
-                  settled = true;
-                } else if (job.status === 'failed' || job.status === 'unsupported') {
-                  log.textContent = 'Live login failed: ' + (job.error || job.status) + ' (the background tab was kept open and brought to the front so you can see what happened - close it manually when done)';
-                  LiveLoginJob.clear();
-                  settled = true;
-                }
+              // Item 0c: a brand's very first successful capture always ran
+              // with the tab briefly visible (safety net for unknown
+              // selectors); once proven ('captured' at least once), silent
+              // becomes that brand's default from then on. The "Show login
+              // tab" checkbox always overrides this in either direction for
+              // one generation.
+              isBrandSilentVerified(brand, function (verified) {
+                var wantVisible = forceVisibleChk.checked || !verified;
+                log.textContent = (reasonPrefix || '') + 'Running a one-time live login on the real site (' + device + ' link, ' + (wantVisible ? 'visible tab' : 'background tab, invisible') + ')...';
+
+                var jobChangeListener = null;
+                LiveLoginJob.start(brand, loginEnv, wantVisible, credentialId, device, function (startResult) {
+                  if (!startResult.ok) {
+                    log.textContent = 'Error starting live login: ' + friendlyErrorMessage(new Error(startResult.error));
+                    setBtnBusy(false);
+                    return;
+                  }
+                  jobChangeListener = LiveLoginJob.onChange(function (job) {
+                    if (settled || !job) return;
+                    if (job.status === 'logging-in') {
+                      log.textContent = 'Logging in on the real site (' + device + ' link)...';
+                    } else if (job.status === 'captured') {
+                      log.textContent = 'Captured ' + device + ' live-login context!';
+                      markBrandSilentVerified(brand);
+                      settled = true;
+                      LiveLoginJob.offChange(jobChangeListener);
+                      LiveLoginJob.clear();
+                      onDone(job.stc, job.ctx);
+                    } else if (job.status === 'failed' || job.status === 'unsupported') {
+                      log.textContent = 'Live login failed (' + device + ' link): ' + (job.error || job.status) + ' (the background tab was kept open and brought to the front so you can see what happened - close it manually when done)';
+                      // Item 9: only second-guess a credential that was
+                      // actually matrix-linked to this brand AND where the
+                      // failure explicitly looked like a real login
+                      // rejection (job.credentialSuspected, set only for that
+                      // specific case in resumeLiveLoginJobIfPending) - a
+                      // successful login whose LATER network capture merely
+                      // timed out is not evidence the credential is wrong,
+                      // and an ad-hoc "try anyway" credential failing isn't
+                      // evidence against the matrix either.
+                      var failedCredId = job.credentialId;
+                      var failedStatus = job.status;
+                      var failedCredentialSuspected = !!job.credentialSuspected;
+                      settled = true;
+                      LiveLoginJob.offChange(jobChangeListener);
+                      LiveLoginJob.clear();
+                      setBtnBusy(false);
+                      if (failedStatus === 'failed' && failedCredId && failedCredentialSuspected) {
+                        Vault.getById(failedCredId, function (cred) {
+                          if (!cred || (cred.brands || []).indexOf(brand) === -1) return;
+                          credResolveArea.innerHTML = '';
+                          credResolveArea.style.display = '';
+                          credResolveArea.appendChild(el('div', { class: 'lgt-hint' }, [
+                            'Login with "' + cred.label + '" did not complete for ' + brand + ' - it may be the wrong credential for this brand. What would you like to do?'
+                          ]));
+                          credResolveArea.appendChild(el('button', {
+                            onclick: function () { Vault.remove(cred.id, function () { credResolveArea.style.display = 'none'; }); }
+                          }, ['Delete this credential entirely']));
+                          credResolveArea.appendChild(el('button', {
+                            onclick: function () { Vault.unlinkBrand(cred.id, brand, function () { credResolveArea.style.display = 'none'; refreshCredBadge(); }); }
+                          }, ['Unlink just ' + brand + ' (keep other brands)']));
+                          credResolveArea.appendChild(el('button', {
+                            onclick: function () {
+                              credResolveArea.style.display = 'none';
+                              if (wrap.__lgtGoToCredentials) wrap.__lgtGoToCredentials();
+                            }
+                          }, ['Add a new credential for ' + brand]));
+                        });
+                      }
+                    }
+                  });
+                });
+
+                (function pollTimeout() {
+                  if (settled) return;
+                  if (Date.now() > deadline) {
+                    log.textContent = 'Live login timed out after 60s (' + device + ' link) - check for a leftover background tab.';
+                    settled = true;
+                    LiveLoginJob.offChange(jobChangeListener);
+                    setBtnBusy(false);
+                    return;
+                  }
+                  setTimeout(pollTimeout, 1000);
+                })();
               });
-            });
+            }
 
-            (function pollTimeout() {
-              if (settled) return;
-              if (Date.now() > deadline) {
-                log.textContent = 'Live login timed out after 60s - check for a leftover background tab.';
-                settled = true;
-                return;
-              }
-              setTimeout(pollTimeout, 1000);
-            })();
-          }
-
-          if (forceFreshWanted) {
-            startFreshCapture();
-            return;
-          }
-          LiveLoginCache.get(brand, loginEnv, function (cached) {
-            if (cached) {
-              log.textContent = 'Using cached live-login context (captured ' + Math.round((Date.now() - cached.capturedAt) / 60000) + ' min ago' + (bleSourceWanted ? ', on prod' : '') + ')...';
-              spliceAndRender(cached.stc, cached.ctx, bleSourceWanted);
+            if (forceFreshWanted) {
+              startFreshCapture();
               return;
             }
-            startFreshCapture('No logged-in test customer for this brand - ');
+            LiveLoginCache.get(brand, loginEnv, device, function (cached) {
+              if (cached) {
+                log.textContent = 'Using cached ' + device + ' live-login context (captured ' + Math.round((Date.now() - cached.capturedAt) / 60000) + ' min ago' + (bleSourceWanted ? ', on prod' : '') + ')...';
+                onDone(cached.stc, cached.ctx);
+                return;
+              }
+              startFreshCapture('No logged-in test customer for this brand - ');
+            });
+          }
+
+          var results = { desktop: null, mobile: null };
+          (function runNext(index) {
+            if (index >= devicesToRun.length) {
+              spliceAndRender(
+                results.desktop ? results.desktop.stc : null,
+                results.desktop ? results.desktop.ctx : null,
+                results.mobile ? results.mobile.stc : null,
+                results.mobile ? results.mobile.ctx : null,
+                bleSourceWanted
+              );
+              return;
+            }
+            var device = devicesToRun[index];
+            captureForDevice(device, function (stc, ctx) {
+              results[device] = { stc: stc, ctx: ctx };
+              runNext(index + 1);
+            });
+          })(0);
+        }
+
+        // Items 2/3/12: figure out which saved credential to use for a
+        // logged-in live-login generation, prompting the user inline in
+        // credResolveArea whenever there's a genuine choice to make
+        // (never for the single-match happy path). Calls onResolved(id)
+        // exactly once, or never (generation is abandoned) if the vault
+        // is empty and the user is sent to the Credentials tab instead.
+        function resolveCredentialForLogin(brandKey, onResolved) {
+          credResolveArea.innerHTML = '';
+          credResolveArea.style.display = 'none';
+          Vault.getAll(function (all) {
+            if (!all.length) {
+              log.textContent = 'No saved credentials yet - switched to the Credentials tab. Add one there, then try Generate again.';
+              setBtnBusy(false);
+              if (wrap.__lgtGoToCredentials) wrap.__lgtGoToCredentials();
+              return;
+            }
+            Vault.getForBrand(brandKey, function (matches) {
+              if (matches.length === 1) { onResolved(matches[0].id); return; }
+              if (matches.length > 1) {
+                var pickSel = el('select', {}, matches.map(function (c) { return el('option', { value: c.id }, [c.label]); }));
+                credResolveArea.appendChild(el('div', { class: 'lgt-hint' }, ['This brand has more than one saved credential linked to it - pick one:']));
+                credResolveArea.appendChild(pickSel);
+                credResolveArea.appendChild(el('button', {
+                  onclick: function () { credResolveArea.style.display = 'none'; onResolved(pickSel.value); }
+                }, ['Use this credential']));
+                credResolveArea.style.display = '';
+                setBtnBusy(false);
+                return;
+              }
+              // Item 3: no credential matrix-linked to this brand yet.
+              credResolveArea.appendChild(el('div', { class: 'lgt-hint' }, [
+                'No saved credential is linked to "' + brandKey + '" yet. Try an existing one anyway, or add a new one for this brand:'
+              ]));
+              var trySel = el('select', {}, all.map(function (c) { return el('option', { value: c.id }, [c.label]); }));
+              credResolveArea.appendChild(trySel);
+              credResolveArea.appendChild(el('button', {
+                onclick: function () { credResolveArea.style.display = 'none'; onResolved(trySel.value); }
+              }, ['Try selected credential anyway']));
+              var newLabel = el('input', { type: 'text', placeholder: 'Label (optional)' });
+              var newUser = el('input', { type: 'text', placeholder: 'Username' });
+              var newPass = el('input', { type: 'password', placeholder: 'Password' });
+              credResolveArea.appendChild(el('div', {}, [newLabel, newUser, newPass]));
+              credResolveArea.appendChild(el('button', {
+                onclick: function () {
+                  if (!newUser.value || !newPass.value) return;
+                  Vault.save(newLabel.value || brandKey, newUser.value, newPass.value, [brandKey], function (list) {
+                    credResolveArea.style.display = 'none';
+                    onResolved(list[list.length - 1].id);
+                  });
+                }
+              }, ['Save & use a new credential for ' + brandKey]));
+              credResolveArea.style.display = '';
+              setBtnBusy(false);
+            });
           });
         }
 
@@ -1444,7 +2265,11 @@
           // registry, no live-login involved either way.
           generateLink({ brand: brand, environment: environment, loggedIn: false, customerKeyFilter: selectedCustomerKeyFilter(), bleSource: bleSource })
             .then(renderLinks)
-            .catch(function (err) { log.textContent = 'Error: ' + err.message; });
+            .catch(function (err) {
+              log.textContent = 'Error: ' + friendlyErrorMessage(err);
+              setBtnBusy(false);
+              if (err && err.isVpnRequired) showVpnRequiredPopup(err.message, attempt);
+            });
           return;
         }
 
@@ -1465,120 +2290,180 @@
           if (hasKey) {
             generateLink({ brand: brand, environment: environment, loggedIn: true, customerKeyFilter: selectedCustomerKeyFilter(), bleSource: bleSource })
               .then(renderLinks)
-              .catch(function (err) { log.textContent = 'Error: ' + err.message; });
+              .catch(function (err) {
+                log.textContent = 'Error: ' + friendlyErrorMessage(err);
+                setBtnBusy(false);
+                if (err && err.isVpnRequired) showVpnRequiredPopup(err.message, attempt);
+              });
+            return;
+          }
+          // Item 14: brands with no plain user/pass login (BankID, MitID,
+          // etc.) can never succeed at automatic live-login - short-circuit
+          // with an explicit confirm instead of silently attempting (and
+          // failing) it. Checked BEFORE the LOGIN_SELECTORS gate below,
+          // since these brands deliberately have NO entry there at all
+          // (there is no selector-based flow to fall back to for them).
+          if (SPECIAL_AUTH_BRANDS[brand]) {
+            setBtnBusy(false);
+            var loginEnvForManual = bleSource ? 'prod' : environment;
+            var openManually = confirm(
+              'This brand requires manual login (' + SPECIAL_AUTH_BRANDS[brand] + ') - no automatic sign-in is available.\n\n' +
+              'Open the brand site now so you can sign in by hand?'
+            );
+            if (openManually) {
+              var manualUrl = realBrandOrigin(brand, loginEnvForManual);
+              if (manualUrl) window.open(manualUrl, '_blank');
+            }
+            log.textContent = 'Manual login required for this brand (' + SPECIAL_AUTH_BRANDS[brand] + ') - automatic generation was skipped.';
             return;
           }
           var sel = LOGIN_SELECTORS[brand];
           if (!sel || !sel.sportsbookNavPattern) {
             log.textContent = 'Error: No customer key matched prefix "logged-in" for this brand, and it is not live-login-capable (no login/Sportsbook-nav selectors known).';
+            setBtnBusy(false);
             return;
           }
-          runLiveLoginFallback(bleSource, forceFresh);
+          resolveCredentialForLogin(brand, function (credentialId) {
+            runLiveLoginFallback(bleSource, forceFresh, credentialId, devices);
+          });
+        }).catch(function (err) {
+          log.textContent = 'Error: ' + friendlyErrorMessage(err);
+          setBtnBusy(false);
+          if (err && err.isVpnRequired) showVpnRequiredPopup(err.message, attempt);
         });
+      };
+    }
+
+    var btn = el('button', {}, ['Generate']);
+    var desktopBtn = el('button', {}, ['Generate Desktop']);
+    var mobileBtn = el('button', {}, ['Generate Mobile']);
+    btn.addEventListener('click', runGenerateFlow(['desktop', 'mobile'], btn, 'Generate'));
+    desktopBtn.addEventListener('click', runGenerateFlow(['desktop'], desktopBtn, 'Generate Desktop'));
+    mobileBtn.addEventListener('click', runGenerateFlow(['mobile'], mobileBtn, 'Generate Mobile'));
+
+    // Split-button container: swapped between [btn] (single "Generate",
+    // today's default) and [desktopBtn, mobileBtn] (side by side) by
+    // refreshGenerateButtonMode() below, depending on whether the CURRENT
+    // brand/environment/login-state/BLE selection would actually hit the
+    // live-login fallback (the only case where doing one device instead
+    // of both saves real time).
+    var genBtnRow = el('div', { class: 'lgt-row' }, [btn]);
+
+    // Decides single vs split button mode. Mirrors the exact same
+    // decision chain runGenerateFlow's click handler evaluates for real
+    // (hasLoggedInCustomerKey -> SPECIAL_AUTH_BRANDS -> LOGIN_SELECTORS),
+    // so the buttons shown always match what a click would actually do.
+    // Guarded with an incrementing token (same pattern as
+    // refreshCustomerOptions's customerFetchToken) against a stale async
+    // result landing after a further, faster selection change; skipped
+    // entirely while a generation is in flight so the row doesn't swap
+    // out from under an active click.
+    var genModeToken = 0;
+    function applyGenButtonMode(wantSplit) {
+      genBtnRow.innerHTML = '';
+      if (wantSplit) {
+        genBtnRow.appendChild(desktopBtn);
+        genBtnRow.appendChild(mobileBtn);
+      } else {
+        genBtnRow.appendChild(btn);
       }
-    }, ['Generate']);
+    }
+    function refreshGenerateButtonMode() {
+      if (generationInProgress) return;
+      var brand = brandSel.value;
+      var environment = envSel.value;
+      var loggedIn = loginSel.value === 'in';
+      var bleSource = bleChk.checked;
+      var token = ++genModeToken;
+      if (!loggedIn) { applyGenButtonMode(false); return; }
+      hasLoggedInCustomerKey(brand, bleSource ? 'prod' : environment).then(function (hasKey) {
+        if (token !== genModeToken) return; // superseded by a newer selection
+        if (hasKey || SPECIAL_AUTH_BRANDS[brand]) { applyGenButtonMode(false); return; }
+        var sel = LOGIN_SELECTORS[brand];
+        applyGenButtonMode(!!(sel && sel.sportsbookNavPattern));
+      }).catch(function () {
+        if (token !== genModeToken) return;
+        applyGenButtonMode(false);
+      });
+    }
+    brandSel.addEventListener('change', refreshGenerateButtonMode);
+    envSel.addEventListener('change', refreshGenerateButtonMode);
+    loginSel.addEventListener('change', refreshGenerateButtonMode);
+    bleChk.addEventListener('change', refreshGenerateButtonMode);
+
+    // Item 15: small badge next to Login state showing at a glance
+    // whether the currently selected brand already has a saved
+    // credential linked in the matrix (or needs manual login entirely).
+    var credBadge = el('span', { class: 'lgt-cred-badge', style: 'display:none' }, ['']);
+    function refreshCredBadge() {
+      var b = brandSel.value;
+      if (loginSel.value !== 'in') { credBadge.style.display = 'none'; return; }
+      credBadge.style.display = '';
+      if (SPECIAL_AUTH_BRANDS[b]) {
+        credBadge.className = 'lgt-cred-badge none';
+        credBadge.textContent = 'Manual login only';
+        return;
+      }
+      Vault.getForBrand(b, function (matches) {
+        if (brandSel.value !== b) return; // stale response, brand changed since
+        credBadge.className = 'lgt-cred-badge ' + (matches.length ? 'has' : 'none');
+        credBadge.textContent = matches.length ? (matches.length + ' credential' + (matches.length > 1 ? 's' : '') + ' linked') : 'No credential linked yet';
+      });
+    }
+    brandSel.addEventListener('change', refreshCredBadge);
+    loginSel.addEventListener('change', refreshCredBadge);
+    refreshCredBadge();
 
     wrap.appendChild(el('label', {}, ['Brand']));
     wrap.appendChild(brandSel);
     wrap.appendChild(el('div', { class: 'lgt-row' }, [
       (function () { var d = el('div', {}); d.appendChild(el('label', {}, ['Environment'])); d.appendChild(envSel); return d; })(),
-      (function () { var d = el('div', {}); d.appendChild(el('label', {}, ['Login state'])); d.appendChild(loginSel); return d; })()
+      (function () { var d = el('div', {}); d.appendChild(el('label', {}, ['Login state'])); d.appendChild(loginSel); d.appendChild(credBadge); return d; })()
     ]));
     wrap.appendChild(customerWrap);
     var bleWrap = el('label', { class: 'lgt-checkbox-row' }, [bleChk, ' BLE source (fresh live events on test/qa)']);
     wrap.appendChild(bleWrap);
     var forceFreshWrap = el('label', { class: 'lgt-checkbox-row' }, [forceFreshChk, ' Force fresh live-login (skip 30-min cache; logged-in only, when no test customer exists)']);
     wrap.appendChild(forceFreshWrap);
-    wrap.appendChild(btn);
+    var forceVisibleWrap = el('label', { class: 'lgt-checkbox-row' }, [forceVisibleChk, ' Show login tab (force visible; overrides the remembered silent default for this brand)']);
+    wrap.appendChild(forceVisibleWrap);
+    var srSpoofChk = el('input', { type: 'checkbox' });
+    srSpoofChk.checked = srSpoofSettingCache;
+    srSpoofChkRef = srSpoofChk;
+    srSpoofChk.addEventListener('change', function () {
+      srSpoofSettingCache = srSpoofChk.checked;
+      var obj = {};
+      obj[SR_SPOOF_SETTING_KEY] = srSpoofSettingCache;
+      chrome.storage.local.set(obj);
+    });
+    var srSpoofWrap = el('label', { class: 'lgt-checkbox-row' }, [srSpoofChk, ' Sportradar Statistics fix (auto-applies on any matching page load/reload, no click needed; spoofs Origin/Referer + CORS so licensed widgets render)']);
+    wrap.appendChild(srSpoofWrap);
+    wrap.appendChild(genBtnRow);
+    wrap.appendChild(credResolveArea);
     wrap.appendChild(log);
     wrap.appendChild(result);
+    refreshGenerateButtonMode();
     return wrap;
-  }
-
-  // ---------------------------------------------------------------------
-  // "Embed here" - loads a generated link inside THIS tab as an overlay
-  // iframe instead of only opening it in a separate tab. Only offered
-  // when this tab's own detected brand matches the link's brand (embedding
-  // only makes sense on that brand's own real site). See background.js's
-  // lgt-embed-start/-stop for the CDP Fetch-domain mechanism that makes
-  // this possible at all - the playground host normally refuses to be
-  // framed by any other origin (X-Frame-Options: SAMEORIGIN, confirmed by
-  // direct investigation), which this feature works around on purpose.
-  // ---------------------------------------------------------------------
-
-  var embedOverlay = null;
-
-  function stopEmbed() {
-    if (embedOverlay) { embedOverlay.remove(); embedOverlay = null; }
-    chrome.runtime.sendMessage({ type: 'lgt-embed-stop' }, function () { void chrome.runtime.lastError; });
-  }
-
-  function startEmbed(link) {
-    stopEmbed(); // only one embed at a time
-    var origin;
-    try { origin = new URL(link).origin; } catch (e) { alert('Could not parse link origin.'); return; }
-    chrome.runtime.sendMessage({ type: 'lgt-embed-start', origin: origin }, function (response) {
-      void chrome.runtime.lastError;
-      if (!response || !response.ok) {
-        alert('Could not start embedding: ' + (response && response.error || 'unknown error'));
-        return;
-      }
-      var note = el('div', {
-        style: 'padding:6px 10px;background:#3a2a00;color:#ffcf80;font:12px/1.4 sans-serif;flex:none'
-      }, ['This deliberately strips this specific response\'s frame-protection header for this tab only, so it can be shown here instead of in its own tab. Click "Stop embedding" (or reload the page) when done.']);
-      var closeBtn = el('button', { class: 'secondary', onclick: stopEmbed }, ['Stop embedding']);
-      var header = el('div', { style: 'display:flex;align-items:center;gap:10px;padding:6px 10px;background:#1c2233;flex:none' }, [
-        el('div', { style: 'flex:1;color:#f6f7fb;font:12px sans-serif' }, ['Embedded (Link Gen Tool)']),
-        closeBtn
-      ]);
-      var iframe = el('iframe', { src: link, style: 'flex:1;width:100%;border:0;background:#fff' });
-      embedOverlay = el('div', {
-        style: 'position:fixed;top:5vh;left:5vw;width:90vw;height:88vh;display:flex;flex-direction:column;' +
-          'background:#101320;z-index:2147483000;box-shadow:0 8px 40px rgba(0,0,0,.6);border-radius:8px;overflow:hidden'
-      }, [header, note, iframe]);
-      (document.body || document.documentElement).appendChild(embedOverlay);
-    });
-  }
-
-  function openWithSrSpoof(link, brand, environment) {
-    var spoofOrigin = realBrandOrigin(brand, environment);
-    if (!spoofOrigin) { alert('Unknown brand - cannot determine a real domain to spoof.'); return; }
-    chrome.runtime.sendMessage({ type: 'lgt-open-with-sr-spoof', url: link, spoofOrigin: spoofOrigin }, function (response) {
-      void chrome.runtime.lastError;
-      if (!response || !response.ok) {
-        alert('Could not open with Sportradar spoofing: ' + (response && response.error || 'unknown error'));
-      }
-    });
   }
 
   function renderLinkRow(label, link, brand, environment) {
     var row = el('div', { style: 'margin-bottom:6px' });
-    row.appendChild(el('div', { style: 'color:#9aa3b8' }, [label]));
+    row.appendChild(el('div', { style: 'color:var(--lgt-muted)' }, [label]));
     var linkText = el('div', {}, [link || '(not available)']);
     row.appendChild(linkText);
-    var srNote = el('div', { class: 'lgt-log', style: 'display:none' });
     if (link) {
-      row.appendChild(el('button', {
-        class: 'secondary', onclick: function () {
+      var btnRow = el('div', { class: 'lgt-row' });
+      btnRow.appendChild(el('button', {
+        class: 'secondary', style: 'margin-top:6px', onclick: function () {
           navigator.clipboard.writeText(link);
         }
       }, ['Copy ' + label]));
-      if (brand && detectBrandAndEnv().brand === brand) {
-        row.appendChild(el('button', {
-          class: 'secondary', style: 'margin-left:6px', onclick: function () { startEmbed(link); }
-        }, ['Embed here']));
-      }
-      var spoofOrigin = brand ? realBrandOrigin(brand, environment) : null;
-      if (spoofOrigin) {
-        row.appendChild(el('button', {
-          class: 'secondary', style: 'margin-left:6px', onclick: function () {
-            openWithSrSpoof(link, brand, environment);
-            srNote.style.display = '';
-            srNote.textContent = 'Opened in a new tab with Origin/Referer to Sportradar/Betradar spoofed as ' + spoofOrigin + ' for that tab only (so licensed widgets like the Live Match Tracker render - Sportradar checks the calling domain server-side and rejects the playground host otherwise).';
-          }
-        }, ['Open (Sportradar-enabled)']));
-      }
-      row.appendChild(srNote);
+      btnRow.appendChild(el('button', {
+        class: 'secondary', style: 'margin-top:6px', onclick: function () {
+          window.open(link, '_blank');
+        }
+      }, ['Open']));
+      row.appendChild(btnRow);
     }
     return row;
   }
@@ -1591,13 +2476,45 @@
     ]);
     var status = el('div', { class: 'lgt-log' }, ['Passive capture running (network-level - always on, independent of this panel). Log in normally, or use Auto-login below.']);
     var result = el('div', { class: 'lgt-result', style: 'display:none' });
+    var copyBtn = el('button', { class: 'secondary', style: 'display:none' }, ['Copy stc/ctx (paste-ready)']);
+    var builtForKey = null; // 'stc|ctx' already rendered, so a repeat
+    // Capture.onCapture notification (e.g. a second sb/fe-api call landing
+    // with the same headers) doesn't keep re-fetching/re-rendering.
 
     function renderStatus(c) {
       if (c.stc && c.ctx) {
         status.textContent = 'Captured! stc=' + c.stc + ' ctx=' + c.ctx;
+        copyBtn.style.display = '';
+        copyBtn.onclick = function () {
+          navigator.clipboard.writeText(c.stc + '/' + c.ctx);
+        };
+        var thisKey = c.stc + '|' + c.ctx;
+        if (thisKey !== builtForKey) {
+          builtForKey = thisKey;
+          buildFinalLink(c);
+        }
       } else if ((c.seenCount || 0) > 0) {
         status.textContent = 'Passive capture running - ' + c.seenCount + ' sb/fe-api call(s) observed, none with both headers yet.';
+        copyBtn.style.display = 'none';
       }
+    }
+
+    // Builds and renders the final link automatically the moment both
+    // headers are captured - no manual "Build final link" click needed,
+    // since passive capture (Capture/chrome.webRequest) already runs
+    // continuously and unconditionally in the background.
+    function buildFinalLink(c) {
+      if (!detected.brand) { status.textContent = status.textContent + ' (brand not recognized - cannot build base link automatically)'; return; }
+      generateLink({ brand: detected.brand, environment: detected.environment, loggedIn: false }).then(function (links) {
+        result.style.display = '';
+        result.innerHTML = '';
+        result.appendChild(renderLinkRow('Desktop', spliceContext(links.desktop, c.stc, c.ctx), detected.brand, detected.environment));
+        result.appendChild(renderLinkRow('Mobile', spliceContext(links.mobile, c.stc, c.ctx), detected.brand, detected.environment));
+        result.appendChild(renderLinkRow('Brand page', realBrandOrigin(detected.brand, detected.environment), detected.brand, detected.environment));
+      }).catch(function (err) {
+        status.textContent = 'Error building final link: ' + friendlyErrorMessage(err);
+        if (err && err.isVpnRequired) showVpnRequiredPopup(err.message, function () { buildFinalLink(c); });
+      });
     }
 
     // Reflect whatever's already captured immediately (covers both a
@@ -1610,60 +2527,114 @@
     // chrome.storage.onChanged, no polling loop needed.
     Capture.onCapture(renderStatus);
 
-    var autoBtn = el('button', {
-      onclick: function () {
-        Vault.getDefault(function (cred) {
-          if (!cred) { status.textContent = 'No saved credential yet - add one in the Credentials tab first.'; return; }
-          if (!detected.brand) { status.textContent = 'Brand not recognized from this hostname - log in manually.'; return; }
-          attemptAutoLogin(detected.brand, cred.username, cred.password, function (m) { status.textContent = m; });
-        });
-      }
-    }, ['Auto-login with default credential']);
-    wrap.__lgtAutoLoginBtn = autoBtn;
+    // Items 2/3/7/9/12/14: brand/matrix-aware auto-login. `wrap.__lgtGoToCredentials`
+    // is wired up by buildPanel() right after all three tab bodies exist,
+    // so this button can jump the whole panel to the Credentials tab
+    // without needing to build that dependency itself.
+    var pickerArea = el('div', {});
 
-    var manualLabel = el('label', {}, ['Or paste manually (DevTools > Network, filter "fe-api", any request > Headers)']);
-    var manualStc = el('input', { placeholder: 'x-sb-static-context-id value' });
-    var manualCtx = el('input', { placeholder: 'x-sb-user-context-id value' });
-
-    function proceedWithContext(c) {
-      if (!c.stc || !c.ctx) {
-        var n = c.seenCount || 0;
-        status.textContent = n > 0
-          ? 'Nothing captured yet - ' + n + ' sb/fe-api call(s) observed so far, but none had both required headers.'
-          : 'Nothing captured yet - zero sb/fe-api calls observed for this origin so far. Try pasting the values manually above instead (DevTools Network tab).';
-        return;
-      }
-      if (!detected.brand) { status.textContent = 'Brand not recognized - cannot build base link.'; return; }
-      status.textContent = 'Building link...';
-      generateLink({ brand: detected.brand, environment: detected.environment, loggedIn: false }).then(function (links) {
-        result.style.display = '';
-        result.innerHTML = '';
-        result.appendChild(renderLinkRow('Desktop', spliceContext(links.desktop, c.stc, c.ctx), detected.brand, detected.environment));
-        result.appendChild(renderLinkRow('Mobile', spliceContext(links.mobile, c.stc, c.ctx), detected.brand, detected.environment));
-        status.textContent = 'Done.';
-      }).catch(function (err) { status.textContent = 'Error: ' + err.message; });
+    function doLogin(cred) {
+      pickerArea.innerHTML = '';
+      status.textContent = 'Logging in with "' + cred.label + '"...';
+      attemptAutoLogin(detected.brand, cred.username, cred.password, function (m) { status.textContent = m; }).then(function (ok) {
+        // Item 9: only second-guess a credential that was actually
+        // matrix-linked to this brand - one used via "try anyway" failing
+        // isn't evidence the matrix is wrong, just that the guess was bad.
+        if (ok || (cred.brands || []).indexOf(detected.brand) === -1) return;
+        renderFailurePrompt(cred);
+      });
     }
 
-    var buildBtn = el('button', {
-      class: 'secondary',
-      onclick: function () {
-        var manualStcVal = manualStc.value.trim();
-        var manualCtxVal = manualCtx.value.trim();
-        if (manualStcVal && manualCtxVal) {
-          proceedWithContext({ stc: manualStcVal, ctx: manualCtxVal, seenCount: 0 });
-        } else {
-          Capture.get(proceedWithContext);
+    function renderFailurePrompt(cred) {
+      pickerArea.innerHTML = '';
+      pickerArea.appendChild(el('div', { class: 'lgt-log' }, ['Auto-login/capture with "' + cred.label + '" did not complete for ' + detected.brand + ' - it may be the wrong credential for this brand. What would you like to do?']));
+      pickerArea.appendChild(el('button', { class: 'secondary', onclick: function () {
+        Vault.remove(cred.id, function () { pickerArea.innerHTML = ''; status.textContent = 'Credential deleted.'; });
+      } }, ['Delete this credential entirely']));
+      pickerArea.appendChild(el('button', { class: 'secondary', onclick: function () {
+        Vault.unlinkBrand(cred.id, detected.brand, function () { pickerArea.innerHTML = ''; status.textContent = 'Unlinked ' + detected.brand + ' from "' + cred.label + '" - its other brand links are unchanged.'; });
+      } }, ['Unlink just ' + detected.brand + ' (keep other brands)']));
+      pickerArea.appendChild(el('button', {
+        onclick: function () {
+          pickerArea.innerHTML = '';
+          if (wrap.__lgtGoToCredentials) wrap.__lgtGoToCredentials();
+          status.textContent = 'Add a new credential for ' + detected.brand + ' in the Credentials tab.';
         }
+      }, ['Add a new credential for ' + detected.brand]));
+    }
+
+    function renderCredentialPicker(matches) {
+      pickerArea.innerHTML = '';
+      var sel = el('select', {}, matches.map(function (c) { return el('option', { value: c.id }, [c.label]); }));
+      pickerArea.appendChild(el('label', {}, ['Multiple saved credentials are linked to ' + detected.brand + ' - pick one:']));
+      pickerArea.appendChild(sel);
+      pickerArea.appendChild(el('button', {
+        onclick: function () {
+          var chosen = matches.find(function (c) { return c.id === sel.value; });
+          if (chosen) doLogin(chosen);
+        }
+      }, ['Login with selected']));
+    }
+
+    function renderNoMatchPrompt(allCreds) {
+      pickerArea.innerHTML = '';
+      pickerArea.appendChild(el('div', { class: 'lgt-log' }, ['No saved credential is linked to ' + detected.brand + ' yet.']));
+      var sel = el('select', {}, allCreds.map(function (c) { return el('option', { value: c.id }, [c.label]); }));
+      pickerArea.appendChild(sel);
+      pickerArea.appendChild(el('button', { class: 'secondary', onclick: function () {
+        var chosen = allCreds.find(function (c) { return c.id === sel.value; });
+        if (chosen) doLogin(chosen);
+      } }, ['Try selected credential anyway']));
+      // Item 7's "ask for one and save it" path - inline, no tab switch
+      // needed, and the new credential is saved already linked to this
+      // brand so it shows up directly in the matrix/dropdown next time.
+      var newLabel = el('input', { type: 'text', placeholder: 'Label (e.g. "shared QA user")' });
+      var newUser = el('input', { type: 'text', placeholder: 'Username' });
+      var newPass = el('input', { type: 'password', placeholder: 'Password' });
+      pickerArea.appendChild(el('label', {}, ['...or add a new credential for ' + detected.brand + ' now:']));
+      pickerArea.appendChild(newLabel);
+      pickerArea.appendChild(newUser);
+      pickerArea.appendChild(newPass);
+      pickerArea.appendChild(el('button', {
+        onclick: function () {
+          if (!newUser.value || !newPass.value) return;
+          Vault.save(newLabel.value || newUser.value, newUser.value, newPass.value, [detected.brand], function (list) {
+            doLogin(list[list.length - 1]);
+          });
+        }
+      }, ['Save & login']));
+    }
+
+    var autoBtn = el('button', {
+      onclick: function () {
+        pickerArea.innerHTML = '';
+        if (!detected.brand) { status.textContent = 'Brand not recognized from this hostname - log in manually.'; return; }
+        if (SPECIAL_AUTH_BRANDS[detected.brand]) {
+          status.textContent = 'This brand requires manual login (' + SPECIAL_AUTH_BRANDS[detected.brand] + ') - no automatic sign-in is possible. Please log in by hand; passive capture will still pick up the session once you do.';
+          return;
+        }
+        Vault.getAll(function (all) {
+          if (!all.length) {
+            // Item 2: fresh install, nothing saved at all yet.
+            status.textContent = 'No saved credentials yet - jumping to the Credentials tab so you can add one, then come back and try Auto-login again.';
+            if (wrap.__lgtGoToCredentials) wrap.__lgtGoToCredentials();
+            return;
+          }
+          Vault.getForBrand(detected.brand, function (matches) {
+            if (matches.length === 1) doLogin(matches[0]);
+            else if (matches.length > 1) renderCredentialPicker(matches);
+            else renderNoMatchPrompt(all); // item 3
+          });
+        });
       }
-    }, ['Build final link from capture']);
+    }, ['Auto-login']);
+    wrap.__lgtAutoLoginBtn = autoBtn;
 
     wrap.appendChild(info);
     wrap.appendChild(autoBtn);
-    wrap.appendChild(manualLabel);
-    wrap.appendChild(manualStc);
-    wrap.appendChild(manualCtx);
-    wrap.appendChild(buildBtn);
+    wrap.appendChild(pickerArea);
     wrap.appendChild(status);
+    wrap.appendChild(copyBtn);
     wrap.appendChild(result);
     return wrap;
   }
@@ -1674,19 +2645,42 @@
     var labelIn = el('input', { type: 'text', placeholder: 'Label (e.g. "shared QA user")' });
     var userIn = el('input', { type: 'text', placeholder: 'Username' });
     var passIn = el('input', { type: 'password', placeholder: 'Password' });
+    var newBrandMatrixLabel = el('label', {}, ['Applies to brands (optional - check all that this login works for)']);
+    var newBrandMatrix = buildBrandMatrix([]);
 
     function render(creds) {
       list.innerHTML = '';
       if (!creds.length) { list.appendChild(el('div', { class: 'lgt-log' }, ['No saved credentials yet.'])); return; }
       creds.forEach(function (c) {
-        var row = el('div', { class: 'lgt-cred' + (c.isDefault ? ' default' : '') });
-        row.appendChild(el('div', {}, [c.label + (c.isDefault ? ' (default)' : '')]));
-        var actions = el('div', {});
+        var row = el('div', { class: 'lgt-cred' + (c.isDefault ? ' default' : ''), style: 'flex-direction:column;align-items:stretch' });
+        var top = el('div', { style: 'display:flex;justify-content:space-between;align-items:center' });
+        top.appendChild(el('div', {}, [c.label + (c.isDefault ? ' (default)' : '')]));
+        var actions = el('div', { class: 'lgt-cred-actions' });
         if (!c.isDefault) {
           actions.appendChild(el('button', { onclick: function () { Vault.setDefault(c.id, render); } }, ['Set default']));
         }
+        var brandsPanel = el('div', { style: 'display:none' });
+        var brandsBtn = el('button', {
+          onclick: function () {
+            brandsPanel.style.display = brandsPanel.style.display === 'none' ? '' : 'none';
+          }
+        }, ['Brands']);
+        actions.appendChild(brandsBtn);
         actions.appendChild(el('button', { onclick: function () { Vault.remove(c.id, render); } }, ['Delete']));
-        row.appendChild(actions);
+        top.appendChild(actions);
+        row.appendChild(top);
+        row.appendChild(el('div', { class: 'lgt-cred-brands' }, [
+          (c.brands && c.brands.length) ? ('Brands: ' + c.brands.join(', ')) : 'Not linked to any brand yet - won\'t be offered automatically anywhere.'
+        ]));
+        var matrix = buildBrandMatrix(c.brands || []);
+        var applyBtn = el('button', {
+          onclick: function () {
+            Vault.setBrands(c.id, matrix.__lgtGetSelected(), render);
+          }
+        }, ['Save brands']);
+        brandsPanel.appendChild(matrix);
+        brandsPanel.appendChild(applyBtn);
+        row.appendChild(brandsPanel);
         list.appendChild(row);
       });
     }
@@ -1696,18 +2690,25 @@
     var addBtn = el('button', {
       onclick: function () {
         if (!userIn.value || !passIn.value) return;
-        Vault.save(labelIn.value || userIn.value, userIn.value, passIn.value, render);
+        Vault.save(labelIn.value || userIn.value, userIn.value, passIn.value, newBrandMatrix.__lgtGetSelected(), render);
         labelIn.value = ''; userIn.value = ''; passIn.value = '';
+        // Rebuild a fresh (all-unchecked) matrix for the next credential
+        // instead of leaving the just-submitted selections checked.
+        var freshMatrix = buildBrandMatrix([]);
+        newBrandMatrix.parentNode.replaceChild(freshMatrix, newBrandMatrix);
+        newBrandMatrix = freshMatrix;
       }
     }, ['Save credential']);
 
-    wrap.appendChild(el('label', {}, ['Add credential (shared across all brand domains automatically)']));
     wrap.appendChild(labelIn);
     wrap.appendChild(userIn);
     wrap.appendChild(passIn);
+    wrap.appendChild(newBrandMatrixLabel);
+    wrap.appendChild(newBrandMatrix);
     wrap.appendChild(addBtn);
     wrap.appendChild(el('label', {}, ['Saved credentials']));
     wrap.appendChild(list);
+    wrap.__lgtCredList = list;
     return wrap;
   }
 
@@ -1780,7 +2781,11 @@
         return;
       }
       LiveLoginJob.update({ status: 'logging-in' }, function () {
-        Vault.getDefault(function (cred) {
+        // Item 12: use the specific credential the Generate tab resolved
+        // (brand-matrix match/user pick) when one was set on the job;
+        // fall back to the old global-default behavior for any job that
+        // predates this (or was started without a matrix match at all).
+        (job.credentialId ? function (cb) { Vault.getById(job.credentialId, cb); } : Vault.getDefault)(function (cred) {
           if (!cred) {
             LiveLoginJob.update({ status: 'failed', error: 'No saved credential in the vault.' }, focusThisTab);
             return;
@@ -1811,8 +2816,78 @@
           // 2026-08-06: a genuinely successful NordicBet login still
           // reported "no stc/ctx captured" because of exactly this
           // ordering bug).
+          // Keep-alive ping (see background.js's lgt-keepalive handler):
+          // MV3 service workers idle-terminate after roughly 30s without
+          // activity, and chrome.storage calls made directly from THIS
+          // content script (Capture.get/reset, all the awaitCapture
+          // polling) never round-trip through the background script at
+          // all - so a login+capture flow that routinely runs 25s+
+          // between waitForUsernameFieldOrAlreadyLoggedIn's two waits and
+          // the two awaitCapture budgets can leave the service worker
+          // asleep at the exact moment the real sb/fe-api request fires,
+          // silently dropping the one chrome.webRequest.onSendHeaders
+          // event the entire capture mechanism depends on. This is a
+          // known, documented MV3 limitation (non-blocking webRequest
+          // observers can miss events if the worker isn't already running
+          // when they fire) - suspected root cause of a 2026-08-07
+          // NordicBet failure where a confirmed-genuine login (real
+          // balance visible) still produced seenCount: 0 the entire time,
+          // meaning webRequest never even saw the request, not just a
+          // header-matching miss. A periodic round-trip message is the
+          // standard workaround: real activity that resets the worker's
+          // idle timer and keeps it running for the whole flow.
+          var keepAliveIv = setInterval(function () {
+            chrome.runtime.sendMessage({ type: 'lgt-keepalive' }, function () { void chrome.runtime.lastError; });
+          }, 5000);
+          function stopKeepAlive() { clearInterval(keepAliveIv); }
+
+          // Item (2026-08-07, second follow-up): hold the CDP focus-
+          // emulation/active-lifecycle state (background.js's
+          // attachDebugger comment has the full rationale) for the
+          // ENTIRE silent job, not just the brief type/click sequence -
+          // user-confirmed a fully-minimized job otherwise simply never
+          // progresses (not just slowly) until manually clicked/focused,
+          // because the earlier fix only covered the trusted-input
+          // moment, leaving the much longer field-polling/capture-waiting
+          // phases unprotected. Skipped for a VISIBLE, non-mobile job
+          // (job.visible === true, i.e. the user ticked "Show login
+          // tab") - that tab is already real/focusable, no emulation
+          // needed. A mobile job (job.device === 'mobile') always needs
+          // this regardless of visibility though: background.js's
+          // lgt-open-tab handler already attached the debugger itself
+          // (setupMobileEmulation) to set the mobile viewport/UA before
+          // the very first request, so this call is what correctly
+          // detaches it once the job settles - see the matching
+          // keepAttachedTabs guard in background.js's
+          // lgt-debugger-keepalive-start handler (a no-op there when
+          // already held, so no double-attach happens here either).
+          var needsDebuggerHold = !job.visible || job.device === 'mobile';
+          if (needsDebuggerHold) {
+            chrome.runtime.sendMessage({ type: 'lgt-debugger-keepalive-start' }, function () { void chrome.runtime.lastError; });
+          }
+          function stopDebuggerKeepalive() {
+            if (needsDebuggerHold) {
+              chrome.runtime.sendMessage({ type: 'lgt-debugger-keepalive-stop' }, function () { void chrome.runtime.lastError; });
+            }
+          }
+
           Capture.reset(function () {
-            attemptAutoLogin(job.brand, cred.username, cred.password, log).then(function (loginOk) {
+            attemptAutoLogin(job.brand, cred.username, cred.password, log, !job.visible).then(function (loginOk) {
+              // Item 0c fix (2026-08-07): mark this brand "silent verified"
+              // as soon as the trusted-input login sequence ITSELF
+              // succeeded (real submission navigated away, or an
+              // already-authenticated fast path was taken) - regardless of
+              // whether the LATER network capture also succeeds. Previously
+              // this only fired on a full 'captured' status, which meant a
+              // brand could never learn to go silent if capture kept
+              // failing/timing out for unrelated reasons (confirmed
+              // 2026-08-07 on NordicBet/qa: login genuinely succeeded -
+              // screenshot showed a real authenticated Sportsbook page -
+              // but capture still timed out, so the silent flag never got
+              // set and every subsequent generation kept forcing a visible
+              // tab even though the background-tab CDP mechanism was
+              // proven to work perfectly fine).
+              if (loginOk) markBrandSilentVerified(job.brand);
               // loginOk === false means attemptAutoLogin never reached a
               // confirmed logged-in state (missing fields/selectors, or -
               // most notably - still stuck on the login page after both the
@@ -1828,21 +2903,38 @@
               // vault has no per-brand association - still reported
               // "captured" with a leftover anonymous stc/ctx pair).
               if (!loginOk) {
+                // Item 9 fix (2026-08-07): only flag the credential itself
+                // as suspect when a step explicitly reported a real login
+                // rejection (stuck on the login page after both the direct
+                // submit and the Enter-key fallback) - every other !loginOk
+                // reason (selectors not found, slow-mounting form, a
+                // mid-flow page redirect) says nothing about whether the
+                // credential is right or wrong for this brand, and
+                // shouldn't trigger the delete/unlink prompt.
+                var credentialSuspected = steps.some(function (s) { return s.indexOf('likely a real login rejection') !== -1; });
+                stopKeepAlive();
+                stopDebuggerKeepalive();
                 // Bring the tab into view (instead of closing it) so the
                 // user can actually see the real page state that caused the
                 // failure - a step-message string alone can't capture
                 // things like a captcha, cookie-consent overlay, or 2FA
                 // prompt that our automation doesn't account for.
-                LiveLoginJob.update({ status: 'failed', error: 'Auto-login did not complete. Steps: ' + steps.join(' > ') }, focusThisTab);
+                LiveLoginJob.update({ status: 'failed', error: 'Auto-login did not complete. Steps: ' + steps.join(' > '), credentialSuspected: credentialSuspected }, focusThisTab);
                 return;
               }
               Capture.get(function (c) {
+                stopKeepAlive();
+                stopDebuggerKeepalive();
                 if (c && c.stc && c.ctx) {
                   LiveLoginJob.update({ status: 'captured', stc: c.stc, ctx: c.ctx }, function () {
-                    LiveLoginCache.set(job.brand, job.environment, c.stc, c.ctx, closeThisTab);
+                    LiveLoginCache.set(job.brand, job.environment, job.device, c.stc, c.ctx, closeThisTab);
                   });
                 } else {
-                  LiveLoginJob.update({ status: 'failed', error: 'Login/Sportsbook navigation completed but no stc/ctx was captured. Steps: ' + steps.join(' > ') }, focusThisTab);
+                  // loginOk was true here (real submission succeeded, or a
+                  // session was already authenticated) - a missing capture
+                  // at this point is a network-capture-timing issue, not
+                  // evidence the credential is wrong for this brand.
+                  LiveLoginJob.update({ status: 'failed', error: 'Login/Sportsbook navigation completed but no stc/ctx was captured. Steps: ' + steps.join(' > '), credentialSuspected: false }, focusThisTab);
                 }
               });
             });
