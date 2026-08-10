@@ -1140,7 +1140,32 @@ function nextUniqueSessionRuleIds(startId, count, cb) {
 // are resolved against the TARGET env's own indexer host, never a
 // hardcoded one, since a relative path always means "same host as the
 // indexer.json that listed it."
-function buildBundleRedirectRules(indexerData, brandId, targetEnv, tabId, ruleIds, sandboxDevice) {
+//
+// IMPORTANT (found 2026-08-10, root-caused a real blank-page bug): this
+// ONLY builds rules matching the dist-shape widget URL
+// (`*<brandId>*/<device>/files/<prefix>-*.js`) - the tool used to ALSO
+// build an extra rule matching the bare sandbox-shape pattern
+// (`*/assets/<prefix>-*.js`) whenever a `sandboxDevice` was picked, meant
+// to let Bundle Override work on the tool's own standalone "Generate" tab
+// links. That was based on a wrong assumption: those sandbox links are
+// NOT "just the widget with a different URL shape" - `/assets/main-*.js`
+// there IS the entire self-contained Angular app (there is no separate
+// dist-shape widget request at all on a fresh load). Redirecting that
+// shell bundle to indexer.json's widget-only dist-shape file (a component
+// meant to be loaded via Module Federation from an already-bootstrapped
+// host, not run standalone as the top-level entry script) silently
+// produces a completely blank page - confirmed live via Playwright on
+// both a logged-out and a logged-in NordicBet QA sandbox link (no console
+// error, no failed request; the browser happily executes the wrong
+// bundle as the page's own entry script, and nothing ever mounts).
+// indexer.json has no equivalent "standalone monolithic sandbox app"
+// bundle to redirect to for the other env, so this genuinely cannot be
+// fixed with the current data source - removed rather than left half
+// broken. Bundle Override now only supports pages where the sportsbook
+// widget is embedded via the real dist-shape URL (real brand domains, or
+// anything else that loads the widget the same way) - see the Bundle tab
+// hint text and README for the corresponding user-facing guidance.
+function buildBundleRedirectRules(indexerData, brandId, targetEnv, tabId, ruleIds) {
   var entry = indexerData && indexerData[brandId];
   if (!entry) return { rules: [], skippedNoBrand: true };
   var indexerOrigin = '';
@@ -1169,49 +1194,23 @@ function buildBundleRedirectRules(indexerData, brandId, targetEnv, tabId, ruleId
           tabIds: [tabId]
         }
       });
-
-      // Sandbox-shape source pattern (2026-08-10 fix): the tool's own
-      // standalone "Generate" tab links serve their bundle as plain
-      // `/assets/<prefix>-<hash>.js`, with NO brandId or device segment
-      // in the URL at all (see BUNDLE_OBSERVE_SANDBOX_RE in the
-      // "Detected build" section below) - so the brandId-based urlFilter
-      // above can never match it, and Bundle Override silently did
-      // nothing on these links. Since the sandbox URL carries no device
-      // marker either, this ambiguity can only be resolved by an
-      // explicit user choice (the Bundle tab's new Device select) - only
-      // add this extra rule for the ONE device the user picked, never
-      // both, or two rules would both try to match the exact same
-      // `/assets/main-*.js` pattern on the same tab.
-      if (sandboxDevice && device === sandboxDevice && idIdx < ruleIds.length) {
-        rules.push({
-          id: ruleIds[idIdx++],
-          priority: 1,
-          action: { type: 'redirect', redirect: { url: targetUrl } },
-          condition: {
-            urlFilter: '*/assets/' + prefix + '-*.js',
-            resourceTypes: ['script'],
-            tabIds: [tabId]
-          }
-        });
-      }
     });
   });
   return { rules: rules, skippedNoBrand: false };
 }
 
-function startBundleOverrideRule(tabId, targetEnv, brandId, sandboxDevice) {
+function startBundleOverrideRule(tabId, targetEnv, brandId) {
   var previousRuleIds = bundleRuleIdsByTab[tabId]; // swap atomically, same
   // reasoning as the other three declarativeNetRequest features above -
   // re-applying (e.g. switching target env without disabling first) must
   // not leave the old rules alongside the new ones.
   return fetchBundleIndexer(targetEnv).then(function (indexerData) {
     return new Promise(function (resolve, reject) {
-      // Worst case (2 devices x up to 4 files, plus up to 4 extra sandbox-
-      // shape rules for the one selected device) is 12 rules - reserve
-      // that many ids up front; buildBundleRedirectRules only consumes as
-      // many as it actually needs.
-      nextUniqueSessionRuleIds(BUNDLE_RULE_ID_START, 12, function (ruleIds) {
-        var built = buildBundleRedirectRules(indexerData, brandId, targetEnv, tabId, ruleIds, sandboxDevice);
+      // Worst case (2 devices x up to 4 files) is 8 rules - reserve that
+      // many ids up front; buildBundleRedirectRules only consumes as many
+      // as it actually needs.
+      nextUniqueSessionRuleIds(BUNDLE_RULE_ID_START, 8, function (ruleIds) {
+        var built = buildBundleRedirectRules(indexerData, brandId, targetEnv, tabId, ruleIds);
         if (built.skippedNoBrand) { reject(new Error('Brand not found in ' + targetEnv + ' indexer.json')); return; }
         if (!built.rules.length) { reject(new Error('No bundle files found for this brand/env')); return; }
         chrome.declarativeNetRequest.updateSessionRules({
@@ -1262,7 +1261,6 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
   var tabId = sender.tab.id;
   var targetEnv = msg.targetEnv, brandId = msg.brandId;
-  var sandboxDevice = (msg.sandboxDevice === 'desktop' || msg.sandboxDevice === 'mobile') ? msg.sandboxDevice : null;
   if (!targetEnv || !brandId) { sendResponse({ ok: false, error: 'missing targetEnv or brandId' }); return false; }
   // Remember the exact URL the override was applied for (see the
   // stale-cleanup logic in chrome.webNavigation.onBeforeNavigate above,
@@ -1271,7 +1269,7 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   // to one specific tested link, unlike the Sportradar-spoof/BLE-CORS
   // domain-wide fixes.
   if (sender.tab.url) bundleExpectedUrlByTab[tabId] = sender.tab.url;
-  startBundleOverrideRule(tabId, targetEnv, brandId, sandboxDevice).then(function (result) {
+  startBundleOverrideRule(tabId, targetEnv, brandId).then(function (result) {
     sendResponse({ ok: true, ruleCount: result.ruleCount });
   }).catch(function (err) {
     sendResponse({ ok: false, error: String(err && err.message || err) });

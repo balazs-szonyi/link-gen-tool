@@ -1,5 +1,6 @@
 // Headless end-to-end smoke test of the link-gen-tool extension's
-// sandbox-shape bundle-detection/override fixes (2026-08-10). Unlike
+// sandbox-shape bundle-detection fixes (2026-08-10) PLUS the sandbox-shape
+// Bundle-Override GUARD (2026-08-10, second pass). Unlike
 // test-bundle-override.cjs (which targets a real branded website embedding
 // the SB widget via iframe, /dist/.../desktop|mobile/files/... bundle
 // shape), this test targets the tool's OWN "Generate" tab output opened
@@ -8,7 +9,21 @@
 // whose bundle is served as plain /assets/main-<hash>.js with no version,
 // brandId, or device segment in the URL at all. This shape previously made
 // the Detected-build strip show "No sportsbook bundle detected" forever
-// and made Bundle Override silently do nothing (both fixed 2026-08-10).
+// (fixed 2026-08-10) and made Bundle Override silently do nothing
+// (attempted-fixed 2026-08-10 via a "sandboxDevice" mechanism).
+//
+// IMPORTANT (2026-08-10, second pass): the "sandboxDevice" Bundle Override
+// mechanism tested here previously was found to be fundamentally broken -
+// a sandbox-shape link's /assets/main-*.js IS the entire self-contained
+// app (there is no separate widget bundle at all), so redirecting it to
+// indexer.json's widget-only dist-shape file silently produced a
+// completely blank page (confirmed live via Playwright, both logged-out
+// and logged-in). That mechanism was removed entirely from
+// background.js/content.js. The Bundle tab now instead detects this
+// scenario (a standalone sandbox link, not a real embedded brand page)
+// and shows a warning + blocks Apply, rather than letting the user hit a
+// blank page. This test's Bundle-Override section now verifies THAT
+// guard, instead of verifying a redirect that would corrupt the page.
 //
 // Generates a FRESH sandbox link via the internal API at run time (the
 // same flow the sbplayground-link-generator skill's generate-link.ps1
@@ -23,7 +38,6 @@ const EXT_PATH = path.resolve(__dirname, 'extension');
 const BRAND_GUID = '0e5d414b-5234-4050-9fc3-ce1127e18704'; // nordicbet
 const BRAND_KEY = 'nordicbet';
 const CURRENT_ENV = 'qa';
-const TARGET_ENV = 'test'; // same layer (BLE) partner of 'qa'
 
 function log(msg) { console.log('[sandbox-test] ' + new Date().toISOString().slice(11, 19) + ' ' + msg); }
 
@@ -206,14 +220,15 @@ async function main() {
     log('PASS: Verify with page state resolved with real xSbState content (CSP-bypass fix confirmed).');
   }
 
-  // --- 3. Bundle Override on the sandbox shape (new Device select) ---
+  // --- 3. Bundle Override GUARD on the sandbox shape (2026-08-10, second
+  // pass): Apply must be blocked with a clear warning, NOT silently
+  // attempt a redirect that would corrupt the page. ---
   await panel.locator('.lgt-tab').filter({ hasText: 'Bundle' }).click();
   log('Switched to Bundle tab');
 
   const selects = panel.locator('select:visible');
   const brandSel = selects.nth(0);
   const curEnvSel = selects.nth(1);
-  const deviceSel = selects.nth(2);
 
   const detectedBrand = await brandSel.inputValue();
   const detectedEnv = await curEnvSel.inputValue();
@@ -222,39 +237,39 @@ async function main() {
     log('WARNING: auto-detected env did not match expected "' + CURRENT_ENV + '" - forcing selection manually.');
     await curEnvSel.selectOption(CURRENT_ENV);
   }
-  await deviceSel.selectOption('desktop');
-  log('Device select present and set to desktop.');
+
+  const bundleTabBody = panel.locator('.lgt-content');
+  const warningText = (await bundleTabBody.textContent().catch(() => '')) || '';
+  if (warningText.indexOf('standalone sandbox link') === -1) {
+    throw new Error('Bundle tab did not show the expected sandbox-link warning on a sandbox-shape page - guard regression: ' + warningText.slice(0, 400));
+  }
+  log('PASS: Bundle tab shows the sandbox-link warning as expected.');
 
   const applyBtn = panel.getByRole('button', { name: 'Apply', exact: true });
   await applyBtn.click();
-  log('Clicked Apply, waiting for status to report an active override...');
+  log('Clicked Apply on a sandbox-shape link (should be blocked, not actually applied).');
 
   const statusEl = panel.locator('.lgt-log:visible').first();
-  const deadline = Date.now() + 20000;
-  let statusText = '';
-  while (Date.now() < deadline) {
-    statusText = (await statusEl.textContent().catch(() => '')) || '';
-    log('Bundle status: ' + statusText.trim());
-    if (/^Active \(\d+ rule/.test(statusText.trim())) break;
-    if (/^Failed:/.test(statusText.trim())) break;
-    await page.waitForTimeout(1500);
+  await page.waitForTimeout(1000);
+  const statusText = (await statusEl.textContent().catch(() => '')) || '';
+  log('Bundle status after clicking Apply on sandbox link: ' + statusText.trim());
+  if (!/^Blocked:/.test(statusText.trim())) {
+    throw new Error('Clicking Apply on a sandbox-shape link did not report a Blocked status - guard did not actually prevent the override: ' + statusText);
   }
-  if (!/^Active \(\d+ rule/.test(statusText.trim())) {
-    throw new Error('Bundle override did not report an active state on sandbox link. Last status: ' + statusText);
-  }
-  log('PASS: Bundle Override installed rule(s) for the sandbox-shape link.');
+  log('PASS: Apply was correctly blocked on the sandbox-shape link.');
 
-  bundleRequests.length = 0;
+  // Confirm no rule was actually registered for this tab (the guard must
+  // prevent the message from ever reaching background.js with an active
+  // effect) - reload and confirm the page is NOT corrupted/blank, which is
+  // the strongest possible confirmation that nothing was overridden.
   await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.waitForTimeout(5000);
-  log('Sandbox-shape bundle requests observed after reload: ' + bundleRequests.length);
-  bundleRequests.forEach((u) => log('  ' + u));
-  const redirected = bundleRequests.some((u) => u.indexOf('.' + TARGET_ENV + '.') !== -1 || u.indexOf('/' + TARGET_ENV + '/') !== -1);
-  if (redirected) {
-    log('PASS (network-level): a sandbox-shape /assets/main-*.js request actually resolved against the ' + TARGET_ENV + ' environment.');
-  } else {
-    log('NOTE: could not confirm a redirected sandbox-shape request at the network level within this run (page/timing-dependent, non-fatal) - the rule-installed assertion above already validates the core mechanism.');
+  const bodyAfterReload = await page.locator('body').innerText().catch(() => '');
+  log('Body text length after reload (guard should have prevented any override): ' + bodyAfterReload.length);
+  if (bodyAfterReload.trim().length < 200) {
+    throw new Error('REGRESSION: page went (near-)blank after reload even though Apply was supposed to be blocked - guard did not actually prevent the corrupting override: ' + JSON.stringify(bodyAfterReload.slice(0, 300)));
   }
+  log('PASS: page still renders real content after reload - the sandbox-link guard correctly prevented the corrupting override.');
 
   log('Test run complete.');
   await context.close();

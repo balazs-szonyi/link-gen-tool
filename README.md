@@ -45,12 +45,19 @@ brand page you're already logged into — no CLI, no headless automation.
   even selectable). Scoped to the one tab you click Apply in via a
   session-only `declarativeNetRequest` rule — never affects any other
   tab or site, and is cleared automatically when that tab closes or you
-  click Disable. Also works on **standalone sandbox links** (the tool's
-  own "Generate" tab output opened directly, not embedded in a real
-  brand page) via a **Device** select (Desktop/Mobile) — a sandbox
-  link's bundle URL carries no device segment at all, so pick the one
-  matching the link you're on. See "Bundle override" in
-  `extension/background.js` for the implementation, or the
+  click Disable. **Does not work on standalone sandbox links** (the
+  tool's own "Generate" tab output opened directly, not embedded in a
+  real brand page) — on that link shape, `/assets/main-<hash>.js` IS the
+  entire self-contained app, not a separately-loadable widget, so there
+  is no equivalent bundle in another environment to redirect it to; an
+  earlier attempt to support this (a "Device" select redirecting to
+  indexer.json's widget-only build) silently produced a completely blank
+  page instead, since the browser executed the wrong (incompatible)
+  bundle as the page's own top-level entry script. The Bundle tab now
+  detects this case from the page's hostname and shows a clear warning,
+  blocking Apply instead of corrupting the page — to actually override a
+  bundle, apply it on the brand's real domain page instead. See "Bundle
+  override" in `extension/background.js` for the implementation, or the
   `sb-bundle-override-tool` skill's `REFERENCE.md` for the original
   tool's own documentation.
 - **Detected build strip** (Chrome extension only, always visible above
@@ -368,7 +375,16 @@ is largely unchanged:
   install only (see "Install (Chrome extension)" above).
 - **Bundle tab**: only works within the same environment layer (QA↔TEST
   or ALPHA↔PROD) — this is enforced by only offering the one valid
-  target, not a limitation to work around. If the standalone "Sportsbook
+  target, not a limitation to work around. Only works on a real
+  brand-embedded page (the widget's `/dist/.../desktop|mobile/files/...`
+  bundle shape) — it structurally cannot work on the tool's own
+  standalone sandbox links (see the Bundle tab description above for
+  why); Apply is blocked with a clear warning on those links instead of
+  silently corrupting the page (fixed after a real "Apply → Reload →
+  blank white page" bug report on a sandbox link — a previous "Device
+  select" attempt to support this case is now removed entirely, since
+  indexer.json has no equivalent standalone-app build to redirect a
+  sandbox link's bundle to). If the standalone "Sportsbook
   Bundle Override Tool" extension is also loaded, avoid enabling both at
   the same time on the same tab/site — both extensions register their
   own `declarativeNetRequest` rules for the same bundle URLs, and running

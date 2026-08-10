@@ -186,6 +186,25 @@ async function main() {
     }
   }
 
+  // CRITICAL assertion (added 2026-08-10, closes a real test-coverage gap
+  // found this session): the feature's whole promise is that the app
+  // still WORKS after overriding, just on a different build - up to now,
+  // no test ever actually checked that the page still renders visible
+  // content after Apply + reload, only that the network redirect
+  // happened. This exact gap let a genuine "sandbox-shape link goes
+  // completely blank after override" bug (see the sandbox-shape guard in
+  // buildModeD/content.js and the 2026-08-10 comment in
+  // buildBundleRedirectRules/background.js) go unnoticed. Confirm here,
+  // for the one scenario Bundle Override IS meant to support (a real
+  // brand page embedding the widget via the dist-shape URL), that the
+  // page actually has real, non-trivial rendered text content.
+  const bodyText = await page.locator('body').innerText().catch(() => '');
+  log('Body text length after override + reload: ' + bodyText.length);
+  if (bodyText.trim().length < 200) {
+    throw new Error('REGRESSION: page body has almost no rendered text (' + bodyText.length + ' chars) after Bundle Override + reload - the app likely failed to render. Snippet: ' + JSON.stringify(bodyText.slice(0, 300)));
+  }
+  log('PASS: page still renders real content (' + bodyText.length + ' chars) after Bundle Override + reload - not a blank page.');
+
   log('Test run complete.');
   await context.close();
 }

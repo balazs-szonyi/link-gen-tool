@@ -764,13 +764,14 @@
     // domain didn't match - covers the case where the user is on a
     // generated iframe test link (e.g. d-cf.test.ndbplayground.net)
     // rather than the brand's own production/test site.
+    var isSandboxHost = false;
     if (!brand) {
       Object.keys(PLAYGROUND_HOST_SUFFIX).forEach(function (key) {
         var suffix = PLAYGROUND_HOST_SUFFIX[key];
-        if (host === suffix || host.slice(-(suffix.length + 1)) === '.' + suffix) brand = key;
+        if (host === suffix || host.slice(-(suffix.length + 1)) === '.' + suffix) { brand = key; isSandboxHost = true; }
       });
     }
-    return { brand: brand, environment: env };
+    return { brand: brand, environment: env, isSandboxHost: isSandboxHost };
   }
 
   // ---------------------------------------------------------------------
@@ -2949,20 +2950,6 @@
     var curEnvSel = el('select', {}, ENV_LABELS.map(function (e) { return el('option', { value: e }, [e]); }));
     if (detected.environment) curEnvSel.value = detected.environment;
 
-    // Sandbox-shape links (the tool's own standalone "Generate" tab
-    // output, opened directly rather than embedded in a real brand page)
-    // serve their bundle as plain /assets/<prefix>-<hash>.js, with no
-    // device segment anywhere in the URL - unlike a real embedded page's
-    // /dist/.../desktop|mobile/files/... path, which self-discloses the
-    // device. This means Bundle Override cannot auto-detect which device
-    // build a sandbox link represents; the user must say so explicitly.
-    // Only affects the extra sandbox-shape redirect rule - the normal
-    // /dist/... rules are still built for both devices as before.
-    var sandboxDeviceSel = el('select', {}, [
-      el('option', { value: 'desktop' }, ['Desktop']),
-      el('option', { value: 'mobile' }, ['Mobile'])
-    ]);
-
     var targetEnvBadge = el('div', { class: 'lgt-hint' }, ['']);
     function refreshTargetEnv() {
       var partner = bundleLayerPartner(curEnvSel.value);
@@ -2973,6 +2960,30 @@
     }
 
     var status = el('div', { class: 'lgt-log' }, ['Not active on this tab.']);
+
+    // Bundle Override only works when the sportsbook widget is loaded via
+    // the real dist-shape URL (a brand embedding the widget through
+    // Module Federation - real brand domains, or an iframe test host that
+    // embeds the widget the same way). It CANNOT work on the tool's own
+    // standalone "Generate" tab sandbox links (d-cf.<env>.<brand>playground.net/...):
+    // those serve a single monolithic app bundle with no separate,
+    // overridable widget component - a 2026-08-10 attempt to also support
+    // them by redirecting that bundle to indexer.json's widget-only file
+    // produced a confirmed, silent blank page (no console error, no
+    // failed request - the browser just runs the wrong bundle as the
+    // page's own entry script and nothing ever mounts). Rather than leave
+    // that half-broken, the tool now detects this case up front and warns
+    // instead of letting the user hit a blank page.
+    var sandboxWarning = el('div', { class: 'lgt-hint', style: 'color:#e2a03f;margin-top:6px;display:none' }, [
+      '\u26a0 This tab looks like one of the tool\u2019s own standalone sandbox ' +
+      'links, not a real embedded brand page. Bundle Override cannot work ' +
+      'here - the sandbox link is a single monolithic app bundle, not a ' +
+      'separately-overridable widget, and overriding it produces a blank ' +
+      'page. Open the brand\u2019s real domain instead (see the "Brand page" ' +
+      'link on the Generate tab) and apply the override there.'
+    ]);
+    var applyDisabledBySandboxGuard = !!detected.isSandboxHost;
+    if (applyDisabledBySandboxGuard) sandboxWarning.style.display = '';
 
     function refreshStatus() {
       chrome.runtime.sendMessage({ type: 'lgt-bundle-status' }, function (res) {
@@ -2987,13 +2998,14 @@
 
     var applyBtn = el('button', {
       onclick: function () {
+        if (applyDisabledBySandboxGuard) { status.textContent = 'Blocked: this tab is a standalone sandbox link (see warning above).'; return; }
         var brand = brandSel.value;
         var brandGuid = BRANDS[brand];
         var targetEnv = refreshTargetEnv();
         if (!brandGuid) { status.textContent = 'Unknown brand.'; return; }
         if (!targetEnv) { status.textContent = 'Could not determine a same-layer target environment.'; return; }
         status.textContent = 'Applying...';
-        chrome.runtime.sendMessage({ type: 'lgt-bundle-start', targetEnv: targetEnv, brandId: brandGuid, sandboxDevice: sandboxDeviceSel.value }, function (res) {
+        chrome.runtime.sendMessage({ type: 'lgt-bundle-start', targetEnv: targetEnv, brandId: brandGuid }, function (res) {
           void chrome.runtime.lastError;
           if (!res || !res.ok) { status.textContent = 'Failed: ' + ((res && res.error) || 'unknown error'); return; }
           status.textContent = 'Active (' + res.ruleCount + ' rule(s) applied) - reload the page if it was already loaded.';
@@ -3021,20 +3033,20 @@
     wrap.appendChild(el('label', {}, ['Current environment (what this tab is actually on)']));
     wrap.appendChild(curEnvSel);
     wrap.appendChild(targetEnvBadge);
-    wrap.appendChild(el('label', {}, ['Device (only used for standalone sandbox links - ignored on a real embedded brand page)']));
-    wrap.appendChild(sandboxDeviceSel);
+    wrap.appendChild(sandboxWarning);
     wrap.appendChild(el('div', { style: 'display:flex;gap:6px;margin-top:6px' }, [applyBtn, disableBtn]));
     wrap.appendChild(status);
     wrap.appendChild(el('div', { class: 'lgt-hint', style: 'margin-top:8px' }, [
       'Redirects this brand\u2019s sportsbook bundle (main-*.js) on THIS tab ' +
       'to the other environment in the same layer (QA\u2194TEST or ' +
       'ALPHA\u2194PROD). Only works within the same layer - mixing layers ' +
-      'loads a broken build with no error. Reload the page after Apply if ' +
-      'it was already open. Avoid running the standalone "Sportsbook ' +
-      'Bundle Override Tool" extension at the same time in the same tab. ' +
-      'If you\u2019re overriding a bundle on a standalone sandbox link (not ' +
-      'embedded in a real brand page), pick the matching device above - ' +
-      'the tool can\u2019t detect it automatically from a sandbox URL.'
+      'loads a broken build with no error. Only works on a page where the ' +
+      'sportsbook widget is embedded in a real brand page (real brand ' +
+      'domain, or an iframe test host embedding it the same way) - NOT on ' +
+      'the tool\u2019s own standalone "Generate" tab sandbox links (see ' +
+      'warning above if detected). Reload the page after Apply if it was ' +
+      'already open. Avoid running the standalone "Sportsbook Bundle ' +
+      'Override Tool" extension at the same time in the same tab.'
     ]));
 
     chrome.storage.local.get([BUNDLE_STATE_KEY], function (res) {

@@ -11,23 +11,27 @@
 // genuinely different, unrelated link (even same-origin), silently kept
 // redirecting that new page's bundle to the wrong environment.
 //
-// IMPORTANT (found while validating this test): the tool's own generated
-// links are "sandbox-shape" (bundle served as plain /assets/main-*.js,
-// no brandId/device/env segment in the URL) - a Bundle Override only
-// actually affects such a link if it was applied with an explicit
-// `sandboxDevice` (matching the Bundle tab's Device selector), NOT
-// `sandboxDevice: null`. Also: `bleSource=1` links independently hit a
-// real, unrelated backend quirk (observed returning a static server-
-// rendered "Maintenance Page" even with ZERO extension involvement on a
-// totally clean profile) - so this regression test intentionally avoids
-// bleSource=1 for its step-3 URL to not conflate that unrelated
-// backend flakiness with the actual bug being verified here.
+// IMPORTANT (updated 2026-08-10, second pass): this test used to apply
+// the override with an explicit `sandboxDevice` on one of the tool's own
+// generated sandbox-shape links, on the theory that those links serve
+// ONLY the sportsbook widget as /assets/main-*.js. That assumption turned
+// out to be WRONG - a sandbox-shape link's /assets/main-*.js is actually
+// the entire self-contained app (no separate widget bundle exists at
+// all), so redirecting it to indexer.json's widget-only dist-shape file
+// silently produced a completely blank page. That whole `sandboxDevice`
+// mechanism was removed from background.js/content.js (see the long
+// comment on buildBundleRedirectRules). This test now instead uses a
+// REAL brand page (test.nordicbet.com, same target test-bundle-
+// override.cjs already uses successfully) where the widget genuinely is
+// loaded via the dist-shape URL and Bundle Override is known to work
+// correctly and safely.
 //
 // This test reproduces the 3-step sequence and asserts the fix
 // (bundleExpectedUrlByTab + chrome.webNavigation.onBeforeNavigate
 // cleanup) actually clears the stale override, both in internal state
 // AND at the real network-request level, before the new page's bundle
-// request fires.
+// request fires - and that the new page still renders real content (not
+// just "no redirect", but "app actually works").
 //
 // Run with: node test-bundle-override-stale-cleanup.cjs
 'use strict';
@@ -36,29 +40,19 @@ const { chromium } = require('playwright');
 
 const EXT_PATH = path.resolve(__dirname, 'extension');
 const BRAND_GUID = '0e5d414b-5234-4050-9fc3-ce1127e18704'; // nordicbet
-const CURRENT_ENV = 'qa';
+const TARGET_ENV = 'qa'; // same layer (BLE) partner of 'test'
 
 function log(msg) { console.log('[stale-cleanup-test] ' + new Date().toISOString().slice(11, 19) + ' ' + msg); }
 
-async function generateLinks() {
-  const url = 'https://internal.' + CURRENT_ENV + '.sbplayground1.net/api/user-context/logged-out-en-eur-mga-restofworld' +
-    '?brand=' + BRAND_GUID + '&shouldUseSbIl=false&generateLinksPage=true&overrideIFrameBaseUrlWith=';
-  const res = await fetch(url);
-  if (!res.ok) throw new Error('user-context fetch failed: HTTP ' + res.status);
-  const r = await res.json();
-  const base = r.data.user.desktop.iFrameSetup.overrideIFrameBaseUrlWith;
-  const stc = r.data.context.desktop.customerContext.staticContextId;
-  const ctx = r.data.context.desktop.customerContext.userContextId;
-  return {
-    // Step 1 link (native QA, no override, no bleSource).
-    first: base + '/' + stc + '/' + ctx + '/live/football?exposeObgState=true&exposeObgRt=true&sealStore=false',
-    // Step 3 link: a genuinely different, unrelated page (different
-    // path) - still native QA, still no bleSource, so any failure can
-    // only be attributed to the stale-override bug, not to any
-    // independent bleSource backend quirk.
-    second: base + '/' + stc + '/' + ctx + '/live/basketball?exposeObgState=true&exposeObgRt=true&sealStore=false',
-  };
-}
+// Step 1 link: a real, embedded brand page - the widget is loaded via the
+// dist-shape URL here, which is the one scenario Bundle Override actually
+// supports.
+const FIRST_URL = 'https://test.nordicbet.com/en/sportsbook';
+// Step 3 link: a genuinely different, unrelated page on the SAME brand
+// site (different path) - still native TEST, so any failure can only be
+// attributed to the stale-override bug, not to some unrelated backend
+// quirk.
+const SECOND_URL = 'https://test.nordicbet.com/en/sportsbook/live/football';
 
 async function callViaContentScript(sw, tabId, message) {
   return sw.evaluate(async (args) => {
@@ -75,9 +69,8 @@ async function callViaContentScript(sw, tabId, message) {
 }
 
 async function main() {
-  const links = await generateLinks();
-  log('Step 1 link: ' + links.first);
-  log('Step 3 link: ' + links.second);
+  log('Step 1 link: ' + FIRST_URL);
+  log('Step 3 link: ' + SECOND_URL);
 
   const userDataDir = path.join(require('os').tmpdir(), 'lgt-e2e-stale-cleanup-profile-' + Date.now());
   const context = await chromium.launchPersistentContext(userDataDir, {
@@ -95,31 +88,27 @@ async function main() {
   log('Extension loaded, id=' + new URL(sw.url()).host);
 
   const page = await context.newPage();
-  const scriptRequests = [];
-  const allScriptLikeRequests = [];
-  page.on('request', (req) => {
-    if (req.resourceType() === 'script' && /\/assets\/main-[A-Za-z0-9]+\.js/.test(req.url())) scriptRequests.push(req.url());
-    if (req.resourceType() === 'script') allScriptLikeRequests.push(req.url());
+  const bundleRequests = [];
+  page.on('requestfinished', (req) => {
+    const url = req.url();
+    if (/\/files\/[a-zA-Z0-9]+-[A-Z0-9]+\.js(\?|$)/.test(url)) bundleRequests.push(url);
   });
 
-  // Step 1: load a normal QA link in this tab.
-  await page.goto(links.first, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  // Step 1: load a normal TEST-env real brand page in this tab.
+  await page.goto(FIRST_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.waitForTimeout(3000);
-  log('Step 1: loaded a normal QA link in this tab. main.js requests so far: ' + JSON.stringify(scriptRequests));
-  if (!scriptRequests.length) throw new Error('Test setup problem: no /assets/main-*.js request observed on step 1 - cannot validate override redirect.');
+  log('Step 1: loaded a normal TEST-env brand page in this tab. bundle requests so far: ' + bundleRequests.length);
+  if (!bundleRequests.length) throw new Error('Test setup problem: no dist-shape bundle request observed on step 1 - cannot validate override redirect.');
 
   const tabId = await sw.evaluate(async () => {
-    const tabs = await chrome.tabs.query({ url: '*://*.ndbplayground.net/*' });
+    const tabs = await chrome.tabs.query({ url: '*://*.nordicbet.com/*' });
     return tabs[0].id;
   });
 
-  // Step 2: apply Bundle Override QA -> TEST on this SAME tab, via the
-  // real lgt-bundle-start message path, WITH sandboxDevice set (matching
-  // how a real user would use the Bundle tab's Device selector on one of
-  // the tool's own standalone/sandbox-shape links - sandboxDevice: null
-  // would never even match this link's /assets/main-*.js request).
-  const applyResult = await callViaContentScript(sw, tabId, { type: 'lgt-bundle-start', targetEnv: 'test', brandId: BRAND_GUID, sandboxDevice: 'desktop' });
-  log('Step 2: applied Bundle Override QA->TEST (sandboxDevice desktop), result: ' + JSON.stringify(applyResult));
+  // Step 2: apply Bundle Override TEST -> QA on this SAME tab, via the
+  // real lgt-bundle-start message path.
+  const applyResult = await callViaContentScript(sw, tabId, { type: 'lgt-bundle-start', targetEnv: TARGET_ENV, brandId: BRAND_GUID });
+  log('Step 2: applied Bundle Override TEST->QA, result: ' + JSON.stringify(applyResult));
   if (!applyResult || !applyResult.ok) {
     throw new Error('Failed to apply Bundle Override for test setup: ' + JSON.stringify(applyResult));
   }
@@ -131,64 +120,81 @@ async function main() {
   if (!debugState1.ruleIds || !debugState1.ruleIds.length) throw new Error('Test setup problem: override rule was not actually registered.');
 
   // Confirm the override is REAL at the network level: reload the SAME
-  // page now that the override is active, and check the main.js request
-  // actually got redirected to the TEST env's file.
-  scriptRequests.length = 0;
-  allScriptLikeRequests.length = 0;
+  // page now that the override is active, and check a bundle request
+  // actually got redirected to the QA env's file - AND that the page
+  // still renders real content (not just "redirect happened").
+  bundleRequests.length = 0;
   await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
-  await page.waitForTimeout(3000);
-  log('DEBUG main.js requests seen right after applying override: ' + JSON.stringify(scriptRequests));
-  log('DEBUG all script-type requests: ' + JSON.stringify(allScriptLikeRequests));
-  if (!scriptRequests.length) throw new Error('Test setup problem: no /assets/main-*.js request observed after applying the override.');
-  const redirectedToTest = scriptRequests.some((u) => u.includes('.test.')) || allScriptLikeRequests.some((u) => !/\/assets\/main-[A-Za-z0-9]+\.js/.test(u) && /main-/.test(u));
-  if (!redirectedToTest) {
-    throw new Error('Test setup problem: Bundle Override did not actually redirect the main.js request to TEST - cannot validate cleanup without a real active override: ' + JSON.stringify(scriptRequests));
+  await page.waitForTimeout(5000);
+  log('DEBUG bundle requests seen right after applying override: ' + JSON.stringify(bundleRequests));
+  if (!bundleRequests.length) throw new Error('Test setup problem: no bundle request observed after applying the override.');
+  // NOTE: TEST and QA currently happen to run the SAME underlying build in
+  // this environment, and test.nordicbet.com's own reverse proxy natively
+  // serves some same-origin requests under a path that already contains
+  // "/qa/" (confirmed live, unrelated to any override) - so a bare path
+  // substring check for "/qa/" is unreliable here and produces false
+  // positives. The one UNAMBIGUOUS signal that our override's redirect
+  // actually fired is the CROSS-ORIGIN target CDN host from indexer.json
+  // (d-cf.<env>.sbplayground1.net) - the native page never requests that
+  // host on its own.
+  const isOverrideCdnHost = (u) => u.indexOf('sbplayground1.net') !== -1 && u.indexOf('.' + TARGET_ENV + '.') !== -1;
+  const redirectedToQa = bundleRequests.some(isOverrideCdnHost);
+  if (!redirectedToQa) {
+    throw new Error('Test setup problem: Bundle Override did not actually redirect a bundle request to QA - cannot validate cleanup without a real active override: ' + JSON.stringify(bundleRequests));
   }
-  log('Confirmed override is REAL at the network level (main.js redirected to TEST).');
+  log('Confirmed override is REAL at the network level (bundle request redirected to QA).');
+
+  const bodyAfterOverride = await page.locator('body').innerText().catch(() => '');
+  log('Body text length right after override + reload: ' + bodyAfterOverride.length);
+  if (bodyAfterOverride.trim().length < 200) {
+    throw new Error('REGRESSION: page went (near-)blank after applying Bundle Override + reload (' + bodyAfterOverride.length + ' chars) - the exact class of bug this test now also guards against. Snippet: ' + JSON.stringify(bodyAfterOverride.slice(0, 300)));
+  }
+  log('Confirmed the page still renders real content with the override active (not blank).');
 
   // Step 3: WITHOUT stopping the override, navigate this SAME tab to a
-  // fresh, unrelated QA link - the exact real-world scenario that
-  // triggered the user's bug report.
-  scriptRequests.length = 0;
-  await page.goto(links.second, { waitUntil: 'domcontentloaded', timeout: 60000 });
-  log('Step 3: navigated same tab to a fresh, unrelated QA link.');
+  // fresh, unrelated TEST-env page on the same brand - the exact
+  // real-world scenario that triggered the user's bug report.
+  bundleRequests.length = 0;
+  await page.goto(SECOND_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  log('Step 3: navigated same tab to a fresh, unrelated TEST-env page.');
   await page.waitForTimeout(5000);
 
   const debugState2 = await sw.evaluate(async (tid) => {
     return { expectedUrl: bundleExpectedUrlByTab[tid], ruleIds: bundleRuleIdsByTab[tid] };
   }, tabId);
   log('DEBUG after step 3 (should show ruleIds cleared): ' + JSON.stringify(debugState2));
-  log('DEBUG main.js requests seen in step 3: ' + JSON.stringify(scriptRequests));
+  log('DEBUG bundle requests seen in step 3: ' + JSON.stringify(bundleRequests));
 
   if (debugState2.ruleIds && debugState2.ruleIds.length) {
     throw new Error('REGRESSION: bundleRuleIdsByTab still has active rules after navigating to an unrelated page - stale-cleanup fix did not work: ' + JSON.stringify(debugState2));
   }
 
-  // Assertion: the page must NOT show the "Sportsbook is currently
-  // unavailable" maintenance fallback (the exact pre-fix symptom), and
-  // must show real live event content instead.
+  // Assertion: the new page must render real content, not a
+  // maintenance/broken fallback.
   const bodyText = await page.locator('body').innerText();
   if (/currently unavailable/i.test(bodyText)) {
     throw new Error('REGRESSION: stale Bundle Override still broke the new page - maintenance fallback shown instead of live events: ' + bodyText.slice(0, 300));
   }
-  if (!/Live Now/i.test(bodyText)) {
-    throw new Error('Page did not render the expected "Live Now" section at all - unexpected failure mode: ' + bodyText.slice(0, 300));
+  if (bodyText.trim().length < 200) {
+    throw new Error('REGRESSION: new page rendered almost no content (' + bodyText.length + ' chars) - stale override likely still active: ' + JSON.stringify(bodyText.slice(0, 300)));
   }
-  log('PASS: new page rendered live content, not a maintenance page.');
+  log('PASS: new page rendered real content, not a maintenance/blank page.');
 
-  // Assertion: the new page's own main.js request must NOT have been
-  // redirected to the TEST env (i.e. must be a genuine, un-overridden QA
-  // request) - the strongest possible confirmation, at the actual
-  // network level, that the stale rule no longer applies.
-  if (!scriptRequests.length) throw new Error('No /assets/main-*.js request observed in step 3 - cannot confirm redirect state.');
-  const stillRedirected = scriptRequests.some((u) => u.includes('.test.'));
+  // Assertion: the new page's own bundle requests must NOT have been
+  // redirected to the QA env's cross-origin CDN host (i.e. must be
+  // genuine, un-overridden TEST requests) - the strongest possible
+  // confirmation, at the actual network level, that the stale rule no
+  // longer applies. (See the isOverrideCdnHost note above for why a bare
+  // "/qa/" path substring check would be unreliable in this environment.)
+  if (!bundleRequests.length) throw new Error('No bundle request observed in step 3 - cannot confirm redirect state.');
+  const stillRedirected = bundleRequests.some(isOverrideCdnHost);
   if (stillRedirected) {
-    throw new Error('REGRESSION: step 3 main.js request was still redirected to TEST env: ' + JSON.stringify(scriptRequests));
+    throw new Error('REGRESSION: step 3 bundle request was still redirected to QA env: ' + JSON.stringify(bundleRequests));
   }
-  log('PASS: step 3 main.js request was NOT redirected - override correctly cleared at the network level. ' + JSON.stringify(scriptRequests));
+  log('PASS: step 3 bundle requests were NOT redirected - override correctly cleared at the network level.');
 
   // Assertion: the Detected-build strip's status query on the NEW page
-  // must NOT still claim an active override from the old QA->TEST rule.
+  // must NOT still claim an active override from the old TEST->QA rule.
   const bundleStatus = await callViaContentScript(sw, tabId, { type: 'lgt-bundle-status' });
   log('Bundle status on the new page: ' + JSON.stringify(bundleStatus));
   if (bundleStatus && bundleStatus.active) {
