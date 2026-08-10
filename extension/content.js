@@ -2838,7 +2838,26 @@
         // BUNDLE_OBSERVE_SANDBOX_RE in background.js. Show what we DO
         // know (env) rather than a misleading "vundefined (undefined)".
         if (o.shape === 'sandbox') {
-          label.textContent = 'SB build: ' + o.hostEnv.toUpperCase() + ' (sandbox link \u2013 version/device not encoded in URL)' + (mismatch ? ' \u2013 overridden from ' + pageEnv.toUpperCase() : '');
+          // 2026-08-10: the URL itself never carries version/device for
+          // this shape, but background.js may have asynchronously
+          // resolved the version (and, when unambiguous, the device) via
+          // an indexer.json reverse-lookup against the observed chunk
+          // filenames (the sandbox page's OWN main-*.js is a different
+          // build artifact than the widget's federated entry point, so
+          // it rarely matches - the shared chunk-*.js files are what
+          // actually resolve, confirmed live 2026-08-10). A brand's
+          // desktop/mobile versions are the same build in the
+          // overwhelming majority of cases even when the specific device
+          // can't be pinned down (a shared chunk matches both) - so show
+          // the version alone when device is unresolved, rather than
+          // discarding a real, useful answer. Only fall back to the
+          // honest "not encoded in URL" message when nothing resolved at
+          // all.
+          if (o.version) {
+            label.textContent = 'SB build: v' + o.version + (o.device ? ' (' + o.device + ')' : '') + ' [sandbox, ' + o.hostEnv.toUpperCase() + ']' + (mismatch ? ' \u2013 overridden from ' + pageEnv.toUpperCase() : '');
+          } else {
+            label.textContent = 'SB build: ' + o.hostEnv.toUpperCase() + ' (sandbox link \u2013 version/device not encoded in URL)' + (mismatch ? ' \u2013 overridden from ' + pageEnv.toUpperCase() : '');
+          }
         } else {
           label.textContent = 'SB build: v' + o.version + ' (' + o.device + ')' + (mismatch ? ' \u2013 overridden from ' + pageEnv.toUpperCase() : '');
         }

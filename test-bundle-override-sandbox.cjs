@@ -112,7 +112,13 @@ async function main() {
     if (!/^SB build:/.test(text.trim())) {
       throw new Error('Detected build strip never populated on a sandbox link (regression of the 2026-08-10 fix), last text: ' + text);
     }
-    if (text.indexOf('sandbox link') === -1) {
+    // The indexer.json reverse-lookup enrichment (added 2026-08-10) is
+    // fast enough now that it frequently already resolved by this point -
+    // so either the pre-enrichment fallback text ("sandbox link -
+    // version/device not encoded in URL") OR the already-enriched
+    // "[sandbox, ENV]" format is an acceptable/valid observation here.
+    // Assertion 1b below is what strictly requires the enriched form.
+    if (text.indexOf('sandbox link') === -1 && text.indexOf('[sandbox,') === -1) {
       throw new Error('Detected build strip did not use the sandbox-shape label, got: ' + text);
     }
     if (text.indexOf('vundefined') !== -1 || text.indexOf('(undefined)') !== -1) {
@@ -124,6 +130,27 @@ async function main() {
       throw new Error('Detected build badge did not show native env "' + CURRENT_ENV + '" on sandbox link, got: ' + badgeText);
     }
     log('PASS: Detected-build strip correctly recognizes the sandbox bundle shape.');
+  }
+
+  // --- 1b. indexer.json reverse-lookup enrichment (2026-08-10): the
+  // strip should upgrade from the env-only fallback to a real "SB build:
+  // v<version> (<device>) [sandbox, ...]" line once background.js's
+  // async reverse-lookup resolves against the live indexer.json - this is
+  // the actual feature being validated here, distinct from the shape
+  // recognition confirmed above. ---
+  {
+    const deadline = Date.now() + 15000;
+    let text = '';
+    while (Date.now() < deadline) {
+      text = (await buildLabel.textContent().catch(() => '')) || '';
+      if (/^SB build: v/.test(text.trim())) break;
+      await page.waitForTimeout(1000);
+    }
+    log('Detected build strip (sandbox, after reverse-lookup): ' + text.trim());
+    if (!/^SB build: v\S+( \((desktop|mobile)\))? \[sandbox, /.test(text.trim())) {
+      throw new Error('Detected build strip never showed an enriched version for the sandbox link (indexer.json reverse-lookup regression), last text: ' + text);
+    }
+    log('PASS: Detected-build strip enriched version via indexer.json reverse-lookup.');
   }
 
   // --- 2. "Verify with page state" must never hang - resolves one way or

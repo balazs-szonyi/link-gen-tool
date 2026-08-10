@@ -1305,6 +1305,129 @@ function envLabelFromHostname(hostname) {
   return env;
 }
 
+// Brand key -> GUID map, needed ONLY to restrict the reverse-lookup below
+// to the one relevant brand (see resolveSandboxBundleInfo comment) - a
+// duplicate of content.js's own `BRANDS` map (kept in sync manually; small
+// and rarely changes), since background.js is a separate service-worker
+// script with no access to content.js's IIFE-scoped constants.
+var BUNDLE_BRAND_GUIDS = {
+  arcticbet: 'fb047cd8-72db-49b8-912a-d413e7ff5111',
+  betfirst: '4a876283-f28e-4396-bb32-d72b02b2e535',
+  bethard: 'b174746c-51f9-4e28-8ba8-da9610fca05e',
+  bets10: 'a3bd0e8c-37e4-434e-bb71-79c482ecf364',
+  betsafe: 'cfe0dfc1-9a3c-41cb-8817-7b3e71fddc9f',
+  betsmith: 'abbae10d-550b-4bb1-8f61-183b76f4e06f',
+  betsolid: '092219ad-a482-428a-b1a0-47fa005d339d',
+  betsson: '6a6d80b9-16ac-4387-a413-244d93a74deb',
+  betssonarcb: '46df28af-e0f4-48d6-a3b3-3183b2586c44',
+  betssonbr: '599869ba-7757-41ab-9b74-887dbf5c3705',
+  betssondk: 'ce5be96a-8e97-4d71-8b04-b4a0dd30cfaa',
+  betssones: 'ff28e5bd-a193-4f34-9abe-af70ffbd1dbf',
+  betssongr: '4bf6590d-0a29-47f5-a705-42b7a04b7878',
+  betssonmx: '563d47e3-6ebf-40e7-9205-ddb28eca6c54',
+  btsarba: '238cb63a-3dcc-4fdf-b241-23a12cb71aa7',
+  btsarbacity: 'dce5427e-f7f7-41f5-8fb8-8cdcf463541b',
+  cherry: '58ad233f-9893-4d38-a079-8b35e976efeb',
+  firestorm: '11111111-1111-1111-1111-111111111111',
+  firestormsg: '44444444-4444-4444-4444-444444444444',
+  guts: 'e017f714-cbcc-4121-a9b4-fa731c2ad87e',
+  hovarda: '65213300-f984-4bb6-9f04-e69b775c9945',
+  ibet: '1dce6498-f1b2-43c1-8899-5985bcafaefe',
+  inkabet: '02a22011-da9c-4b27-9ce6-10eb6b172707',
+  jetbahis: '9bfc1a74-9ce9-4d98-9518-1b64659c6b2a',
+  mobilbahis: 'ce524a11-e5e4-451b-91be-3af96cae1623',
+  nordicbet: '0e5d414b-5234-4050-9fc3-ce1127e18704',
+  nordicbetdk: '1cfefbe6-d841-49ee-92b3-87b1fd5444b7',
+  playgurus: '63788a1e-5258-45e5-8e73-2047df4e6b6e',
+  rexbet: '10cabc10-cbe9-45dd-963a-684227456d54',
+  rizk: 'd5362abd-45d7-42e9-9d6d-986ceb1fdf45',
+  sandbox: '33333333-3333-3333-3333-333333333333',
+  spelklubben: '0fa15607-01c7-4a04-88cc-a633dc755fbd',
+  spino: 'da121f62-42fa-461f-b57f-bc1cba78af19',
+  triobet: '36e4a5ae-37b5-435a-85fc-e7e1f537e131'
+};
+
+// Reverse-lookup (2026-08-10, revised after live testing): sandbox-shape
+// URLs carry no version/device, but the SAME environment's indexer.json
+// (already fetched/cached for the Bundle Override feature above, via
+// fetchBundleIndexer) can still reveal them. IMPORTANT - live testing
+// showed the sandbox host page's OWN `main-<hash>.js` is a genuinely
+// different build artifact than the widget's federated entry point listed
+// in indexer.json's `js` array (the sandbox page is its own standalone
+// Angular app that embeds the `<sb-xp-sportsbook>` widget, not the
+// embedded/federated build itself) - so `main-*.js` will almost never
+// match indexer.json directly. However, the sandbox page's LAZY-LOADED
+// `chunk-<hash>.js` files DO come from the shared widget code and were
+// confirmed live to match entries inside indexer.json's per-device
+// `resourcesByFacade[*].scripts`/`.links` arrays (these list every chunk
+// actually shipped to that facade, unlike the flat `js` array which only
+// lists the entry point). CRITICAL correction after further live testing
+// (2026-08-10): a plain unrestricted cross-brand search on a chunk match
+// is NOT reliable - a shared/common vendor chunk (webpack code-splitting
+// of identical third-party dependency code) can have the EXACT SAME
+// content-hash filename across dozens of unrelated brands, so searching
+// every brand's indexer entry for a chunk match produced 70 matches
+// spanning brands on genuinely different versions - the "match is
+// effectively unique" assumption held for the flat `js` array (unique
+// entry-point hash) but does NOT hold for shared chunks. The fix: use the
+// sandbox host's OWN hostname-detected brand (already resolved by
+// detectBrandAndEnvFromPlaygroundHost at the call site) via
+// BUNDLE_BRAND_GUIDS to restrict the search to that ONE brand's indexer
+// entry whenever the brand is known - eliminating the cross-brand
+// collision entirely. Only falls back to a full cross-brand scan if the
+// brand key has no known GUID (should not normally happen, since the
+// caller only proceeds after a successful playground-host brand
+// detection, but kept as a defensive fallback).
+function resolveSandboxBundleInfo(env, filename, brandKey) {
+  return fetchBundleIndexer(env).then(function (indexerData) {
+    var matches = []; // {device, version, brandId, exact}
+    var knownGuid = brandKey && BUNDLE_BRAND_GUIDS[brandKey];
+    var brandIdsToSearch = knownGuid ? [knownGuid] : Object.keys(indexerData || {});
+    brandIdsToSearch.forEach(function (brandId) {
+      var entry = indexerData[brandId];
+      ['desktop', 'mobile'].forEach(function (device) {
+        var deviceEntry = entry && entry[device];
+        if (!deviceEntry) return;
+        var exact = (deviceEntry.js || []).some(function (fileUrl) {
+          return (fileUrl || '').split('/').pop() === filename;
+        });
+        var chunkHit = false;
+        if (!exact && deviceEntry.resourcesByFacade) {
+          chunkHit = Object.keys(deviceEntry.resourcesByFacade).some(function (facadeId) {
+            var f = deviceEntry.resourcesByFacade[facadeId];
+            // scripts/links are ARRAYS of individual <script>/<link> tag
+            // strings (confirmed live 2026-08-10 via direct SW
+            // inspection) - NOT one big concatenated HTML string, so each
+            // element must be searched individually rather than calling
+            // .indexOf(filename) on the array itself (which only checks
+            // for an exact whole-element match, never a substring).
+            var inScripts = Array.isArray(f && f.scripts) && f.scripts.some(function (s) { return s.indexOf(filename) !== -1; });
+            var inLinks = Array.isArray(f && f.links) && f.links.some(function (s) { return s.indexOf(filename) !== -1; });
+            return inScripts || inLinks;
+          });
+        }
+        if (exact || chunkHit) {
+          matches.push({ device: device, version: deviceEntry.version || null, brandId: brandId, exact: exact });
+        }
+      });
+    });
+    if (!matches.length) return null;
+    // Prefer an exact entry-point match over a chunk match if both somehow
+    // occurred; otherwise use all chunk matches found.
+    var exactMatches = matches.filter(function (m) { return m.exact; });
+    var pool = exactMatches.length ? exactMatches : matches;
+    var versions = pool.map(function (m) { return m.version; }).filter(function (v, i, arr) { return v && arr.indexOf(v) === i; });
+    var devices = pool.map(function (m) { return m.device; }).filter(function (d, i, arr) { return arr.indexOf(d) === i; });
+    if (versions.length !== 1) return null; // ambiguous across brands/
+    // devices - don't show a possibly-wrong version rather than guess.
+    return {
+      version: versions[0],
+      device: devices.length === 1 ? devices[0] : null,
+      brandId: pool[0].brandId
+    };
+  });
+}
+
 if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
   chrome.webRequest.onBeforeRequest.addListener(function (details) {
     if (details.tabId == null || details.tabId < 0) return; // not a real tab
@@ -1351,22 +1474,69 @@ if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
     if (!sm) return;
     var known = detectBrandAndEnvFromPlaygroundHost(hostname);
     if (!known) return;
+    // Carry forward a previously-resolved version/device across this same
+    // tab's later requests (e.g. a page load fires a dozen chunk
+    // requests in quick succession) - only ONE of them typically matches
+    // indexer.json (most sandbox-page chunks are the host app's own,
+    // unrelated to the widget - see resolveSandboxBundleInfo comment
+    // below), so a later, non-matching chunk's observation must not blow
+    // away an earlier chunk's already-successful enrichment. Only reset
+    // to null on a genuinely different page (onBeforeNavigate below
+    // clears the whole entry on real navigation, or the shape itself
+    // changed, e.g. dist->sandbox).
+    var priorSandbox = bundleObservedByTab[details.tabId];
+    var carriedVersion = (priorSandbox && priorSandbox.shape === 'sandbox') ? priorSandbox.version : null;
+    var carriedDevice = (priorSandbox && priorSandbox.shape === 'sandbox') ? priorSandbox.device : null;
     bundleObservedByTab[details.tabId] = {
       shape: 'sandbox',
       buildFolder: null,
       brandId: null,
       brand: known.brand,
       // version/device are simply not encoded in this URL shape at all -
-      // left explicit null rather than guessed, so the UI can say "not
-      // available" instead of showing a misleading value.
-      version: null,
-      device: null,
+      // carried forward from a prior request's successful enrichment (see
+      // above), or null until/unless one resolves.
+      version: carriedVersion,
+      device: carriedDevice,
       filePrefix: sm[1].toLowerCase(),
       host: hostname,
       hostEnv: envLabelFromHostname(hostname),
       url: details.url,
       ts: Date.now()
     };
+
+    // Reverse-lookup enrichment (2026-08-10, revised): run for every
+    // sandbox-shape observation, not just main-*.js - live testing showed
+    // the sandbox host page's own main-*.js is a different build artifact
+    // than the widget's federated entry point (see resolveSandboxBundleInfo
+    // comment above), so it essentially never matches; the chunk-*.js
+    // requests are what actually resolve via indexer.json's per-facade
+    // chunk listings. Fire-and-forget: the synchronous env-only
+    // observation above already gives the UI something to show
+    // immediately; this just patches it in place if/when the async lookup
+    // resolves.
+    var enrichTabId = details.tabId;
+    var enrichFilename = details.url.split('/').pop().split('?')[0].split('#')[0];
+    resolveSandboxBundleInfo(known.environment, enrichFilename, known.brand).then(function (found) {
+      if (!found) return;
+      // Guard: only patch if this tab is still showing a sandbox-shape
+      // observation at all - a real navigation (onBeforeNavigate below)
+      // clears the entry entirely, or a dist-shape request may have since
+      // taken over (an embedded, not standalone, page) - either way this
+      // stale lookup no longer applies. Deliberately NOT keyed to the
+      // exact request URL (unlike an earlier version of this guard) -
+      // that was too strict: since only a handful of a sandbox page's many
+      // chunk requests actually match indexer.json, a later NON-matching
+      // chunk's own (already-applied, still-pending) request must not be
+      // allowed to invalidate an earlier chunk's genuinely successful
+      // match once it resolves.
+      var current = bundleObservedByTab[enrichTabId];
+      if (!current || current.shape !== 'sandbox') return;
+      current.version = found.version;
+      current.device = found.device;
+      current.matchedBrandId = found.brandId;
+    }).catch(function (err) {
+      console.warn('[link-gen-tool] sandbox bundle indexer reverse-lookup failed:', err);
+    });
   }, { urls: ['*://*/dist/*/xp/widgets/sportsbook/*', '*://*/assets/*'], types: ['script'] });
 }
 

@@ -74,9 +74,23 @@ brand page you're already logged into — no CLI, no headless automation.
   which **host** actually served the file, which reliably differs between
   a native load and an active override. On a standalone sandbox link
   (the tool's own "Generate" tab output, opened directly) the bundle is
-  served as a plain `/assets/main-<hash>.js` with no version or device
-  segment at all — the strip shows the environment only, labeled as a
-  "sandbox link", rather than guessing a version/device it can't know.
+  served as a plain `/assets/main-<hash>.js`/`/assets/chunk-<hash>.js`
+  with no version or device segment in the URL at all — the strip still
+  recovers the real version via a reverse lookup against that
+  environment's `indexer.json` (the same file the Bundle Override feature
+  already fetches/caches): it checks whether any of the observed
+  filenames match a brand's listed entry-point or facade chunk files, and
+  if so reports that build's version (e.g. `SB build: v8.1.5.4616-rc7c7784
+  [sandbox, QA]`). The lookup is scoped to the one brand detected from the
+  sandbox link's own hostname, since many chunk files are shared
+  byte-for-byte across several/most brands (common vendor/framework code)
+  — without that scoping the version would be ambiguous and unresolved.
+  Device (desktop/mobile) is only reported when the match happens to be
+  unambiguous on that axis too, which is uncommon since desktop/mobile
+  builds usually share the exact same chunks; when nothing resolves yet
+  (or the environment's indexer.json has no matching entry) the strip
+  falls back to the plain "sandbox link — version/device not encoded in
+  URL" label instead of guessing.
 
 ## Install (bookmarklet)
 
@@ -361,11 +375,17 @@ is largely unchanged:
   page will keep showing "No sportsbook bundle detected on this tab
   yet.", which is expected, not a bug. On a **standalone sandbox link**
   (the tool's own "Generate" tab output, no version/brandId/device in the
-  bundle URL), only the environment is shown, labeled as a sandbox link,
-  since version/device genuinely aren't available from that URL shape —
-  this detection is also restricted to known playground CDN hostnames to
-  avoid false positives on unrelated websites that happen to serve a
-  similarly-named `/assets/main-*.js` file. The "Verify with page state"
+  bundle URL) the strip attempts a reverse lookup against that
+  environment's `indexer.json` to recover the real version anyway (see
+  above); this only works for chunks that indexer.json actually lists for
+  the detected brand, so a version can briefly stay unresolved right
+  after page load, or (rarely) never resolve at all if no observed
+  filename happens to match — in that case it falls back to showing just
+  the environment, labeled as a sandbox link, since version/device
+  genuinely aren't available from the URL shape itself. This detection is
+  also restricted to known playground CDN hostnames to avoid false
+  positives on unrelated websites that happen to serve a similarly-named
+  `/assets/main-*.js` file. The "Verify with page state"
   button requires `exposeObgState=true` on the URL; without it, clicking
   the button just explains why it can't check. It always resolves within
   5 seconds (never hangs), reporting a specific "blocked by page CSP"
