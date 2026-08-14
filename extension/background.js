@@ -1523,6 +1523,31 @@ function buildBundleRedirectRules(indexerData, layerIndexerData, brandId, target
       });
     });
   });
+
+  // The selected bundle can request its ClientConfig from the environment
+  // encoded by the host page. When ALPHA is pinned on a page configured with
+  // PROD, that leaves a /dist/prod/config/... request beside ALPHA JavaScript
+  // and can return 403. Keep the remainder of the config path intact, but pin
+  // its same-layer environment segment to the selected bundle environment.
+  var sourceConfigEnv = bundleEnvironmentsInLayer(targetEnv).filter(function (environment) {
+    return environment !== targetEnv;
+  })[0];
+  if (sourceConfigEnv && idIdx < ruleIds.length) {
+    var regexCapture = String.fromCharCode(92);
+    rules.push({
+      id: ruleIds[idIdx++],
+      priority: 1,
+      action: {
+        type: 'redirect',
+        redirect: { regexSubstitution: regexCapture + '1/dist/' + targetEnv + '/config/' + regexCapture + '2' }
+      },
+      condition: {
+        regexFilter: '^(https?://[^/]+)/dist/' + sourceConfigEnv + '/config/(' + brandId + '/.*)$',
+        resourceTypes: ['xmlhttprequest'],
+        tabIds: [tabId]
+      }
+    });
+  }
   return { rules: rules, skippedNoBrand: false };
 }
 

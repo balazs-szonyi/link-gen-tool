@@ -47,7 +47,9 @@ brand page you're already logged into — no CLI, no headless automation.
   you don't need to load a second extension side by side.
   If the two environments in a layer expose different bundle entrypoints,
   source-only files are redirected to an inert extension script so code from
-  both builds cannot execute in a mixed state.
+  both builds cannot execute in a mixed state. The matching ClientConfig
+  request is pinned to the same target environment as the JavaScript bundle,
+  preventing a valid ALPHA bundle from falling back to a failing PROD config.
   Auto-detects brand/environment from the page you're currently on and only
   offers targets from the same layer (mixing QA/TEST with ALPHA/PROD loads a
   broken build with no explicit error, so this isn't selectable). Scoped to

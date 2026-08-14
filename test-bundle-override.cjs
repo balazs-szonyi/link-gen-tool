@@ -64,6 +64,7 @@ async function main() {
   // values, which change on every deploy.
   const bundleRequests = [];
   const bundleResponses = [];
+  const configResponses = [];
   page.on('requestfinished', (req) => {
     const url = req.url();
     if (/\/files\/[a-zA-Z0-9]+[.-][A-Z0-9]+\.m?js(\?|$)/i.test(url)) bundleRequests.push(url);
@@ -72,6 +73,9 @@ async function main() {
     const url = response.url();
     if (/\/files\/[a-zA-Z0-9]+[.-][A-Z0-9]+\.m?js(\?|$)/i.test(url)) {
       bundleResponses.push({ url, status: response.status() });
+    }
+    if (new RegExp('/dist/(test|qa|alpha|prod)/config/.*/config[.]json([?]|$)', 'i').test(url)) {
+      configResponses.push({ url, status: response.status() });
     }
   });
 
@@ -157,6 +161,7 @@ async function main() {
   const applyBtn = panel.getByRole('button', { name: 'Apply', exact: true });
   bundleRequests.length = 0;
   bundleResponses.length = 0;
+  configResponses.length = 0;
   const reloadPromise = page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 });
   await applyBtn.click();
   log('Clicked Apply, waiting for the automatic reload...');
@@ -190,6 +195,19 @@ async function main() {
     item.url.indexOf('/dist/' + (TARGET_ENV === 'alpha' ? 'prod' : TARGET_ENV === 'prod' ? 'alpha' : TARGET_ENV === 'test' ? 'qa' : 'test') + '/') !== -1);
   if (wrongLayerResponses.length) {
     throw new Error('Mixed bundle execution detected after pinning to ' + TARGET_ENV + ': ' + JSON.stringify(wrongLayerResponses));
+  }
+  if (configResponses.length || TARGET_ENV === 'alpha') {
+    const targetConfig = configResponses.find((item) => item.status === 200 && item.url.includes('/dist/' + TARGET_ENV + '/config/'));
+    if (!targetConfig) {
+      throw new Error('No successful ClientConfig response from target environment ' + TARGET_ENV + ': ' + JSON.stringify(configResponses));
+    }
+    const failedConfigs = configResponses.filter((item) => item.status >= 400);
+    if (failedConfigs.length) {
+      throw new Error('ClientConfig request failed after pinning to ' + TARGET_ENV + ': ' + JSON.stringify(failedConfigs));
+    }
+    log('PASS: ClientConfig resolved from /dist/' + TARGET_ENV + '/config/ with HTTP 200.');
+  } else {
+    log('INFO: this build did not request a dist-shape ClientConfig during the observation window.');
   }
 
   // "Detected build" strip check AFTER the override + reload - the panel
