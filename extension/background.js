@@ -1528,7 +1528,7 @@ function nextUniqueSessionRuleIds(startId, endIdExclusive, count, cb) {
 // widget is embedded via the real dist-shape URL (real brand domains, or
 // anything else that loads the widget the same way) - see the Bundle tab
 // hint text and README for the corresponding user-facing guidance.
-function buildBundleRedirectRules(indexerData, layerIndexerData, brandId, targetEnv, tabId, ruleIds) {
+function buildBundleRedirectRules(indexerData, layerIndexerData, brandId, targetEnv, tabId, ruleIds, allowCrossOriginConfig) {
   var entry = indexerData && indexerData[brandId];
   if (!entry) return { rules: [], skippedNoBrand: true };
   var indexerOrigin = '';
@@ -1603,21 +1603,61 @@ function buildBundleRedirectRules(indexerData, layerIndexerData, brandId, target
   // encoded by the host page. When ALPHA is pinned on a page configured with
   // PROD, that leaves a /dist/prod/config/... request beside ALPHA JavaScript
   // and can return 403. Keep the remainder of the config path intact, but pin
-  // its same-layer environment segment to the selected bundle environment.
-  var sourceConfigEnv = bundleEnvironmentsInLayer(targetEnv).filter(function (environment) {
-    return environment !== targetEnv;
-  })[0];
-  if (sourceConfigEnv && idIdx < ruleIds.length) {
-    var regexCapture = String.fromCharCode(92);
+  // it to the selected bundle environment. Cross-layer mode covers every
+  // possible source environment and also pins the brand host, which removes
+  // any dependency on whether the page runtime captured fetch before the
+  // MAIN-world adapter was installed.
+  var regexCapture = String.fromCharCode(92);
+  var sourceConfigEnvs = allowCrossOriginConfig
+    ? Object.keys(BUNDLE_ENV_LAYERS).filter(function (environment) { return environment !== targetEnv; })
+    : bundleEnvironmentsInLayer(targetEnv).filter(function (environment) { return environment !== targetEnv; });
+  var brandKey = null;
+  Object.keys(BUNDLE_BRAND_GUIDS || {}).some(function (key) {
+    if (BUNDLE_BRAND_GUIDS[key] !== brandId) return false;
+    brandKey = key;
+    return true;
+  });
+  var targetConfigOrigin = allowCrossOriginConfig && brandKey ? realBrandOriginBg(brandKey, targetEnv) : null;
+  sourceConfigEnvs.forEach(function (sourceConfigEnv) {
+    if (idIdx >= ruleIds.length) return;
     rules.push({
       id: ruleIds[idIdx++],
       priority: 1,
       action: {
         type: 'redirect',
-        redirect: { regexSubstitution: regexCapture + '1/dist/' + targetEnv + '/config/' + regexCapture + '2' }
+        redirect: {
+          regexSubstitution: (targetConfigOrigin || regexCapture + '1') + '/dist/' + targetEnv + '/config/' + regexCapture + '2'
+        }
       },
       condition: {
         regexFilter: '^(https?://[^/]+)/dist/' + sourceConfigEnv + '/config/(' + brandId + '/.*)$',
+        resourceTypes: ['xmlhttprequest'],
+        tabIds: [tabId]
+      }
+    });
+  });
+
+  // In hybrid cross-layer mode the MAIN-world adapter deliberately asks the
+  // target environment for its ClientConfig. That request is cross-origin
+  // when, for example, a PROD page runs the TEST bundle. The config endpoint
+  // returns the JSON successfully but does not publish an ACAO header, so the
+  // page fetch is rejected by Chrome after the HTTP 200 response. Add the
+  // smallest possible response-header exception: this tab, this target env,
+  // this brand's /dist/<env>/config path, and XHR/fetch only. The config is a
+  // public bootstrap resource and the request uses the browser's default
+  // cross-origin credential mode (credentials are not sent).
+  if (allowCrossOriginConfig && idIdx < ruleIds.length) {
+    rules.push({
+      id: ruleIds[idIdx++],
+      priority: 2,
+      action: {
+        type: 'modifyHeaders',
+        responseHeaders: [
+          { header: 'access-control-allow-origin', operation: 'set', value: '*' }
+        ]
+      },
+      condition: {
+        regexFilter: '^https?://[^/]+/dist/' + targetEnv + '/config/' + brandId + '/.*',
         resourceTypes: ['xmlhttprequest'],
         tabIds: [tabId]
       }
@@ -1651,8 +1691,9 @@ function startBundleOverrideRule(tabId, targetEnv, brandId, currentEnv) {
     return new Promise(function (resolve, reject) {
       // Reserve room for both target redirects and same-layer source-only
       // entrypoint neutralizers.
-      nextUniqueSessionRuleIds(BUNDLE_RULE_ID_START, SR_SPOOF_RULE_ID_START, 16, function (ruleIds) {
-        var built = buildBundleRedirectRules(indexerData, layerIndexerData, brandId, targetEnv, tabId, ruleIds);
+      nextUniqueSessionRuleIds(BUNDLE_RULE_ID_START, SR_SPOOF_RULE_ID_START, 19, function (ruleIds) {
+        var crossLayer = !!currentEnv && BUNDLE_ENV_LAYERS[currentEnv] !== BUNDLE_ENV_LAYERS[targetEnv];
+        var built = buildBundleRedirectRules(indexerData, layerIndexerData, brandId, targetEnv, tabId, ruleIds, crossLayer);
         if (built.skippedNoBrand) { reject(new Error('Brand not found in ' + targetEnv + ' indexer.json')); return; }
         if (!built.rules.length) { reject(new Error('No bundle files found for this brand/env')); return; }
         chrome.declarativeNetRequest.updateSessionRules({

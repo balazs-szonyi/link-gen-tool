@@ -30,6 +30,7 @@ async function main() {
     const prefix = config.pageEnv === 'prod' ? 'www.' : `www.${config.pageEnv}.`;
     const targetUrl = `https://${prefix}${BRANDS[config.brand].domain}/en/sportsbook`;
     const coreFailures = [];
+    const configResponses = [];
     const bundleRequests = [];
     const bundleFailures = [];
     page.on('request', (request) => {
@@ -37,14 +38,25 @@ async function main() {
     });
     page.on('requestfailed', (request) => {
       if (/\/files\/[a-zA-Z0-9]+[.-][^/?]+\.m?js/i.test(request.url())) bundleFailures.push({ url: request.url(), error: request.failure() });
+      if (request.failure()?.errorText !== 'net::ERR_ABORTED' && /client.?config|\/dist\/(?:test|qa|alpha|prod)\/config\/|static.?context|user.?context|\/api\/sb\/|\/sb\/fe-api\//i.test(request.url())) {
+        coreFailures.push({ status: 'requestfailed', url: request.url(), error: request.failure() });
+      }
     });
     page.on('response', (response) => {
-      if (response.status() >= 400 && /client.?config|static.?context|user.?context|\/api\/sb\/|\/sb\/fe-api\//i.test(response.url())) {
+      if (/\/dist\/(?:test|qa|alpha|prod)\/config\//i.test(response.url())) {
+        configResponses.push({ status: response.status(), url: response.url() });
+      }
+      if (response.status() >= 400 && /client.?config|\/dist\/(?:test|qa|alpha|prod)\/config\/|static.?context|user.?context|\/api\/sb\/|\/sb\/fe-api\//i.test(response.url())) {
         coreFailures.push({ status: response.status(), url: response.url() });
       }
     });
     await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await page.locator('#lgt-panel').waitFor({ state: 'attached', timeout: 15000 });
+    // Some brand shells perform one final top-level canonicalization shortly
+    // after DOMContentLoaded. Applying during that hop correctly triggers the
+    // extension's stale-navigation cleanup, which makes the test race the
+    // page rather than exercise the settled URL a human would use.
+    await page.waitForTimeout(3000);
     await sw.evaluate(async () => {
       const tabs = await chrome.tabs.query({});
       for (const tab of tabs) chrome.tabs.sendMessage(tab.id, { type: 'lgt-toggle-panel' }, () => void chrome.runtime.lastError);
@@ -59,6 +71,15 @@ async function main() {
     await selects.nth(2).selectOption(config.bundleEnv);
     await selects.nth(4).selectOption(config.device);
     bundleRequests.length = 0; coreFailures.length = 0;
+    const clearAtReload = (frame) => {
+      if (frame !== page.mainFrame()) return;
+      page.off('framenavigated', clearAtReload);
+      bundleRequests.length = 0;
+      bundleFailures.length = 0;
+      coreFailures.length = 0;
+      configResponses.length = 0;
+    };
+    page.on('framenavigated', clearAtReload);
     const navigation = page.waitForEvent('domcontentloaded', { timeout: 30000 });
     await panel.getByRole('button', { name: 'Apply', exact: true }).click();
     await navigation;
@@ -69,11 +90,21 @@ async function main() {
     }
     const bundleRules = await sw.evaluate(async () => (await chrome.declarativeNetRequest.getSessionRules())
       .filter((rule) => rule.id >= 930001 && rule.id < 950001)
-      .map((rule) => ({ regex: rule.condition.regexFilter, redirect: rule.action.redirect })));
+      .map((rule) => ({ regex: rule.condition.regexFilter, action: rule.action })));
     if (!bundleRequests.some((url) => url.includes(`/dist/${config.bundleEnv}/`))) {
-      throw new Error(`target bundle request not observed: rules=${JSON.stringify(bundleRules)} requests=${JSON.stringify(bundleRequests.slice(0, 5))} failures=${JSON.stringify(bundleFailures.slice(0, 5))}`);
+      throw new Error(`target bundle request not observed: page=${page.url()} rules=${JSON.stringify(bundleRules)} requests=${JSON.stringify(bundleRequests.slice(0, 5))} failures=${JSON.stringify(bundleFailures.slice(0, 5))}`);
     }
-    if (coreFailures.length) throw new Error(`core 4xx responses: ${JSON.stringify(coreFailures)}`);
+    if (!bundleRules.some((rule) => rule.regex.includes(`/dist/${config.bundleEnv}/config/${BRANDS[config.brand].id}/`) &&
+      rule.action.type === 'modifyHeaders' && rule.action.responseHeaders.some((header) => header.header === 'access-control-allow-origin' && header.value === '*'))) {
+      throw new Error(`target ClientConfig CORS rule not installed: ${JSON.stringify(bundleRules)}`);
+    }
+    if (configResponses.length && !configResponses.some((response) => response.status < 400 && response.url.includes(`/dist/${config.bundleEnv}/config/`))) {
+      throw new Error(`successful target ClientConfig response not observed: responses=${JSON.stringify(configResponses)} rules=${JSON.stringify(bundleRules)}`);
+    }
+    if (coreFailures.length) throw new Error(`core request failures: ${JSON.stringify(coreFailures)}`);
+    if ((await page.locator('body').innerText()).includes('Failed to initialize Sportsbook')) {
+      throw new Error('Sportsbook rendered its failed-initialization state');
+    }
     console.log(`PASS Host=${config.pageEnv.toUpperCase()} Bundle=${config.bundleEnv.toUpperCase()} Backend=${runtime.backendEnv.toUpperCase()} (normal Chrome runtime)`);
   } finally { await context.close(); }
 }

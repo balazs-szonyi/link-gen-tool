@@ -411,12 +411,15 @@ running.
 
 ## Known limitations (Chrome extension)
 
-### Experimental Cross-Layer runtime (v1.20.0)
+### Experimental Cross-Layer runtime (v1.20.1)
 
 Cross-layer hybrid mode now runs directly in the current normal Chrome tab.
 There is no CLI, token, Playwright browser, separate profile, or manual binding.
 The extension installs its MAIN-world request/config adapter at document start,
 before the sportsbook runtime captures `fetch` or `XMLHttpRequest`.
+Target ClientConfig requests are also pinned in the tab-scoped network layer,
+with a path- and brand-scoped CORS response-header rule. This covers runtimes
+that capture a native HTTP function before an in-page adapter can replace it.
 
 Betsson and NordicBet can opt into cross-layer testing from the Bundle tab.
 Select `hybrid`, the target bundle and device, then Apply. The tab displays
@@ -427,6 +430,11 @@ until target static/user-context bootstrap is available extension-native.
 
 PROD place-bet is fail-closed in extension-only cross-layer mode. It is never
 submitted automatically.
+
+Known live limitation: NordicBet TEST host with a PROD bundle still returns
+HTTP 400 from the TEST `static-context` contract. That ordered pair is not
+declared supported until its request adapter is implemented; the other live
+smokes listed in the release validation remain unaffected.
 
 Run the offline contract/safety suite with `npm test`; the parameterized live
 normal-Chrome smoke remains in `cross-layer-lab/test-live-cross-layer.cjs`.
