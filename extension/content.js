@@ -203,21 +203,16 @@
 
   var ENV_LABELS = ['test', 'qa', 'alpha', 'prod'];
 
-  // Env -> layer, for the Bundle tab: only QA<->TEST (BLE) or ALPHA<->PROD
-  // (BDE) overrides are ever offered, since the two layers' bundle formats
-  // are incompatible (see the sb-bundle-override-tool skill's
-  // REFERENCE.md Anti-patterns) - mixing them loads a broken build with
-  // no explicit runtime error, so this is enforced in the UI rather than
-  // left to the user to know/remember.
+  // Env -> layer, for the Bundle tab: the current environment plus its
+  // same-layer partner are offered. Cross-layer targets remain impossible,
+  // since the two layers' bundle formats are incompatible.
   var BUNDLE_LAYER = { test: 'ble', qa: 'ble', alpha: 'bde', prod: 'bde' };
-  function bundleLayerPartner(env) {
+  function bundleLayerEnvironments(env) {
     var layer = BUNDLE_LAYER[env];
-    if (!layer) return null;
-    var partner = null;
-    Object.keys(BUNDLE_LAYER).forEach(function (e) {
-      if (e !== env && BUNDLE_LAYER[e] === layer) partner = e;
+    if (!layer) return [];
+    return Object.keys(BUNDLE_LAYER).filter(function (candidate) {
+      return BUNDLE_LAYER[candidate] === layer;
     });
-    return partner;
   }
 
   // Item 14: brands with no plain user/pass login at all (Swedish
@@ -2881,7 +2876,10 @@
         // on a native load it's the same host as the page itself
         // (hostEnv === pageEnv), on an active override it's a
         // different env's CDN host entirely.
-        var mismatch = o.hostEnv !== pageEnv;
+        var artifactEnvs = Array.isArray(o.artifactEnvs) ? o.artifactEnvs : [];
+        var effectiveEnv = o.shape === 'dist' ? o.artifactEnv : o.hostEnv;
+        var mismatch = effectiveEnv ? effectiveEnv !== pageEnv :
+          (o.shape === 'dist' && artifactEnvs.length ? artifactEnvs.indexOf(pageEnv) === -1 : false);
         // Sandbox-shape links (the tool's own standalone "Generate" tab
         // output) carry no version/device in the bundle URL at all - see
         // BUNDLE_OBSERVE_SANDBOX_RE in background.js. Show what we DO
@@ -2916,10 +2914,21 @@
             label.textContent = 'SB build: ' + o.hostEnv.toUpperCase() + ' (' + sandboxLabel + ' sandbox link \u2013 version/device not encoded in URL)' + (mismatch ? ' \u2013 overridden from ' + pageEnv.toUpperCase() : '');
           }
         } else {
-          label.textContent = 'SB build: v' + o.version + ' (' + o.device + ')' + (mismatch ? ' \u2013 overridden from ' + pageEnv.toUpperCase() : '');
+          var environmentDetail;
+          if (o.artifactEnv) {
+            environmentDetail = o.artifactEnv.toUpperCase() + ' artifact via ' + o.hostEnv.toUpperCase() + ' host';
+          } else if (artifactEnvs.length > 1) {
+            environmentDetail = 'shared by ' + artifactEnvs.map(function (env) { return env.toUpperCase(); }).join('/') + ' via ' + o.hostEnv.toUpperCase() + ' host';
+          } else if (o.artifactResolutionPending) {
+            environmentDetail = 'resolving artifact environment; request host ' + o.hostEnv.toUpperCase();
+          } else {
+            environmentDetail = 'artifact environment unknown; request host ' + o.hostEnv.toUpperCase();
+          }
+          label.textContent = 'SB build: v' + o.version + ' (' + o.device + ') [' + environmentDetail + ']' + (mismatch ? ' \u2013 page is ' + pageEnv.toUpperCase() : '');
         }
-        badge.textContent = o.hostEnv.toUpperCase();
-        badge.className = 'lgt-build-badge ' + (mismatch ? 'mismatch' : 'match');
+        var badgeEnv = effectiveEnv || (artifactEnvs.length > 1 ? 'shared' : (o.shape === 'dist' ? 'unknown' : o.hostEnv));
+        badge.textContent = badgeEnv.toUpperCase();
+        badge.className = 'lgt-build-badge ' + (mismatch || badgeEnv === 'unknown' ? 'mismatch' : 'match');
         badge.style.display = '';
         badge.title = o.url;
       });
@@ -2985,9 +2994,9 @@
     return wrap;
   }
 
-  // "Bundle" tab - overrides this brand's sportsbook JS bundle (main-*.js)
-  // on THIS tab to run a different, same-layer environment's build
-  // (QA<->TEST or ALPHA<->PROD), via background.js's
+  // "Bundle" tab - pins this brand's sportsbook JS bundle on THIS tab to
+  // either the page environment (default) or its same-layer partner, via
+  // background.js's
   // lgt-bundle-start/stop/status messages (see background.js's "Bundle
   // override" section for the actual declarativeNetRequest mechanism).
   // Deliberately independent of the Generate tab per user decision - the
@@ -3001,13 +3010,24 @@
     var curEnvSel = el('select', {}, ENV_LABELS.map(function (e) { return el('option', { value: e }, [e]); }));
     if (detected.environment) curEnvSel.value = detected.environment;
 
+    var targetEnvSel = el('select', {}, []);
     var targetEnvBadge = el('div', { class: 'lgt-hint' }, ['']);
-    function refreshTargetEnv() {
-      var partner = bundleLayerPartner(curEnvSel.value);
-      targetEnvBadge.textContent = partner
-        ? ('Target build: ' + partner.toUpperCase() + ' (same layer as ' + curEnvSel.value.toUpperCase() + ')')
+    function refreshTargetEnv(resetToPageEnvironment) {
+      var allowed = bundleLayerEnvironments(curEnvSel.value);
+      var previousTarget = targetEnvSel.value;
+      targetEnvSel.innerHTML = '';
+      allowed.forEach(function (environment) {
+        targetEnvSel.appendChild(el('option', { value: environment }, [environment]));
+      });
+      var target = (!resetToPageEnvironment && allowed.indexOf(previousTarget) !== -1)
+        ? previousTarget
+        : curEnvSel.value;
+      if (allowed.indexOf(target) !== -1) targetEnvSel.value = target;
+      targetEnvBadge.textContent = allowed.length
+        ? ('Target build: ' + targetEnvSel.value.toUpperCase() +
+          (targetEnvSel.value === curEnvSel.value ? ' (pinned to this page environment)' : ' (same-layer override)'))
         : 'Unknown layer for this environment.';
-      return partner;
+      return targetEnvSel.value || null;
     }
 
     var status = el('div', { class: 'lgt-log' }, ['Not active on this tab.']);
@@ -3040,8 +3060,12 @@
       chrome.runtime.sendMessage({ type: 'lgt-bundle-status' }, function (res) {
         void chrome.runtime.lastError;
         if (!res || !res.ok) return;
+        if (res.active && res.targetEnv && bundleLayerEnvironments(curEnvSel.value).indexOf(res.targetEnv) !== -1) {
+          targetEnvSel.value = res.targetEnv;
+          refreshTargetEnv(false);
+        }
         status.textContent = res.active
-          ? ('Active (' + res.ruleCount + ' rule(s)) - ' + res.matched.length + ' request(s) redirected so far.')
+          ? ('Active' + (res.targetEnv ? ' -> ' + res.targetEnv.toUpperCase() : '') + ' (' + res.ruleCount + ' rule(s)) - ' + res.matched.length + ' request(s) redirected so far.')
           : 'Not active on this tab.';
       });
     }
@@ -3056,10 +3080,11 @@
         if (!brandGuid) { status.textContent = 'Unknown brand.'; return; }
         if (!targetEnv) { status.textContent = 'Could not determine a same-layer target environment.'; return; }
         status.textContent = 'Applying...';
-        chrome.runtime.sendMessage({ type: 'lgt-bundle-start', targetEnv: targetEnv, brandId: brandGuid }, function (res) {
+        chrome.runtime.sendMessage({ type: 'lgt-bundle-start', currentEnv: curEnvSel.value, targetEnv: targetEnv, brandId: brandGuid }, function (res) {
           void chrome.runtime.lastError;
           if (!res || !res.ok) { status.textContent = 'Failed: ' + ((res && res.error) || 'unknown error'); return; }
-          status.textContent = 'Active (' + res.ruleCount + ' rule(s) applied) - reload the page if it was already loaded.';
+          status.textContent = 'Active -> ' + targetEnv.toUpperCase() + ' (' + res.ruleCount + ' rule(s) applied) - reloading page...';
+          setTimeout(function () { location.reload(); }, 150);
         });
       }
     }, ['Apply']);
@@ -3077,26 +3102,30 @@
     // Environment is intentionally never persisted - see the restore
     // comment below for why (it must always reflect the live page, not a
     // remembered value from a different tab/environment).
-    curEnvSel.addEventListener('change', function () { refreshTargetEnv(); });
+    curEnvSel.addEventListener('change', function () { refreshTargetEnv(true); });
+    targetEnvSel.addEventListener('change', function () { refreshTargetEnv(false); });
 
     wrap.appendChild(el('label', {}, ['Brand']));
     wrap.appendChild(brandSel);
     wrap.appendChild(el('label', {}, ['Current environment (what this tab is actually on)']));
     wrap.appendChild(curEnvSel);
+    wrap.appendChild(el('label', {}, ['Target bundle environment']));
+    wrap.appendChild(targetEnvSel);
     wrap.appendChild(targetEnvBadge);
     wrap.appendChild(sandboxWarning);
     wrap.appendChild(el('div', { style: 'display:flex;gap:6px;margin-top:6px' }, [applyBtn, disableBtn]));
     wrap.appendChild(status);
     wrap.appendChild(el('div', { class: 'lgt-hint', style: 'margin-top:8px' }, [
-      'Redirects this brand\u2019s sportsbook bundle (main-*.js) on THIS tab ' +
-      'to the other environment in the same layer (QA\u2194TEST or ' +
-      'ALPHA\u2194PROD). Only works within the same layer - mixing layers ' +
+      'Pins this brand\u2019s sportsbook bundle (main-*.js and other listed entry files) on THIS tab ' +
+      'to the selected environment. It defaults to the page\u2019s own environment, ' +
+      'or you can deliberately choose the other environment in the same layer ' +
+      '(QA\u2194TEST or ALPHA\u2194PROD). Mixing layers ' +
       'loads a broken build with no error. Only works on a page where the ' +
       'sportsbook widget is embedded in a real brand page (real brand ' +
       'domain, or an iframe test host embedding it the same way) - NOT on ' +
       'the tool\u2019s own standalone "Generate" tab sandbox links (see ' +
-      'warning above if detected). Reload the page after Apply if it was ' +
-      'already open. Avoid running the standalone "Sportsbook Bundle ' +
+      'warning above if detected). Apply automatically reloads the page after ' +
+      'the redirect rules are installed. Avoid running the standalone "Sportsbook Bundle ' +
       'Override Tool" extension at the same time in the same tab.'
     ]));
 
@@ -3112,7 +3141,7 @@
       // the "other" target - i.e. redirect QA to QA, a silent no-op that
       // looked identical whether Apply/Disable was clicked.
       if (saved && saved.brand && BRANDS[saved.brand]) brandSel.value = saved.brand;
-      refreshTargetEnv();
+      refreshTargetEnv(true);
     });
 
     return wrap;

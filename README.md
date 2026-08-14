@@ -33,16 +33,25 @@ brand page you're already logged into — no CLI, no headless automation.
   "Why not a shared cross-origin vault?" below). The first credential you
   ever save on a domain becomes its default automatically; automation
   always uses the current default so it never blocks waiting for input.
-- **Bundle** tab (Chrome extension only): redirects the current tab's
-  sportsbook JS bundle (`main-*.js`) to a **different, same-layer**
-  environment's build — QA↔TEST or ALPHA↔PROD — without a deploy. Ports
-  the mechanism of the separate, standalone "Sportsbook Bundle Override
-  Tool" (`BetssonGroup/sb-bundle-override-tool`) directly into this
-  extension so you don't need to load a second extension side by side.
-  Auto-detects brand/environment from the page you're currently on; only
-  ever offers the one valid same-layer target (mixing QA/TEST with
-  ALPHA/PROD loads a broken build with no explicit error, so this isn't
-  even selectable). Scoped to the one tab you click Apply in via a
+- **Bundle** tab (Chrome extension only): pins the current tab's sportsbook
+  JS bundle (`main-*.js` and any other entry files listed by the target
+  indexer) to an explicitly selected environment. The target defaults to
+  the page's own environment, so opening `alpha.<brand>/sportsbook` and
+  clicking **Apply** guarantees that the ALPHA indexer's bundle is used even
+  when the brand host is misconfigured to serve a PROD artifact. The other
+  same-layer environment remains selectable for deliberate QA↔TEST or
+  ALPHA↔PROD override testing. Apply installs tab-scoped rules and then
+  automatically reloads the page. Ports the mechanism of the separate,
+  standalone "Sportsbook Bundle Override Tool"
+  (`BetssonGroup/sb-bundle-override-tool`) directly into this extension so
+  you don't need to load a second extension side by side.
+  If the two environments in a layer expose different bundle entrypoints,
+  source-only files are redirected to an inert extension script so code from
+  both builds cannot execute in a mixed state.
+  Auto-detects brand/environment from the page you're currently on and only
+  offers targets from the same layer (mixing QA/TEST with ALPHA/PROD loads a
+  broken build with no explicit error, so this isn't selectable). Scoped to
+  the one tab you click Apply in via a
   session-only `declarativeNetRequest` rule — never affects any other
   tab or site, and is cleared automatically when that tab closes or you
   click Disable. **Does not work on standalone sandbox links** (the
@@ -115,18 +124,19 @@ brand page you're already logged into — no CLI, no headless automation.
   with no `unsafe-inline`, which silently blocked an earlier,
   DOM-script-injection-based implementation of this check). Resolves
   within a few seconds either way (never hangs indefinitely).
-  Note: the internal `/dist/<label>/...` path segment in
-  the bundle URL is *not* itself a reliable environment indicator (a
-  brand's TEST site has been observed serving its bundle from a path
-  literally labeled `qa`, since TEST/QA share one underlying BLE-layer
-  build artifact folder) — the strip instead derives the environment from
-  which **host** actually served the file, which reliably differs between
-  a native load and an active override. On a standalone sandbox link
+  For dist-shape widget URLs the strip resolves the artifact environment by
+  comparing the observed brand/device/version against both indexers in the
+  page's environment layer. It deliberately keeps the page environment,
+  request-host environment, and artifact environment separate: an ALPHA
+  hostname can proxy a `/dist/prod/...` artifact and must then be reported as
+  a PROD build on an ALPHA page. If the same build is deployed to both
+  environments it is labeled as shared rather than guessed. On a standalone
+  sandbox link
   (the tool's own "Generate" tab output, opened directly) the bundle is
   served as a plain `/assets/main-<hash>.js`/`/assets/chunk-<hash>.js`
   with no version or device segment in the URL at all — the strip still
   recovers the real version via a reverse lookup against that
-  environment's `indexer.json` (the same file the Bundle Override feature
+  environment's `indexer.json` (the same files the Bundle Override feature
   already fetches/caches): it checks whether any of the observed
   filenames match a brand's listed entry-point or facade chunk files, and
   if so reports that build's version and the actual detected **brand
@@ -411,8 +421,8 @@ is largely unchanged:
 - Chrome only; not published to the Chrome Web Store — unpacked/ZIP
   install only (see "Install (Chrome extension)" above).
 - **Bundle tab**: only works within the same environment layer (QA↔TEST
-  or ALPHA↔PROD) — this is enforced by only offering the one valid
-  target, not a limitation to work around. Only works on a real
+  or ALPHA↔PROD) — the target selector only offers those two layer members
+  and defaults to the current page environment for safe pinning. Only works on a real
   brand-embedded page (the widget's `/dist/.../desktop|mobile/files/...`
   bundle shape) — it structurally cannot work on the tool's own
   standalone sandbox links (see the Bundle tab description above for
@@ -426,11 +436,10 @@ is largely unchanged:
   the same time on the same tab/site — both extensions register their
   own `declarativeNetRequest` rules for the same bundle URLs, and running
   both simultaneously is untested and could produce confusing, order-
-  dependent redirect behavior. Requires a page reload after clicking
-  Apply if the target page was already loaded before you applied the
-  override (a `declarativeNetRequest` rule only affects requests made
-  *after* it's registered, not ones already in flight or already
-  rendered). Since 1.15.0, the override is also automatically cleared the
+  dependent redirect behavior. Apply automatically reloads the same page
+  after the rules are installed, because a `declarativeNetRequest` rule only
+  affects requests made *after* registration, not ones already in flight or
+  already rendered. Since 1.15.0, the override is also automatically cleared the
   moment you navigate that same tab away to a genuinely different link
   (`chrome.webNavigation.onBeforeNavigate`, fires before the new page's
   own first request) — before this fix, an override applied once silently
@@ -438,8 +447,8 @@ is largely unchanged:
   tab, which could make an otherwise-fine link fail to load at all (a
   mismatched env/version combination can break the app outright, not just
   show a stale version label). A same-URL reload (F5) is unaffected and
-  still correctly preserves the override, matching the documented
-  "Apply, then reload the same page" workflow.
+  still correctly preserves the override, including the automatic reload
+  triggered by Apply.
 - **BLE Data tab**: requires a page reload after Apply, same reason as
   the Bundle tab (`declarativeNetRequest` only affects requests made
   after registration). Cleared automatically on navigation to a
