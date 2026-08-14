@@ -18,23 +18,34 @@ const { chromium } = require('playwright');
 
 const EXT_PATH = path.resolve(__dirname, 'extension');
 const BRAND = 'nordicbet';
-const CURRENT_ENV = 'test';
-const TARGET_ENV = 'qa'; // same layer (BLE) partner of 'test'
-const TARGET_URL = 'https://test.nordicbet.com/en/sportsbook';
+const CURRENT_ENV = process.env.LGT_CURRENT_ENV || 'test';
+const TARGET_ENV = process.env.LGT_TARGET_ENV || CURRENT_ENV; // default behavior: pin to page env
+const TARGET_URL = 'https://' + (CURRENT_ENV === 'prod' ? '' : CURRENT_ENV + '.') + 'nordicbet.com/en/sportsbook';
+const MOBILE = process.env.LGT_MOBILE === '1';
+const CHECK_SPORTSBOOK_TOOL = process.env.LGT_CHECK_SPORTSBOOK_TOOL === '1';
+const SPORTSBOOK_TOOL_URL = 'https://betssongroup.github.io/sportsbook/qa/sportsbook-tool/sportsbookTool.min.js';
 
 function log(msg) { console.log('[test] ' + new Date().toISOString().slice(11, 19) + ' ' + msg); }
 
 async function main() {
   const userDataDir = path.join(require('os').tmpdir(), 'lgt-e2e-bundle-profile-' + Date.now());
-  const context = await chromium.launchPersistentContext(userDataDir, {
-    channel: 'chromium',
+  const launchOptions = {
     headless: process.env.LGT_HEADFUL ? false : true,
+    viewport: MOBILE ? { width: 470, height: 944 } : { width: 1280, height: 800 },
+    isMobile: MOBILE,
+    hasTouch: MOBILE,
+    ...(MOBILE ? {
+      userAgent: 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36',
+    } : {}),
     args: [
       `--disable-extensions-except=${EXT_PATH}`,
       `--load-extension=${EXT_PATH}`,
       '--no-first-run',
     ],
-  });
+  };
+  if (process.env.LGT_CHROMIUM_EXECUTABLE) launchOptions.executablePath = process.env.LGT_CHROMIUM_EXECUTABLE;
+  else launchOptions.channel = 'chromium';
+  const context = await chromium.launchPersistentContext(userDataDir, launchOptions);
 
   context.on('page', (p) => {
     log('NEW PAGE/TAB opened: ' + p.url());
@@ -54,9 +65,20 @@ async function main() {
   // redirect really take effect" without depending on exact indexer hash
   // values, which change on every deploy.
   const bundleRequests = [];
+  const bundleResponses = [];
+  const configResponses = [];
   page.on('requestfinished', (req) => {
     const url = req.url();
-    if (/\/files\/[a-zA-Z0-9]+-[A-Z0-9]+\.js(\?|$)/.test(url)) bundleRequests.push(url);
+    if (/\/files\/[a-zA-Z0-9]+[.-][A-Z0-9]+\.m?js(\?|$)/i.test(url)) bundleRequests.push(url);
+  });
+  page.on('response', (response) => {
+    const url = response.url();
+    if (/\/files\/[a-zA-Z0-9]+[.-][A-Z0-9]+\.m?js(\?|$)/i.test(url)) {
+      bundleResponses.push({ url, status: response.status() });
+    }
+    if (new RegExp('/dist/(test|qa|alpha|prod)/config/.*/config[.]json([?]|$)', 'i').test(url)) {
+      configResponses.push({ url, status: response.status() });
+    }
   });
 
   await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
@@ -94,12 +116,20 @@ async function main() {
     if (!/^SB build:/.test(text.trim())) {
       throw new Error('Detected build strip never populated (expected "SB build: ..."), last text: ' + text);
     }
+    if (MOBILE && !text.includes('(mobile)')) {
+      throw new Error('Mobile test did not load a mobile sportsbook bundle; got: ' + text);
+    }
     const badgeText = (await buildStrip.locator('.lgt-build-badge').textContent().catch(() => '')) || '';
     log('Detected build badge (native): ' + badgeText.trim());
     const badgeTitle = (await buildStrip.locator('.lgt-build-badge').getAttribute('title').catch(() => '')) || '';
     log('Detected build URL (native, for diagnosis): ' + badgeTitle);
-    if (badgeText.trim().toUpperCase() !== CURRENT_ENV.toUpperCase()) {
-      throw new Error('Detected build badge did not show native env "' + CURRENT_ENV + '", got: ' + badgeText);
+    const nativeArtifactEnv = badgeText.trim().toLowerCase();
+    const sameLayer = ['test', 'qa'].includes(CURRENT_ENV) ? ['test', 'qa'] : ['alpha', 'prod'];
+    if (!sameLayer.includes(nativeArtifactEnv)) {
+      throw new Error('Detected build badge did not resolve to a valid same-layer artifact environment, got: ' + badgeText);
+    }
+    if (nativeArtifactEnv !== CURRENT_ENV && text.toUpperCase().indexOf('PAGE IS ' + CURRENT_ENV.toUpperCase()) === -1) {
+      throw new Error('Detected build found a cross-environment artifact but did not flag the page/artifact mismatch: ' + text);
     }
   }
 
@@ -118,6 +148,13 @@ async function main() {
     await curEnvSel.selectOption(CURRENT_ENV);
   }
 
+  const targetEnvSel = panel.locator('select:visible').nth(2);
+  const selectedTarget = await targetEnvSel.inputValue();
+  if (selectedTarget !== TARGET_ENV) {
+    await targetEnvSel.selectOption(TARGET_ENV);
+    log('Selected explicit target environment ' + TARGET_ENV + ' (default was ' + selectedTarget + ').');
+  }
+
   const targetHint = await panel.locator('.lgt-hint:visible').first().textContent();
   log('Target-env hint: ' + (targetHint || '').trim());
   if (!targetHint || targetHint.toUpperCase().indexOf(TARGET_ENV.toUpperCase()) === -1) {
@@ -125,38 +162,62 @@ async function main() {
   }
 
   const applyBtn = panel.getByRole('button', { name: 'Apply', exact: true });
+  bundleRequests.length = 0;
+  bundleResponses.length = 0;
+  configResponses.length = 0;
+  const reloadPromise = page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 });
   await applyBtn.click();
-  log('Clicked Apply, waiting for status to report an active override...');
+  log('Clicked Apply, waiting for the automatic reload...');
+  await reloadPromise;
+  await page.waitForTimeout(2000);
+  log('PASS: Apply automatically reloaded the current tab.');
 
-  const statusEl = panel.locator('.lgt-log:visible').first();
-  const deadline = Date.now() + 20000;
-  let statusText = '';
-  while (Date.now() < deadline) {
-    statusText = (await statusEl.textContent().catch(() => '')) || '';
-    log('Bundle status: ' + statusText.trim());
-    if (/^Active \(\d+ rule/.test(statusText.trim())) break;
-    if (/^Failed:/.test(statusText.trim())) break;
-    await page.waitForTimeout(1500);
-  }
-
-  if (!/^Active \(\d+ rule/.test(statusText.trim())) {
-    throw new Error('Bundle override did not report an active state within budget. Last status: ' + statusText);
-  }
+  await page.waitForSelector('#lgt-panel', { state: 'attached', timeout: 10000 });
+  const liveBundleRuleCount = await sw.evaluate(async () => {
+    const tabs = await chrome.tabs.query({ url: '*://*.nordicbet.com/*' });
+    const tab = tabs[0];
+    const rules = await chrome.declarativeNetRequest.getSessionRules();
+    return rules.filter((rule) => rule.id >= 930001 && rule.id < 950001 &&
+      rule.condition && Array.isArray(rule.condition.tabIds) && tab && rule.condition.tabIds.includes(tab.id)).length;
+  });
+  log('Live bundle rules after automatic reload: ' + liveBundleRuleCount);
+  if (!liveBundleRuleCount) throw new Error('Bundle override rules did not survive the automatic same-URL reload.');
   log('PASS: background.js fetched the live ' + TARGET_ENV + ' indexer.json and installed at least one declarativeNetRequest rule.');
 
-  // Best-effort (non-fatal) network verification: reload so the page's
-  // own bundle requests are made AFTER the rule is active, then see if
-  // any matched bundle request actually resolved against the target env.
-  bundleRequests.length = 0;
-  await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+  const expectedMfeOverrideFlag = TARGET_ENV === 'alpha' || TARGET_ENV === 'test';
+  const mfeOverrideFlag = await page.evaluate(() => window.xSbIsMfeOverrideApplied);
+  if ((mfeOverrideFlag === true) !== expectedMfeOverrideFlag) {
+    throw new Error('xSbIsMfeOverrideApplied lifecycle mismatch for target ' + TARGET_ENV + ': got ' + JSON.stringify(mfeOverrideFlag));
+  }
+  log('PASS: MAIN-world xSbIsMfeOverrideApplied flag matches target environment semantics (' + expectedMfeOverrideFlag + ').');
+
+  const panelAfterReload = page.locator('#lgt-panel');
+
+  // The Apply click already reloaded after installing the rule. Confirm the
+  // resulting requests use the selected target environment.
   await page.waitForTimeout(5000);
   log('Bundle-like requests observed after reload: ' + bundleRequests.length);
   bundleRequests.forEach((u) => log('  ' + u));
   const redirected = bundleRequests.some((u) => u.indexOf('.' + TARGET_ENV + '.') !== -1 || u.indexOf('/' + TARGET_ENV + '/') !== -1);
-  if (redirected) {
-    log('PASS (network-level): a bundle request actually resolved against the ' + TARGET_ENV + ' environment.');
+  if (!redirected) throw new Error('No sportsbook bundle request resolved against target environment ' + TARGET_ENV + '.');
+  log('PASS (network-level): a bundle request actually resolved against the ' + TARGET_ENV + ' environment.');
+  const wrongLayerResponses = bundleResponses.filter((item) => item.status === 200 &&
+    item.url.indexOf('/dist/' + (TARGET_ENV === 'alpha' ? 'prod' : TARGET_ENV === 'prod' ? 'alpha' : TARGET_ENV === 'test' ? 'qa' : 'test') + '/') !== -1);
+  if (wrongLayerResponses.length) {
+    throw new Error('Mixed bundle execution detected after pinning to ' + TARGET_ENV + ': ' + JSON.stringify(wrongLayerResponses));
+  }
+  if (configResponses.length || TARGET_ENV === 'alpha') {
+    const targetConfig = configResponses.find((item) => item.status === 200 && item.url.includes('/dist/' + TARGET_ENV + '/config/'));
+    if (!targetConfig) {
+      throw new Error('No successful ClientConfig response from target environment ' + TARGET_ENV + ': ' + JSON.stringify(configResponses));
+    }
+    const failedConfigs = configResponses.filter((item) => item.status >= 400);
+    if (failedConfigs.length) {
+      throw new Error('ClientConfig request failed after pinning to ' + TARGET_ENV + ': ' + JSON.stringify(failedConfigs));
+    }
+    log('PASS: ClientConfig resolved from /dist/' + TARGET_ENV + '/config/ with HTTP 200.');
   } else {
-    log('NOTE: could not confirm a redirected bundle request at the network level within this run (page/timing-dependent, non-fatal) - the declarativeNetRequest-rule-installed assertion above already validates the core new mechanism end-to-end.');
+    log('INFO: this build did not request a dist-shape ClientConfig during the observation window.');
   }
 
   // "Detected build" strip check AFTER the override + reload - the panel
@@ -167,7 +228,7 @@ async function main() {
   // to make impossible - see the 2026-08-10 Bundle-tab environment fix).
   {
     await page.waitForSelector('#lgt-panel', { state: 'attached', timeout: 10000 }).catch(() => {});
-    const strip2 = page.locator('#lgt-panel .lgt-build-strip');
+    const strip2 = panelAfterReload.locator('.lgt-build-strip');
     const label2 = strip2.locator('span').first();
     const deadline = Date.now() + 15000;
     let text2 = '';
@@ -179,11 +240,13 @@ async function main() {
     log('Detected build strip (post-override, post-reload): ' + text2.trim());
     const badge2 = (await strip2.locator('.lgt-build-badge').textContent().catch(() => '')) || '';
     log('Detected build badge (post-override): ' + badge2.trim());
-    if (badge2.trim().toUpperCase() === TARGET_ENV.toUpperCase()) {
-      log('PASS: Detected build strip correctly flipped to ' + TARGET_ENV.toUpperCase() + ' after the override + reload.');
-    } else {
-      log('NOTE: Detected build strip did not show ' + TARGET_ENV.toUpperCase() + ' after reload (got "' + badge2.trim() + '") - non-fatal, network-timing dependent like the redirect check above.');
+    if (badge2.trim().toUpperCase() !== TARGET_ENV.toUpperCase()) {
+      throw new Error('Detected build strip did not show target artifact env ' + TARGET_ENV.toUpperCase() + ' after automatic reload; got "' + badge2.trim() + '".');
     }
+    if (MOBILE && !text2.includes('(mobile)')) {
+      throw new Error('Mobile sportsbook bundle was not retained after automatic reload; got: ' + text2);
+    }
+    log('PASS: Detected build strip shows ' + TARGET_ENV.toUpperCase() + ' after Apply + automatic reload.');
   }
 
   // CRITICAL assertion (added 2026-08-10, closes a real test-coverage gap
@@ -204,6 +267,40 @@ async function main() {
     throw new Error('REGRESSION: page body has almost no rendered text (' + bodyText.length + ' chars) after Bundle Override + reload - the app likely failed to render. Snippet: ' + JSON.stringify(bodyText.slice(0, 300)));
   }
   log('PASS: page still renders real content (' + bodyText.length + ' chars) after Bundle Override + reload - not a blank page.');
+
+  if (CHECK_SPORTSBOOK_TOOL) {
+    await page.addScriptTag({ url: SPORTSBOOK_TOOL_URL });
+    await page.waitForSelector('#mfeEnvMismatchSection', { state: 'attached', timeout: 15000 });
+    await page.waitForTimeout(1000);
+    const sportsbookToolState = await page.evaluate(() => {
+      const mismatch = document.querySelector('#mfeEnvMismatchSection');
+      return {
+        mismatchHidden: !!mismatch && mismatch.classList.contains('hide'),
+        mismatchText: mismatch ? mismatch.innerText : '',
+        environmentText: document.querySelector('#environment')?.innerText || '',
+      };
+    });
+    log('Sportsbook Tool environment: ' + sportsbookToolState.environmentText + '; mismatch hidden=' + sportsbookToolState.mismatchHidden);
+    if (TARGET_ENV === CURRENT_ENV && !sportsbookToolState.mismatchHidden) {
+      throw new Error('QA Sportsbook Tool still reports a false environment mismatch: ' + sportsbookToolState.mismatchText);
+    }
+    if (TARGET_ENV === CURRENT_ENV && sportsbookToolState.environmentText.toLowerCase() !== TARGET_ENV) {
+      throw new Error('QA Sportsbook Tool reports ' + sportsbookToolState.environmentText + ' instead of ' + TARGET_ENV.toUpperCase());
+    }
+    log('PASS: QA Sportsbook Tool reports the effective target environment without a false mismatch.');
+  }
+
+  await panelAfterReload.locator('.lgt-tab').filter({ hasText: 'Bundle' }).click();
+  await panelAfterReload.getByRole('button', { name: 'Disable', exact: true }).click();
+  await page.waitForTimeout(500);
+  const flagAfterDisable = await page.evaluate(() => ({
+    value: window.xSbIsMfeOverrideApplied,
+    owned: window.__linkGenToolOwnsXSbIsMfeOverrideApplied,
+  }));
+  if (typeof flagAfterDisable.value !== 'undefined' || typeof flagAfterDisable.owned !== 'undefined') {
+    throw new Error('Disable did not remove the Link Gen Tool-owned MAIN-world flag: ' + JSON.stringify(flagAfterDisable));
+  }
+  log('PASS: Disable removes the Link Gen Tool-owned MAIN-world compatibility flag.');
 
   log('Test run complete.');
   await context.close();

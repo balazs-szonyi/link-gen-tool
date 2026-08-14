@@ -1314,8 +1314,8 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
 // ---------------------------------------------------------------------
 // Bundle override - redirects a brand's sportsbook bundle (main-*.js, and
 // any other per-device file the target env's indexer.json lists) to a
-// DIFFERENT environment's build (e.g. run the QA build while browsing a
-// TEST page, or ALPHA while browsing PROD), without a deploy. This ports
+// selected same-layer environment's build (including pinning ALPHA to
+// ALPHA when a brand host is serving a PROD artifact), without a deploy. This ports
 // the mechanism of the separate, standalone "Sportsbook Bundle Override
 // Tool" (BetssonGroup/sb-bundle-override-tool) directly into this
 // extension, so testers don't need to load a second extension side by
@@ -1329,11 +1329,10 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
 // applied it to, and two people running this feature in different tabs
 // never collide with each other.
 //
-// Only ever override within the SAME environment layer - QA<->TEST (BLE)
-// or ALPHA<->PROD (BDE). The two layers' bundle formats are incompatible;
-// mixing them loads a broken build with no explicit runtime error. This is
-// enforced by the Bundle tab's own env-select options in content.js (it
-// only ever offers the one same-layer alternative), not re-validated here.
+// Only ever override within the SAME environment layer - QA/TEST (BLE) or
+// ALPHA/PROD (BDE). The two layers' bundle formats are incompatible; mixing
+// them loads a broken build with no explicit runtime error. Both the Bundle
+// tab and this message handler validate that boundary.
 // ---------------------------------------------------------------------
 
 
@@ -1343,6 +1342,21 @@ var BUNDLE_INDEXER_URLS = {
   alpha: 'https://d-cf.alpha.sbplayground1.net/dist/alpha/xp/widgets/sportsbook/indexer.json',
   prod: 'https://d-cf.sbplayground1.net/dist/prod/xp/widgets/sportsbook/indexer.json'
 };
+
+var BUNDLE_ENV_LAYERS = {
+  test: 'ble',
+  qa: 'ble',
+  alpha: 'bde',
+  prod: 'bde'
+};
+
+function bundleEnvironmentsInLayer(environment) {
+  var layer = BUNDLE_ENV_LAYERS[environment];
+  if (!layer) return [];
+  return Object.keys(BUNDLE_ENV_LAYERS).filter(function (candidate) {
+    return BUNDLE_ENV_LAYERS[candidate] === layer;
+  });
+}
 
 var BUNDLE_RULE_ID_START = 930001;
 var bundleRuleIdsByTab = {}; // tabId -> ruleId[] - an override can add up
@@ -1365,6 +1379,81 @@ var bundleIndexerCache = {}; // targetEnv -> {ts, data} - avoids re-fetching
 // restart, which just means the next Apply re-fetches - never stale
 // beyond BUNDLE_INDEXER_CACHE_MS.
 var BUNDLE_INDEXER_CACHE_MS = 5 * 60 * 1000;
+
+// The QA Sportsbook Tool derives the effective mFE environment from the
+// page's startup context, which stays at the layer's base environment even
+// after a network-level bundle override (PROD for ALPHA, QA for TEST). Its
+// own override implementation publishes xSbIsMfeOverrideApplied in MAIN
+// world to tell the tool to translate those two values. Mirror that public
+// compatibility signal while our equivalent override is active. Do not set
+// it for PROD/QA targets: there the unmodified startup context is already
+// the right answer, and forcing the flag would invert a correct result.
+function bundleTargetNeedsMfeOverrideFlag(targetEnv) {
+  return targetEnv === 'alpha' || targetEnv === 'test';
+}
+
+function setBundleMfeOverrideFlag(tabId, targetEnv) {
+  var enabled = bundleTargetNeedsMfeOverrideFlag(targetEnv);
+  return new Promise(function (resolve) {
+    chrome.scripting.executeScript({
+      target: { tabId: tabId },
+      world: 'MAIN',
+      args: [enabled],
+      func: function (shouldEnable) {
+        var ownerKey = '__linkGenToolOwnsXSbIsMfeOverrideApplied';
+        if (shouldEnable) {
+          // Respect a flag owned by another tool. The Link Gen Tool UI warns
+          // against running both overrides together, but avoiding ownership
+          // theft makes Disable safe even if somebody does.
+          if (typeof window.xSbIsMfeOverrideApplied === 'undefined' || window[ownerKey]) {
+            window.xSbIsMfeOverrideApplied = true;
+            window[ownerKey] = true;
+          }
+        } else if (window[ownerKey]) {
+          delete window.xSbIsMfeOverrideApplied;
+          delete window[ownerKey];
+        }
+        return {
+          enabled: window.xSbIsMfeOverrideApplied === true,
+          owned: window[ownerKey] === true
+        };
+      }
+    }, function (results) {
+      var error = chrome.runtime.lastError;
+      resolve({
+        ok: !error,
+        error: error ? error.message : null,
+        state: results && results[0] ? results[0].result : null
+      });
+    });
+  });
+}
+
+function getLiveBundleRulesForTab(tabId) {
+  return new Promise(function (resolve) {
+    chrome.declarativeNetRequest.getSessionRules(function (allRules) {
+      resolve((allRules || []).filter(function (rule) {
+        return rule.id >= BUNDLE_RULE_ID_START && rule.id < SR_SPOOF_RULE_ID_START &&
+          rule.condition && Array.isArray(rule.condition.tabIds) && rule.condition.tabIds.indexOf(tabId) !== -1;
+      }));
+    });
+  });
+}
+
+function bundleTargetEnvFromRules(liveRules) {
+  var targetEnvs = (liveRules || []).map(function (rule) {
+    var redirectUrl = rule.action && rule.action.redirect && rule.action.redirect.url;
+    if (!redirectUrl) return null;
+    try { return envLabelFromHostname(new URL(redirectUrl).hostname); } catch (e) { return null; }
+  }).filter(function (env, index, values) { return env && values.indexOf(env) === index; });
+  return targetEnvs.length === 1 ? targetEnvs[0] : null;
+}
+
+function syncBundleMfeOverrideFlag(tabId) {
+  return getLiveBundleRulesForTab(tabId).then(function (liveRules) {
+    return setBundleMfeOverrideFlag(tabId, bundleTargetEnvFromRules(liveRules));
+  });
+}
 
 function fetchBundleIndexer(targetEnv) {
   var cached = bundleIndexerCache[targetEnv];
@@ -1439,7 +1528,7 @@ function nextUniqueSessionRuleIds(startId, endIdExclusive, count, cb) {
 // widget is embedded via the real dist-shape URL (real brand domains, or
 // anything else that loads the widget the same way) - see the Bundle tab
 // hint text and README for the corresponding user-facing guidance.
-function buildBundleRedirectRules(indexerData, brandId, targetEnv, tabId, ruleIds) {
+function buildBundleRedirectRules(indexerData, layerIndexerData, brandId, targetEnv, tabId, ruleIds, allowCrossOriginConfig, pageEnv, pageOrigin) {
   var entry = indexerData && indexerData[brandId];
   if (!entry) return { rules: [], skippedNoBrand: true };
   var indexerOrigin = '';
@@ -1449,12 +1538,18 @@ function buildBundleRedirectRules(indexerData, brandId, targetEnv, tabId, ruleId
   ['desktop', 'mobile'].forEach(function (device) {
     var deviceEntry = entry[device];
     var files = (deviceEntry && deviceEntry.js) || [];
+    var targetPrefixes = [];
     files.forEach(function (fileUrl) {
       var filename = fileUrl.split('/').pop();
-      var prefixMatch = /^([a-zA-Z0-9]+)-/.exec(filename);
+      // Current indexers contain both `main-HASH.js` and dot-separated
+      // entries such as `shell.HASH.js`. Treat both separators as the same
+      // semantic bundle prefix so a valid target entry is never silently
+      // omitted from the redirect plan.
+      var prefixMatch = /^([a-zA-Z0-9]+)[.-]/.exec(filename);
       var prefix = prefixMatch ? prefixMatch[1] : null;
       if (!prefix) return; // unexpected filename shape - skip rather than
       // build a rule that could match too broadly.
+      if (targetPrefixes.indexOf(prefix) === -1) targetPrefixes.push(prefix);
       var targetUrl = /^https?:\/\//i.test(fileUrl) ? fileUrl : (indexerOrigin + fileUrl);
       if (idIdx >= ruleIds.length) return; // safety - should never happen,
       // ruleIds is pre-sized to the exact needed count by the caller.
@@ -1463,28 +1558,206 @@ function buildBundleRedirectRules(indexerData, brandId, targetEnv, tabId, ruleId
         priority: 1,
         action: { type: 'redirect', redirect: { url: targetUrl } },
         condition: {
-          urlFilter: '*' + brandId + '*/' + device + '/files/' + prefix + '-*.js',
+          // Match both current naming conventions (`main-HASH.js` and
+          // `shell.HASH.js`). A regex is required here: parsing the dot form
+          // above but retaining the old hyphen-only urlFilter would still
+          // install a rule that can never match the shell request.
+          regexFilter: '^https?://[^/]+/.*' + brandId + '.*/' + device + '/files/' + prefix + '[.-][^/?]+\\.m?js([?].*)?$',
+          resourceTypes: ['script'],
+          tabIds: [tabId]
+        }
+      });
+    });
+
+    // Same-layer environments can expose a different entrypoint topology.
+    // NordicBet mobile is a concrete example: PROD ships main + shell while
+    // ALPHA currently ships main only. Redirecting main without handling the
+    // PROD-only shell executes code from both builds in the same page. Any
+    // entrypoint prefix found elsewhere in the layer but absent from the
+    // selected target is therefore redirected to a no-op extension resource.
+    var layerPrefixes = [];
+    (layerIndexerData || []).forEach(function (layerData) {
+      var layerDevice = layerData && layerData[brandId] && layerData[brandId][device];
+      ((layerDevice && layerDevice.js) || []).forEach(function (fileUrl) {
+        var filename = fileUrl.split('/').pop();
+        var match = /^([a-zA-Z0-9]+)[.-]/.exec(filename);
+        if (match && layerPrefixes.indexOf(match[1]) === -1) layerPrefixes.push(match[1]);
+      });
+    });
+    layerPrefixes.forEach(function (prefix) {
+      if (targetPrefixes.indexOf(prefix) !== -1 || idIdx >= ruleIds.length) return;
+      rules.push({
+        id: ruleIds[idIdx++],
+        priority: 1,
+        action: { type: 'redirect', redirect: { extensionPath: '/bundle-noop.js' } },
+        condition: {
+          regexFilter: '^https?://[^/]+/.*' + brandId + '.*/' + device + '/files/' + prefix + '[.-][^/?]+\\.m?js([?].*)?$',
           resourceTypes: ['script'],
           tabIds: [tabId]
         }
       });
     });
   });
+
+  // The selected bundle can request its ClientConfig from the environment
+  // encoded by the host page. When ALPHA is pinned on a page configured with
+  // PROD, that leaves a /dist/prod/config/... request beside ALPHA JavaScript
+  // and can return 403. Keep the remainder of the config path intact, but pin
+  // it to the selected bundle environment. Cross-layer mode covers every
+  // possible source environment and also pins the brand host, which removes
+  // any dependency on whether the page runtime captured fetch before the
+  // MAIN-world adapter was installed.
+  var regexCapture = String.fromCharCode(92);
+  var sourceConfigEnvs = allowCrossOriginConfig
+    ? Object.keys(BUNDLE_ENV_LAYERS).filter(function (environment) { return environment !== targetEnv; })
+    : bundleEnvironmentsInLayer(targetEnv).filter(function (environment) { return environment !== targetEnv; });
+  var brandKey = null;
+  Object.keys(BUNDLE_BRAND_GUIDS || {}).some(function (key) {
+    if (BUNDLE_BRAND_GUIDS[key] !== brandId) return false;
+    brandKey = key;
+    return true;
+  });
+  var targetConfigOrigin = null;
+  if (allowCrossOriginConfig && pageOrigin) {
+    try {
+      var targetOriginUrl = new URL(pageOrigin);
+      var targetOriginLabels = targetOriginUrl.hostname.split('.').filter(function (label) {
+        return ['test', 'qa', 'alpha'].indexOf(label) === -1;
+      });
+      if (targetEnv !== 'prod') targetOriginLabels.splice(Math.max(0, targetOriginLabels.length - 2), 0, targetEnv);
+      targetOriginUrl.hostname = targetOriginLabels.join('.');
+      targetConfigOrigin = targetOriginUrl.origin;
+    } catch (targetOriginError) {}
+  }
+  var pageConfigOrigin = allowCrossOriginConfig ? pageOrigin : null;
+  sourceConfigEnvs.forEach(function (sourceConfigEnv) {
+    if (idIdx >= ruleIds.length) return;
+    rules.push({
+      id: ruleIds[idIdx++],
+      priority: 1,
+      action: {
+        type: 'redirect',
+        redirect: {
+          regexSubstitution: (targetConfigOrigin || regexCapture + '1') + '/dist/' + targetEnv + '/config/' + regexCapture + '2'
+        }
+      },
+      condition: {
+        regexFilter: '^(https?://[^/]+)/dist/' + sourceConfigEnv + '/config/(' + brandId + '/.*)$',
+        resourceTypes: ['xmlhttprequest'],
+        tabIds: [tabId]
+      }
+    });
+  });
+
+  // In hybrid cross-layer mode the MAIN-world adapter deliberately asks the
+  // target environment for its ClientConfig. That request is cross-origin
+  // when, for example, a PROD page runs the TEST bundle. The config endpoint
+  // returns the JSON successfully but does not publish an ACAO header, so the
+  // page fetch is rejected by Chrome after the HTTP 200 response. Add the
+  // smallest possible response-header exception: this tab, this target env,
+  // this brand's /dist/<env>/config path, and XHR/fetch only. The config is a
+  // public bootstrap resource and the request uses the browser's default
+  // cross-origin credential mode (credentials are not sent).
+  if (allowCrossOriginConfig && idIdx < ruleIds.length) {
+    rules.push({
+      id: ruleIds[idIdx++],
+      priority: 2,
+      action: {
+        type: 'modifyHeaders',
+        responseHeaders: [
+          { header: 'access-control-allow-origin', operation: 'set', value: pageConfigOrigin || '*' },
+          { header: 'access-control-allow-credentials', operation: 'set', value: 'true' }
+        ]
+      },
+      condition: {
+        // Match the original source config URL as well as the post-redirect
+        // target URL. DNR response-header evaluation can retain the original
+        // request match after our separate redirect action.
+        regexFilter: '^https?://[^/]+/dist/(test|qa|alpha|prod)/config/' + brandId + '/.*',
+        resourceTypes: ['xmlhttprequest'],
+        tabIds: [tabId]
+      }
+    });
+  }
+
+  // BDE bundles (ALPHA/PROD) issue a separate static-context GET. BLE
+  // backends (TEST/QA) reject that route with HTTP 400 even though the same
+  // context identifiers succeed against BLE's user-context route. Translate
+  // only this read-only contract in the BDE-bundle -> BLE-backend direction;
+  // request headers and context IDs remain untouched.
+  if (allowCrossOriginConfig && BUNDLE_ENV_LAYERS[targetEnv] === 'bde' && BUNDLE_ENV_LAYERS[pageEnv] === 'ble' && idIdx < ruleIds.length) {
+    rules.push({
+      id: ruleIds[idIdx++],
+      priority: 2,
+      action: {
+        type: 'redirect',
+        redirect: { regexSubstitution: regexCapture + '1user-context' + regexCapture + '2' }
+      },
+      condition: {
+        regexFilter: '^(https?://[^/]+/sb/fe-api/v1/)static-context([?].*)?$',
+        resourceTypes: ['xmlhttprequest'],
+        tabIds: [tabId]
+      }
+    });
+  }
+
+  // Target ClientConfig can contain an absolute SSTP health endpoint for the
+  // bundle environment. In hybrid mode that makes a harmless GET cross origin
+  // (for example TEST host -> www.betsson.com/sstp/healthy), which the target
+  // server answers without CORS headers and Chrome consequently rejects. The
+  // page host does not necessarily expose the same endpoint, so retain the
+  // target health probe and grant only this tab's exact page origin access to
+  // its response. No other SSTP route or method is eligible.
+  if (allowCrossOriginConfig && targetConfigOrigin && pageOrigin && targetConfigOrigin !== pageOrigin && idIdx < ruleIds.length) {
+    rules.push({
+      id: ruleIds[idIdx++],
+      priority: 2,
+      action: {
+        type: 'modifyHeaders',
+        responseHeaders: [
+          { header: 'access-control-allow-origin', operation: 'set', value: pageOrigin },
+          { header: 'access-control-allow-credentials', operation: 'set', value: 'true' }
+        ]
+      },
+      condition: {
+        regexFilter: '^' + escapeRegexLiteral(targetConfigOrigin) + '/sstp/healthy([?].*)?$',
+        requestMethods: ['get'],
+        resourceTypes: ['xmlhttprequest'],
+        tabIds: [tabId]
+      }
+    });
+  }
   return { rules: rules, skippedNoBrand: false };
 }
 
-function startBundleOverrideRule(tabId, targetEnv, brandId) {
+function startBundleOverrideRule(tabId, targetEnv, brandId, currentEnv, pageOrigin) {
   var previousRuleIds = bundleRuleIdsByTab[tabId]; // swap atomically, same
   // reasoning as the other three declarativeNetRequest features above -
   // re-applying (e.g. switching target env without disabling first) must
   // not leave the old rules alongside the new ones.
-  return fetchBundleIndexer(targetEnv).then(function (indexerData) {
+  // Cross-Layer Lab compares all four live indexers so source-only main/shell
+  // entrypoints are neutralized as well. Standard mode retains the narrower
+  // same-layer lookup and behavior.
+  var layerEnvironments = currentEnv && BUNDLE_ENV_LAYERS[currentEnv] !== BUNDLE_ENV_LAYERS[targetEnv]
+    ? Object.keys(BUNDLE_INDEXER_URLS)
+    : bundleEnvironmentsInLayer(targetEnv);
+  return Promise.all(layerEnvironments.map(function (environment) {
+    return fetchBundleIndexer(environment).then(function (data) {
+      return { environment: environment, data: data };
+    }).catch(function (err) {
+      if (environment === targetEnv) throw err;
+      return { environment: environment, data: null };
+    });
+  })).then(function (layerResults) {
+    var targetResult = layerResults.filter(function (result) { return result.environment === targetEnv; })[0];
+    var indexerData = targetResult && targetResult.data;
+    var layerIndexerData = layerResults.map(function (result) { return result.data; }).filter(function (data) { return !!data; });
     return new Promise(function (resolve, reject) {
-      // Worst case (2 devices x up to 4 files) is 8 rules - reserve that
-      // many ids up front; buildBundleRedirectRules only consumes as many
-      // as it actually needs.
-      nextUniqueSessionRuleIds(BUNDLE_RULE_ID_START, SR_SPOOF_RULE_ID_START, 8, function (ruleIds) {
-        var built = buildBundleRedirectRules(indexerData, brandId, targetEnv, tabId, ruleIds);
+      // Reserve room for both target redirects and same-layer source-only
+      // entrypoint neutralizers.
+      nextUniqueSessionRuleIds(BUNDLE_RULE_ID_START, SR_SPOOF_RULE_ID_START, 21, function (ruleIds) {
+        var crossLayer = !!currentEnv && BUNDLE_ENV_LAYERS[currentEnv] !== BUNDLE_ENV_LAYERS[targetEnv];
+        var built = buildBundleRedirectRules(indexerData, layerIndexerData, brandId, targetEnv, tabId, ruleIds, crossLayer, currentEnv, pageOrigin);
         if (built.skippedNoBrand) { reject(new Error('Brand not found in ' + targetEnv + ' indexer.json')); return; }
         if (!built.rules.length) { reject(new Error('No bundle files found for this brand/env')); return; }
         chrome.declarativeNetRequest.updateSessionRules({
@@ -1519,6 +1792,8 @@ function stopBundleOverrideRule(tabId) {
         resolve();
       });
     });
+  }).then(function () {
+    return setBundleMfeOverrideFlag(tabId, null);
   });
 }
 
@@ -1541,17 +1816,48 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   if (!msg || msg.type !== 'lgt-bundle-start') return false;
   if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
   var tabId = sender.tab.id;
-  var targetEnv = msg.targetEnv, brandId = msg.brandId;
+  var targetEnv = msg.targetEnv, currentEnv = msg.currentEnv, brandId = msg.brandId;
   if (!targetEnv || !brandId) { sendResponse({ ok: false, error: 'missing targetEnv or brandId' }); return false; }
+  if (!BUNDLE_ENV_LAYERS[targetEnv]) { sendResponse({ ok: false, error: 'unknown target environment: ' + targetEnv }); return false; }
+  if (currentEnv && BUNDLE_ENV_LAYERS[currentEnv] !== BUNDLE_ENV_LAYERS[targetEnv]) {
+    if (!msg.labAuthorized) {
+      sendResponse({ ok: false, error: 'cross-layer bundle override requires an authorized Cross-Layer Lab session (' + currentEnv + ' -> ' + targetEnv + ')' });
+      return false;
+    }
+  }
   // Remember the exact URL the override was applied for (see the
   // stale-cleanup logic in chrome.webNavigation.onBeforeNavigate above,
   // and the comment on bundleExpectedUrlByTab above for why this is the
   // whole URL, not just the origin) - Bundle Override is meant to be tied
   // to one specific tested link, unlike the Sportradar-spoof/BLE-CORS
   // domain-wide fixes.
-  if (sender.tab.url) bundleExpectedUrlByTab[tabId] = sender.tab.url;
-  startBundleOverrideRule(tabId, targetEnv, brandId).then(function (result) {
-    sendResponse({ ok: true, ruleCount: result.ruleCount });
+  if (sender.tab.url) {
+    var expectedUrl = sender.tab.url;
+    if (msg.expectedUrl) {
+      try {
+        var currentPageUrl = new URL(sender.tab.url);
+        var requestedExpectedUrl = new URL(msg.expectedUrl);
+        // The content script only needs to add diagnostics query params to
+        // the current page. Do not let this message weaken stale-navigation
+        // cleanup by authorizing a different origin or pathname.
+        if (requestedExpectedUrl.origin !== currentPageUrl.origin || requestedExpectedUrl.pathname !== currentPageUrl.pathname) {
+          sendResponse({ ok: false, error: 'expected reload URL must keep the current origin and pathname' });
+          return false;
+        }
+        expectedUrl = requestedExpectedUrl.toString();
+      } catch (expectedUrlError) {
+        sendResponse({ ok: false, error: 'invalid expected reload URL' });
+        return false;
+      }
+    }
+    bundleExpectedUrlByTab[tabId] = expectedUrl;
+  }
+  var pageOrigin = null;
+  try { pageOrigin = sender.tab.url ? new URL(sender.tab.url).origin : null; } catch (pageOriginError) {}
+  startBundleOverrideRule(tabId, targetEnv, brandId, currentEnv, pageOrigin).then(function (result) {
+    return setBundleMfeOverrideFlag(tabId, targetEnv).then(function (flagResult) {
+      sendResponse({ ok: true, ruleCount: result.ruleCount, targetEnv: targetEnv, mfeFlag: flagResult });
+    });
   }).catch(function (err) {
     sendResponse({ ok: false, error: String(err && err.message || err) });
   });
@@ -1574,10 +1880,39 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   // map alone is unsafe after a service-worker restart) - resync the map
   // from whatever is actually still registered so later stop/reapply
   // calls stay consistent.
-  getOwnSessionRuleIdsForTab(tabId, BUNDLE_RULE_ID_START, SR_SPOOF_RULE_ID_START).then(function (liveIds) {
+  chrome.declarativeNetRequest.getSessionRules(function (allRules) {
+    var liveRules = (allRules || []).filter(function (rule) {
+      return rule.id >= BUNDLE_RULE_ID_START && rule.id < SR_SPOOF_RULE_ID_START &&
+        rule.condition && Array.isArray(rule.condition.tabIds) && rule.condition.tabIds.indexOf(tabId) !== -1;
+    });
+    var liveIds = liveRules.map(function (rule) { return rule.id; });
     if (liveIds.length) bundleRuleIdsByTab[tabId] = liveIds;
     else delete bundleRuleIdsByTab[tabId];
-    sendResponse({ ok: true, active: liveIds.length > 0, ruleCount: liveIds.length, matched: bundleMatchedByTab[tabId] || [] });
+    var targetEnvs = liveRules.map(function (rule) {
+      var redirectUrl = rule.action && rule.action.redirect && rule.action.redirect.url;
+      if (!redirectUrl) return null;
+      try { return envLabelFromHostname(new URL(redirectUrl).hostname); } catch (e) { return null; }
+    }).filter(function (env, index, values) { return env && values.indexOf(env) === index; });
+    sendResponse({
+      ok: true,
+      active: liveIds.length > 0,
+      ruleCount: liveIds.length,
+      matched: bundleMatchedByTab[tabId] || [],
+      targetEnv: targetEnvs.length === 1 ? targetEnvs[0] : null
+    });
+  });
+  return true;
+});
+
+// content.js calls this on every new document, independently of whether the
+// Link Gen Tool panel is open. Session DNR rules survive an MV3 service-worker
+// restart, while MAIN-world globals do not survive a page reload; deriving the
+// target from Chrome's live rules restores the compatibility flag reliably.
+chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+  if (!msg || msg.type !== 'lgt-bundle-sync-page-flag') return false;
+  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
+  syncBundleMfeOverrideFlag(sender.tab.id).then(function (result) {
+    sendResponse(result);
   });
   return true;
 });
@@ -1629,6 +1964,25 @@ function envLabelFromHostname(hostname) {
     if (hostname.indexOf('.' + e + '.') !== -1 || hostname.indexOf(e + '.') === 0) env = e;
   });
   return env;
+}
+
+// Resolve the environment of a dist-shape bundle from the artifact version
+// recorded in the URL, not from the hostname serving it. A real ALPHA brand
+// page can legitimately proxy a `/dist/prod/...` artifact through its own
+// `www.alpha.*` host; hostname-only detection therefore labels a PROD build
+// as ALPHA. Comparing the brand/device/version against both indexers in the
+// same layer identifies the build itself. Multiple matches are retained as
+// an honest "shared build" result instead of guessing.
+function resolveDistBundleEnvironments(hostEnv, brandId, device, version) {
+  var environments = bundleEnvironmentsInLayer(hostEnv);
+  return Promise.all(environments.map(function (environment) {
+    return fetchBundleIndexer(environment).then(function (indexerData) {
+      var deviceEntry = indexerData && indexerData[brandId] && indexerData[brandId][device];
+      return deviceEntry && String(deviceEntry.version) === String(version) ? environment : null;
+    }).catch(function () { return null; });
+  })).then(function (matches) {
+    return matches.filter(function (environment) { return !!environment; });
+  });
 }
 
 // Brand key -> GUID map, needed ONLY to restrict the reverse-lookup below
@@ -1764,7 +2118,10 @@ if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
 
     var m = BUNDLE_OBSERVE_RE.exec(details.url);
     if (m) {
-      bundleObservedByTab[details.tabId] = {
+      var observedTabId = details.tabId;
+      var observedUrl = details.url;
+      var observedHostEnv = envLabelFromHostname(hostname);
+      var observation = {
         shape: 'dist',
         // m[1] ("dist/<label>/") is NOT a reliable environment indicator on
         // its own - confirmed live 2026-08-10 that a brand's TEST site can
@@ -1782,10 +2139,24 @@ if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
         device: m[4],
         filePrefix: m[5],
         host: hostname,
-        hostEnv: envLabelFromHostname(hostname),
+        hostEnv: observedHostEnv,
+        artifactEnv: null,
+        artifactEnvs: [],
+        artifactResolutionPending: true,
         url: details.url,
         ts: Date.now()
       };
+      bundleObservedByTab[observedTabId] = observation;
+      resolveDistBundleEnvironments(observedHostEnv, observation.brandId, observation.device, observation.version).then(function (artifactEnvs) {
+        var current = bundleObservedByTab[observedTabId];
+        if (!current || current.shape !== 'dist' || current.url !== observedUrl) return;
+        current.artifactEnvs = artifactEnvs;
+        current.artifactEnv = artifactEnvs.length === 1 ? artifactEnvs[0] : null;
+        current.artifactResolutionPending = false;
+      }).catch(function () {
+        var current = bundleObservedByTab[observedTabId];
+        if (current && current.shape === 'dist' && current.url === observedUrl) current.artifactResolutionPending = false;
+      });
       return;
     }
 
