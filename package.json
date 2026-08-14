@@ -1,7 +1,7 @@
 {
   "name": "link-gen-tool",
   "private": true,
-  "version": "1.20.3",
+  "version": "1.20.4",
   "scripts": {
     "test": "node --test cross-layer-lab/test/*.test.cjs"
   },

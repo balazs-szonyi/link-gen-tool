@@ -411,7 +411,7 @@ running.
 
 ## Known limitations (Chrome extension)
 
-### Experimental Cross-Layer runtime (v1.20.3)
+### Experimental Cross-Layer runtime (v1.20.4)
 
 Cross-layer hybrid mode now runs directly in the current normal Chrome tab.
 There is no CLI, token, Playwright browser, separate profile, or manual binding.
@@ -435,13 +435,13 @@ selected bundle environment only during the tool script's synchronous startup
 calculation, then immediately restores the page's real startup context. This
 prevents PROD-host/TEST-bundle runs from being mislabeled as ALPHA.
 
+For the reverse BDE-bundle to BLE-backend direction, the tab-scoped adapter
+maps BDE's additional read-only `static-context` GET to BLE's supported
+`user-context` GET. The original context headers and identifiers are retained;
+mutating requests are not part of this translation.
+
 PROD place-bet is fail-closed in extension-only cross-layer mode. It is never
 submitted automatically.
-
-Known live limitation: NordicBet TEST host with a PROD bundle still returns
-HTTP 400 from the TEST `static-context` contract. That ordered pair is not
-declared supported until its request adapter is implemented; the other live
-smokes listed in the release validation remain unaffected.
 
 Run the offline contract/safety suite with `npm test`; the parameterized live
 normal-Chrome smoke remains in `cross-layer-lab/test-live-cross-layer.cjs`.

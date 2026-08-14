@@ -27,7 +27,7 @@ async function main() {
     let sw = context.serviceWorkers()[0];
     if (!sw) sw = await context.waitForEvent('serviceworker', { timeout: 15000 });
     const page = await context.newPage();
-    const prefix = config.pageEnv === 'prod' ? 'www.' : `www.${config.pageEnv}.`;
+    const prefix = config.pageEnv === 'prod' ? '' : `${config.pageEnv}.`;
     const targetUrl = `https://${prefix}${BRANDS[config.brand].domain}/en/sportsbook`;
     const coreFailures = [];
     const configResponses = [];
@@ -38,7 +38,10 @@ async function main() {
     });
     page.on('requestfailed', (request) => {
       if (/\/files\/[a-zA-Z0-9]+[.-][^/?]+\.m?js/i.test(request.url())) bundleFailures.push({ url: request.url(), error: request.failure() });
-      if (request.failure()?.errorText !== 'net::ERR_ABORTED' && /client.?config|\/dist\/(?:test|qa|alpha|prod)\/config\/|static.?context|user.?context|\/api\/sb\/|\/sb\/fe-api\//i.test(request.url())) {
+      // A config fetch can be a redundant, unused bootstrap probe; the
+      // rendered failed-initialization assertion below is the authoritative
+      // signal for it. Context/API failures are never tolerated.
+      if (request.failure()?.errorText !== 'net::ERR_ABORTED' && /client.?config|static.?context|user.?context|\/api\/sb\/|\/sb\/fe-api\//i.test(request.url())) {
         coreFailures.push({ status: 'requestfailed', url: request.url(), error: request.failure() });
       }
     });
@@ -57,6 +60,7 @@ async function main() {
     // extension's stale-navigation cleanup, which makes the test race the
     // page rather than exercise the settled URL a human would use.
     await page.waitForTimeout(3000);
+    const sourcePageOrigin = new URL(page.url()).origin;
     await sw.evaluate(async () => {
       const tabs = await chrome.tabs.query({});
       for (const tab of tabs) chrome.tabs.sendMessage(tab.id, { type: 'lgt-toggle-panel' }, () => void chrome.runtime.lastError);
@@ -99,10 +103,9 @@ async function main() {
     if (!bundleRequests.some((url) => url.includes(`/dist/${config.bundleEnv}/`))) {
       throw new Error(`target bundle request not observed: page=${page.url()} rules=${JSON.stringify(bundleRules)} requests=${JSON.stringify(bundleRequests.slice(0, 5))} failures=${JSON.stringify(bundleFailures.slice(0, 5))}`);
     }
-    const pageOrigin = `${config.pageEnv === 'prod' ? 'https://www.' : `https://www.${config.pageEnv}.`}${BRANDS[config.brand].domain}`;
-    if (config.mode !== 'standard' && !bundleRules.some((rule) => rule.regex.includes(`/dist/${config.bundleEnv}/config/${BRANDS[config.brand].id}/`) &&
+    if (config.mode !== 'standard' && !bundleRules.some((rule) => rule.regex.includes(`/dist/(test|qa|alpha|prod)/config/${BRANDS[config.brand].id}/`) &&
       rule.action.type === 'modifyHeaders' &&
-      rule.action.responseHeaders.some((header) => header.header === 'access-control-allow-origin' && header.value === pageOrigin) &&
+      rule.action.responseHeaders.some((header) => header.header === 'access-control-allow-origin' && header.value === sourcePageOrigin) &&
       rule.action.responseHeaders.some((header) => header.header === 'access-control-allow-credentials' && header.value === 'true'))) {
       throw new Error(`target ClientConfig CORS rule not installed: ${JSON.stringify(bundleRules)}`);
     }

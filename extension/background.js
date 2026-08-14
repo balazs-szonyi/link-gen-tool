@@ -1528,7 +1528,7 @@ function nextUniqueSessionRuleIds(startId, endIdExclusive, count, cb) {
 // widget is embedded via the real dist-shape URL (real brand domains, or
 // anything else that loads the widget the same way) - see the Bundle tab
 // hint text and README for the corresponding user-facing guidance.
-function buildBundleRedirectRules(indexerData, layerIndexerData, brandId, targetEnv, tabId, ruleIds, allowCrossOriginConfig, pageEnv) {
+function buildBundleRedirectRules(indexerData, layerIndexerData, brandId, targetEnv, tabId, ruleIds, allowCrossOriginConfig, pageEnv, pageOrigin) {
   var entry = indexerData && indexerData[brandId];
   if (!entry) return { rules: [], skippedNoBrand: true };
   var indexerOrigin = '';
@@ -1617,8 +1617,19 @@ function buildBundleRedirectRules(indexerData, layerIndexerData, brandId, target
     brandKey = key;
     return true;
   });
-  var targetConfigOrigin = allowCrossOriginConfig && brandKey ? realBrandOriginBg(brandKey, targetEnv) : null;
-  var pageConfigOrigin = allowCrossOriginConfig && brandKey && pageEnv ? realBrandOriginBg(brandKey, pageEnv) : null;
+  var targetConfigOrigin = null;
+  if (allowCrossOriginConfig && pageOrigin) {
+    try {
+      var targetOriginUrl = new URL(pageOrigin);
+      var targetOriginLabels = targetOriginUrl.hostname.split('.').filter(function (label) {
+        return ['test', 'qa', 'alpha'].indexOf(label) === -1;
+      });
+      if (targetEnv !== 'prod') targetOriginLabels.splice(Math.max(0, targetOriginLabels.length - 2), 0, targetEnv);
+      targetOriginUrl.hostname = targetOriginLabels.join('.');
+      targetConfigOrigin = targetOriginUrl.origin;
+    } catch (targetOriginError) {}
+  }
+  var pageConfigOrigin = allowCrossOriginConfig ? pageOrigin : null;
   sourceConfigEnvs.forEach(function (sourceConfigEnv) {
     if (idIdx >= ruleIds.length) return;
     rules.push({
@@ -1659,7 +1670,31 @@ function buildBundleRedirectRules(indexerData, layerIndexerData, brandId, target
         ]
       },
       condition: {
-        regexFilter: '^https?://[^/]+/dist/' + targetEnv + '/config/' + brandId + '/.*',
+        // Match the original source config URL as well as the post-redirect
+        // target URL. DNR response-header evaluation can retain the original
+        // request match after our separate redirect action.
+        regexFilter: '^https?://[^/]+/dist/(test|qa|alpha|prod)/config/' + brandId + '/.*',
+        resourceTypes: ['xmlhttprequest'],
+        tabIds: [tabId]
+      }
+    });
+  }
+
+  // BDE bundles (ALPHA/PROD) issue a separate static-context GET. BLE
+  // backends (TEST/QA) reject that route with HTTP 400 even though the same
+  // context identifiers succeed against BLE's user-context route. Translate
+  // only this read-only contract in the BDE-bundle -> BLE-backend direction;
+  // request headers and context IDs remain untouched.
+  if (allowCrossOriginConfig && BUNDLE_ENV_LAYERS[targetEnv] === 'bde' && BUNDLE_ENV_LAYERS[pageEnv] === 'ble' && idIdx < ruleIds.length) {
+    rules.push({
+      id: ruleIds[idIdx++],
+      priority: 2,
+      action: {
+        type: 'redirect',
+        redirect: { regexSubstitution: regexCapture + '1user-context' + regexCapture + '2' }
+      },
+      condition: {
+        regexFilter: '^(https?://[^/]+/sb/fe-api/v1/)static-context([?].*)?$',
         resourceTypes: ['xmlhttprequest'],
         tabIds: [tabId]
       }
@@ -1668,7 +1703,7 @@ function buildBundleRedirectRules(indexerData, layerIndexerData, brandId, target
   return { rules: rules, skippedNoBrand: false };
 }
 
-function startBundleOverrideRule(tabId, targetEnv, brandId, currentEnv) {
+function startBundleOverrideRule(tabId, targetEnv, brandId, currentEnv, pageOrigin) {
   var previousRuleIds = bundleRuleIdsByTab[tabId]; // swap atomically, same
   // reasoning as the other three declarativeNetRequest features above -
   // re-applying (e.g. switching target env without disabling first) must
@@ -1693,9 +1728,9 @@ function startBundleOverrideRule(tabId, targetEnv, brandId, currentEnv) {
     return new Promise(function (resolve, reject) {
       // Reserve room for both target redirects and same-layer source-only
       // entrypoint neutralizers.
-      nextUniqueSessionRuleIds(BUNDLE_RULE_ID_START, SR_SPOOF_RULE_ID_START, 19, function (ruleIds) {
+      nextUniqueSessionRuleIds(BUNDLE_RULE_ID_START, SR_SPOOF_RULE_ID_START, 20, function (ruleIds) {
         var crossLayer = !!currentEnv && BUNDLE_ENV_LAYERS[currentEnv] !== BUNDLE_ENV_LAYERS[targetEnv];
-        var built = buildBundleRedirectRules(indexerData, layerIndexerData, brandId, targetEnv, tabId, ruleIds, crossLayer, currentEnv);
+        var built = buildBundleRedirectRules(indexerData, layerIndexerData, brandId, targetEnv, tabId, ruleIds, crossLayer, currentEnv, pageOrigin);
         if (built.skippedNoBrand) { reject(new Error('Brand not found in ' + targetEnv + ' indexer.json')); return; }
         if (!built.rules.length) { reject(new Error('No bundle files found for this brand/env')); return; }
         chrome.declarativeNetRequest.updateSessionRules({
@@ -1790,7 +1825,9 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
     }
     bundleExpectedUrlByTab[tabId] = expectedUrl;
   }
-  startBundleOverrideRule(tabId, targetEnv, brandId, currentEnv).then(function (result) {
+  var pageOrigin = null;
+  try { pageOrigin = sender.tab.url ? new URL(sender.tab.url).origin : null; } catch (pageOriginError) {}
+  startBundleOverrideRule(tabId, targetEnv, brandId, currentEnv, pageOrigin).then(function (result) {
     return setBundleMfeOverrideFlag(tabId, targetEnv).then(function (flagResult) {
       sendResponse({ ok: true, ruleCount: result.ruleCount, targetEnv: targetEnv, mfeFlag: flagResult });
     });
