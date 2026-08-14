@@ -1700,6 +1700,33 @@ function buildBundleRedirectRules(indexerData, layerIndexerData, brandId, target
       }
     });
   }
+
+  // Target ClientConfig can contain an absolute SSTP health endpoint for the
+  // bundle environment. In hybrid mode that makes a harmless GET cross origin
+  // (for example TEST host -> www.betsson.com/sstp/healthy), which the target
+  // server answers without CORS headers and Chrome consequently rejects. The
+  // page host does not necessarily expose the same endpoint, so retain the
+  // target health probe and grant only this tab's exact page origin access to
+  // its response. No other SSTP route or method is eligible.
+  if (allowCrossOriginConfig && targetConfigOrigin && pageOrigin && targetConfigOrigin !== pageOrigin && idIdx < ruleIds.length) {
+    rules.push({
+      id: ruleIds[idIdx++],
+      priority: 2,
+      action: {
+        type: 'modifyHeaders',
+        responseHeaders: [
+          { header: 'access-control-allow-origin', operation: 'set', value: pageOrigin },
+          { header: 'access-control-allow-credentials', operation: 'set', value: 'true' }
+        ]
+      },
+      condition: {
+        regexFilter: '^' + escapeRegexLiteral(targetConfigOrigin) + '/sstp/healthy([?].*)?$',
+        requestMethods: ['get'],
+        resourceTypes: ['xmlhttprequest'],
+        tabIds: [tabId]
+      }
+    });
+  }
   return { rules: rules, skippedNoBrand: false };
 }
 
@@ -1728,7 +1755,7 @@ function startBundleOverrideRule(tabId, targetEnv, brandId, currentEnv, pageOrig
     return new Promise(function (resolve, reject) {
       // Reserve room for both target redirects and same-layer source-only
       // entrypoint neutralizers.
-      nextUniqueSessionRuleIds(BUNDLE_RULE_ID_START, SR_SPOOF_RULE_ID_START, 20, function (ruleIds) {
+      nextUniqueSessionRuleIds(BUNDLE_RULE_ID_START, SR_SPOOF_RULE_ID_START, 21, function (ruleIds) {
         var crossLayer = !!currentEnv && BUNDLE_ENV_LAYERS[currentEnv] !== BUNDLE_ENV_LAYERS[targetEnv];
         var built = buildBundleRedirectRules(indexerData, layerIndexerData, brandId, targetEnv, tabId, ruleIds, crossLayer, currentEnv, pageOrigin);
         if (built.skippedNoBrand) { reject(new Error('Brand not found in ' + targetEnv + ' indexer.json')); return; }

@@ -411,7 +411,7 @@ running.
 
 ## Known limitations (Chrome extension)
 
-### Experimental Cross-Layer runtime (v1.20.4)
+### Experimental Cross-Layer runtime (v1.20.5)
 
 Cross-layer hybrid mode now runs directly in the current normal Chrome tab.
 There is no CLI, token, Playwright browser, separate profile, or manual binding.
@@ -439,6 +439,11 @@ For the reverse BDE-bundle to BLE-backend direction, the tab-scoped adapter
 maps BDE's additional read-only `static-context` GET to BLE's supported
 `user-context` GET. The original context headers and identifiers are retained;
 mutating requests are not part of this translation.
+
+When a target ClientConfig contains an absolute environment-specific SSTP
+health URL, hybrid mode grants the page's exact origin CORS access only to the
+target's `GET /sstp/healthy` response. The rule is tab-scoped and deliberately
+excludes every other SSTP route and every mutating method.
 
 PROD place-bet is fail-closed in extension-only cross-layer mode. It is never
 submitted automatically.

@@ -33,11 +33,14 @@ async function main() {
     const configResponses = [];
     const bundleRequests = [];
     const bundleFailures = [];
+    const sstpFailures = [];
+    const sstpResponses = [];
     page.on('request', (request) => {
       if (/\/files\/[a-zA-Z0-9]+[.-][^/?]+\.m?js/i.test(request.url())) bundleRequests.push(request.url());
     });
     page.on('requestfailed', (request) => {
       if (/\/files\/[a-zA-Z0-9]+[.-][^/?]+\.m?js/i.test(request.url())) bundleFailures.push({ url: request.url(), error: request.failure() });
+      if (/\/sstp\/healthy(?:\?|$)/i.test(request.url())) sstpFailures.push({ url: request.url(), error: request.failure() });
       // A config fetch can be a redundant, unused bootstrap probe; the
       // rendered failed-initialization assertion below is the authoritative
       // signal for it. Context/API failures are never tolerated.
@@ -46,6 +49,9 @@ async function main() {
       }
     });
     page.on('response', (response) => {
+      if (/\/sstp\/healthy(?:\?|$)/i.test(response.url())) {
+        sstpResponses.push({ status: response.status(), url: response.url() });
+      }
       if (/\/dist\/(?:test|qa|alpha|prod)\/config\//i.test(response.url())) {
         configResponses.push({ status: response.status(), url: response.url() });
       }
@@ -82,6 +88,8 @@ async function main() {
       bundleFailures.length = 0;
       coreFailures.length = 0;
       configResponses.length = 0;
+      sstpFailures.length = 0;
+      sstpResponses.length = 0;
     };
     page.on('framenavigated', clearAtReload);
     const navigation = page.waitForEvent('domcontentloaded', { timeout: 30000 });
@@ -99,7 +107,7 @@ async function main() {
     }
     const bundleRules = await sw.evaluate(async () => (await chrome.declarativeNetRequest.getSessionRules())
       .filter((rule) => rule.id >= 930001 && rule.id < 950001)
-      .map((rule) => ({ regex: rule.condition.regexFilter, action: rule.action })));
+      .map((rule) => ({ regex: rule.condition.regexFilter, requestMethods: rule.condition.requestMethods, action: rule.action })));
     if (!bundleRequests.some((url) => url.includes(`/dist/${config.bundleEnv}/`))) {
       throw new Error(`target bundle request not observed: page=${page.url()} rules=${JSON.stringify(bundleRules)} requests=${JSON.stringify(bundleRequests.slice(0, 5))} failures=${JSON.stringify(bundleFailures.slice(0, 5))}`);
     }
@@ -109,13 +117,26 @@ async function main() {
       rule.action.responseHeaders.some((header) => header.header === 'access-control-allow-credentials' && header.value === 'true'))) {
       throw new Error(`target ClientConfig CORS rule not installed: ${JSON.stringify(bundleRules)}`);
     }
+    if (config.mode !== 'standard' && !bundleRules.some((rule) => rule.regex.includes('/sstp/healthy') &&
+      rule.requestMethods?.length === 1 && rule.requestMethods[0] === 'get' &&
+      rule.action.type === 'modifyHeaders' &&
+      rule.action.responseHeaders?.some((header) => header.header === 'access-control-allow-origin' && header.value === sourcePageOrigin) &&
+      rule.action.responseHeaders?.some((header) => header.header === 'access-control-allow-credentials' && header.value === 'true'))) {
+      throw new Error(`hybrid SSTP health CORS rule not installed: ${JSON.stringify(bundleRules)}`);
+    }
     if (configResponses.length && !configResponses.some((response) => response.status < 400 && response.url.includes(`/dist/${config.bundleEnv}/config/`))) {
       throw new Error(`successful target ClientConfig response not observed: responses=${JSON.stringify(configResponses)} rules=${JSON.stringify(bundleRules)}`);
     }
     if (coreFailures.length) throw new Error(`core request failures: ${JSON.stringify(coreFailures)}`);
-    if ((await page.locator('body').innerText()).includes('Failed to initialize Sportsbook')) {
+    if (config.mode !== 'standard' && sstpFailures.length) throw new Error(`SSTP health request failures: ${JSON.stringify(sstpFailures)}`);
+    if (config.mode !== 'standard' && sstpResponses.length && !sstpResponses.some((response) => response.status < 400 && /\/sstp\/healthy(?:\?|$)/i.test(response.url))) {
+      throw new Error(`successful target SSTP health response not observed: ${JSON.stringify(sstpResponses)}`);
+    }
+    const bodyText = await page.locator('body').innerText();
+    if (bodyText.includes('Failed to initialize Sportsbook')) {
       throw new Error('Sportsbook rendered its failed-initialization state');
     }
+    if (bodyText.includes('Failed to fetch')) throw new Error('Sportsbook rendered Failed to fetch');
     if (config.mode !== 'standard') {
       const startupEnvironmentBeforeTool = await page.evaluate(() => window.sbMfeStartupContext?.appContext?.environment);
       await page.evaluate(() => new Promise((resolve, reject) => {
