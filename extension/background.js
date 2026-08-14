@@ -1528,7 +1528,7 @@ function nextUniqueSessionRuleIds(startId, endIdExclusive, count, cb) {
 // widget is embedded via the real dist-shape URL (real brand domains, or
 // anything else that loads the widget the same way) - see the Bundle tab
 // hint text and README for the corresponding user-facing guidance.
-function buildBundleRedirectRules(indexerData, layerIndexerData, brandId, targetEnv, tabId, ruleIds, allowCrossOriginConfig) {
+function buildBundleRedirectRules(indexerData, layerIndexerData, brandId, targetEnv, tabId, ruleIds, allowCrossOriginConfig, pageEnv) {
   var entry = indexerData && indexerData[brandId];
   if (!entry) return { rules: [], skippedNoBrand: true };
   var indexerOrigin = '';
@@ -1618,6 +1618,7 @@ function buildBundleRedirectRules(indexerData, layerIndexerData, brandId, target
     return true;
   });
   var targetConfigOrigin = allowCrossOriginConfig && brandKey ? realBrandOriginBg(brandKey, targetEnv) : null;
+  var pageConfigOrigin = allowCrossOriginConfig && brandKey && pageEnv ? realBrandOriginBg(brandKey, pageEnv) : null;
   sourceConfigEnvs.forEach(function (sourceConfigEnv) {
     if (idIdx >= ruleIds.length) return;
     rules.push({
@@ -1653,7 +1654,8 @@ function buildBundleRedirectRules(indexerData, layerIndexerData, brandId, target
       action: {
         type: 'modifyHeaders',
         responseHeaders: [
-          { header: 'access-control-allow-origin', operation: 'set', value: '*' }
+          { header: 'access-control-allow-origin', operation: 'set', value: pageConfigOrigin || '*' },
+          { header: 'access-control-allow-credentials', operation: 'set', value: 'true' }
         ]
       },
       condition: {
@@ -1693,7 +1695,7 @@ function startBundleOverrideRule(tabId, targetEnv, brandId, currentEnv) {
       // entrypoint neutralizers.
       nextUniqueSessionRuleIds(BUNDLE_RULE_ID_START, SR_SPOOF_RULE_ID_START, 19, function (ruleIds) {
         var crossLayer = !!currentEnv && BUNDLE_ENV_LAYERS[currentEnv] !== BUNDLE_ENV_LAYERS[targetEnv];
-        var built = buildBundleRedirectRules(indexerData, layerIndexerData, brandId, targetEnv, tabId, ruleIds, crossLayer);
+        var built = buildBundleRedirectRules(indexerData, layerIndexerData, brandId, targetEnv, tabId, ruleIds, crossLayer, currentEnv);
         if (built.skippedNoBrand) { reject(new Error('Brand not found in ' + targetEnv + ' indexer.json')); return; }
         if (!built.rules.length) { reject(new Error('No bundle files found for this brand/env')); return; }
         chrome.declarativeNetRequest.updateSessionRules({

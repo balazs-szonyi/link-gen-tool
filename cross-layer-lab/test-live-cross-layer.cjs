@@ -99,8 +99,11 @@ async function main() {
     if (!bundleRequests.some((url) => url.includes(`/dist/${config.bundleEnv}/`))) {
       throw new Error(`target bundle request not observed: page=${page.url()} rules=${JSON.stringify(bundleRules)} requests=${JSON.stringify(bundleRequests.slice(0, 5))} failures=${JSON.stringify(bundleFailures.slice(0, 5))}`);
     }
+    const pageOrigin = `${config.pageEnv === 'prod' ? 'https://www.' : `https://www.${config.pageEnv}.`}${BRANDS[config.brand].domain}`;
     if (config.mode !== 'standard' && !bundleRules.some((rule) => rule.regex.includes(`/dist/${config.bundleEnv}/config/${BRANDS[config.brand].id}/`) &&
-      rule.action.type === 'modifyHeaders' && rule.action.responseHeaders.some((header) => header.header === 'access-control-allow-origin' && header.value === '*'))) {
+      rule.action.type === 'modifyHeaders' &&
+      rule.action.responseHeaders.some((header) => header.header === 'access-control-allow-origin' && header.value === pageOrigin) &&
+      rule.action.responseHeaders.some((header) => header.header === 'access-control-allow-credentials' && header.value === 'true'))) {
       throw new Error(`target ClientConfig CORS rule not installed: ${JSON.stringify(bundleRules)}`);
     }
     if (configResponses.length && !configResponses.some((response) => response.status < 400 && response.url.includes(`/dist/${config.bundleEnv}/config/`))) {
@@ -109,6 +112,26 @@ async function main() {
     if (coreFailures.length) throw new Error(`core request failures: ${JSON.stringify(coreFailures)}`);
     if ((await page.locator('body').innerText()).includes('Failed to initialize Sportsbook')) {
       throw new Error('Sportsbook rendered its failed-initialization state');
+    }
+    if (config.mode !== 'standard') {
+      const startupEnvironmentBeforeTool = await page.evaluate(() => window.sbMfeStartupContext?.appContext?.environment);
+      await page.evaluate(() => new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.id = 'sportsbookToolScript';
+        script.src = 'https://betssongroup.github.io/sportsbook/qa/sportsbook-tool/sportsbookTool.min.js';
+        script.onload = resolve;
+        script.onerror = () => reject(new Error('Sportsbook Tool script failed to load'));
+        document.head.appendChild(script);
+      }));
+      const reportedEnvironment = (await page.locator('#environment').textContent({ timeout: 15000 })).trim();
+      if (reportedEnvironment !== config.bundleEnv.toUpperCase()) {
+        throw new Error(`Sportsbook Tool environment mismatch: expected ${config.bundleEnv.toUpperCase()}, got ${reportedEnvironment}`);
+      }
+      await page.waitForTimeout(50);
+      const startupEnvironmentAfterTool = await page.evaluate(() => window.sbMfeStartupContext?.appContext?.environment);
+      if (startupEnvironmentAfterTool !== startupEnvironmentBeforeTool) {
+        throw new Error(`Sportsbook Tool compatibility context was not restored: before=${startupEnvironmentBeforeTool} after=${startupEnvironmentAfterTool}`);
+      }
     }
     console.log(`PASS Host=${config.pageEnv.toUpperCase()} Bundle=${config.bundleEnv.toUpperCase()} Backend=${expectedBackendEnv.toUpperCase()} (normal Chrome runtime)`);
   } finally { await context.close(); }

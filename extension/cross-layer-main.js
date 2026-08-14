@@ -8,8 +8,22 @@
   var config;
   try { config = JSON.parse(raw); } catch (e) { return; }
   if (!config || !config.enabled || !config.expectedUrl) return;
-  function canonical(url) { return String(url || '').replace(/\/$/, ''); }
-  if (canonical(location.href) !== canonical(config.expectedUrl)) return;
+  function sameConfiguredPage(actualValue, expectedValue) {
+    try {
+      var actual = new URL(actualValue);
+      var expected = new URL(expectedValue);
+      var normalizePath = function (path) { return path.length > 1 ? path.replace(/\/$/, '') : path; };
+      if (actual.origin !== expected.origin || normalizePath(actual.pathname) !== normalizePath(expected.pathname) || actual.hash !== expected.hash) return false;
+      ['exposeObgState', 'exposeObgRt', 'sealStore'].forEach(function (key) {
+        actual.searchParams.delete(key);
+        expected.searchParams.delete(key);
+      });
+      actual.searchParams.sort();
+      expected.searchParams.sort();
+      return actual.search === expected.search;
+    } catch (e) { return false; }
+  }
+  if (!sameConfiguredPage(location.href, config.expectedUrl)) return;
 
   var ENV_LABELS = ['test', 'qa', 'alpha'];
   var ENDPOINT_KEY = /(url|uri|endpoint|host|origin|api|auth|wallet|realtime|signalr)/i;
@@ -54,6 +68,50 @@
     if (kind === 'config' && config.mode === 'hybrid') return rewriteTree(value, config.backendEnv);
     return value;
   }
+
+  // Sportsbook Tool <= v1.6.166 only understands same-layer overrides. Its
+  // startup calculation maps PROD+override to ALPHA and QA+override to TEST,
+  // so a real PROD-host/TEST-bundle cross-layer run is mislabeled ALPHA.
+  // Present a target-compatible startup value only while that external tool
+  // script initializes (it snapshots the environment synchronously), then
+  // restore the real runtime objects immediately after load. The sportsbook
+  // itself therefore never remains on the compatibility value.
+  var nativeAppendChild = Node.prototype.appendChild;
+  Node.prototype.appendChild = function (child) {
+    var isSportsbookTool = child && child.nodeType === 1 && child.tagName === 'SCRIPT' &&
+      (child.id === 'sportsbookToolScript' || /sportsbookTool(?:\.min)?\.js/i.test(child.src || ''));
+    if (!isSportsbookTool) return nativeAppendChild.call(this, child);
+
+    var context = window.sbMfeStartupContext && window.sbMfeStartupContext.appContext;
+    var originalEnvironment = context && context.environment;
+    var hadOverrideFlag = Object.prototype.hasOwnProperty.call(window, 'xSbIsMfeOverrideApplied');
+    var originalOverrideFlag = window.xSbIsMfeOverrideApplied;
+    var compatibilityBase = { test: 'qa', alpha: 'prod', qa: 'qa', prod: 'prod' }[config.bundleEnv];
+    var compatibilityFlag = config.bundleEnv === 'test' || config.bundleEnv === 'alpha';
+    var restored = false;
+    function restoreSportsbookToolCompatibility() {
+      if (restored) return;
+      restored = true;
+      try { if (context) context.environment = originalEnvironment; } catch (e) {}
+      try {
+        if (hadOverrideFlag) window.xSbIsMfeOverrideApplied = originalOverrideFlag;
+        else delete window.xSbIsMfeOverrideApplied;
+      } catch (e) {}
+    }
+    try {
+      if (context && compatibilityBase) context.environment = compatibilityBase;
+      window.xSbIsMfeOverrideApplied = compatibilityFlag;
+      child.addEventListener('load', function () { setTimeout(restoreSportsbookToolCompatibility, 0); }, { once: true });
+      child.addEventListener('error', restoreSportsbookToolCompatibility, { once: true });
+      var result = nativeAppendChild.call(this, child);
+      setTimeout(restoreSportsbookToolCompatibility, 10000);
+      return result;
+    } catch (e) {
+      restoreSportsbookToolCompatibility();
+      throw e;
+    }
+  };
+  window.__lgtSportsbookToolEnvironment = config.bundleEnv;
 
   var nativeFetch = window.fetch;
   window.fetch = function (input, init) {

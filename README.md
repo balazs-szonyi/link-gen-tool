@@ -411,7 +411,7 @@ running.
 
 ## Known limitations (Chrome extension)
 
-### Experimental Cross-Layer runtime (v1.20.2)
+### Experimental Cross-Layer runtime (v1.20.3)
 
 Cross-layer hybrid mode now runs directly in the current normal Chrome tab.
 There is no CLI, token, Playwright browser, separate profile, or manual binding.
@@ -430,6 +430,10 @@ until target static/user-context bootstrap is available extension-native.
 Bundle Apply preserves the current link and adds
 `exposeObgState=true&exposeObgRt=true&sealStore=false` before reloading, so
 the runtime diagnostics remain available on the resulting page.
+For Sportsbook Tool v1.6.166 compatibility, cross-layer mode supplies the
+selected bundle environment only during the tool script's synchronous startup
+calculation, then immediately restores the page's real startup context. This
+prevents PROD-host/TEST-bundle runs from being mislabeled as ALPHA.
 
 PROD place-bet is fail-closed in extension-only cross-layer mode. It is never
 submitted automatically.
