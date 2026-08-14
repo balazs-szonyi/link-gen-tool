@@ -33,6 +33,36 @@
   // truth: bump manifest.json's "version" on every release and the
   // panel title always matches it.
   var VERSION = 'v' + chrome.runtime.getManifest().version;
+  var BUNDLE_DIAGNOSTICS_KEY = '__lgtBundleDiagnosticsV1';
+
+  // Brand shells may normalize the address bar after bootstrap and remove
+  // diagnostics parameters even though they were present on the actual
+  // navigation request. Restore them without another reload, but only for
+  // the exact origin+path where Bundle Apply stored the marker. A real page
+  // navigation therefore cannot leak these parameters onto another route.
+  function restoreBundleDiagnosticsParams() {
+    var raw;
+    try { raw = sessionStorage.getItem(BUNDLE_DIAGNOSTICS_KEY); } catch (e) { return; }
+    if (!raw) return;
+    try {
+      var marker = JSON.parse(raw);
+      var expected = new URL(marker.expectedUrl);
+      var normalizePath = function (path) { return path.length > 1 ? path.replace(/\/$/, '') : path; };
+      if (expected.origin !== location.origin || normalizePath(expected.pathname) !== normalizePath(location.pathname)) {
+        sessionStorage.removeItem(BUNDLE_DIAGNOSTICS_KEY);
+        return;
+      }
+      var current = new URL(location.href);
+      current.searchParams.set('exposeObgState', 'true');
+      current.searchParams.set('exposeObgRt', 'true');
+      current.searchParams.set('sealStore', 'false');
+      if (current.toString() !== location.href) history.replaceState(history.state, '', current.toString());
+    } catch (e) {
+      try { sessionStorage.removeItem(BUNDLE_DIAGNOSTICS_KEY); } catch (ignored) {}
+    }
+  }
+  restoreBundleDiagnosticsParams();
+  [500, 2000, 5000].forEach(function (delay) { setTimeout(restoreBundleDiagnosticsParams, delay); });
 
   // A Bundle Override's DNR rules survive the Apply-triggered reload, but
   // page globals do not. Ask the service worker to restore the MAIN-world
@@ -3102,19 +3132,33 @@
         if (!brandGuid) { status.textContent = 'Unknown brand.'; return; }
         if (!targetEnv) { status.textContent = 'Could not determine a same-layer target environment.'; return; }
         status.textContent = 'Applying...';
+        var reloadUrl = new URL(location.href);
+        reloadUrl.searchParams.set('exposeObgState', 'true');
+        reloadUrl.searchParams.set('exposeObgRt', 'true');
+        reloadUrl.searchParams.set('sealStore', 'false');
+        reloadUrl = reloadUrl.toString();
+        try { sessionStorage.setItem(BUNDLE_DIAGNOSTICS_KEY, JSON.stringify({ expectedUrl: reloadUrl })); }
+        catch (diagnosticsStorageError) {
+          status.textContent = 'Failed to prepare diagnostic URL: ' + diagnosticsStorageError.message;
+          return;
+        }
         function startBundle(labAuthorized) {
-          chrome.runtime.sendMessage({ type: 'lgt-bundle-start', currentEnv: curEnvSel.value, targetEnv: targetEnv, brandId: brandGuid, labAuthorized: !!labAuthorized }, function (res) {
+          chrome.runtime.sendMessage({ type: 'lgt-bundle-start', currentEnv: curEnvSel.value, targetEnv: targetEnv, brandId: brandGuid, labAuthorized: !!labAuthorized, expectedUrl: reloadUrl }, function (res) {
             void chrome.runtime.lastError;
-            if (!res || !res.ok) { status.textContent = 'Failed: ' + ((res && res.error) || 'unknown error'); return; }
+            if (!res || !res.ok) {
+              try { sessionStorage.removeItem(BUNDLE_DIAGNOSTICS_KEY); } catch (e) {}
+              status.textContent = 'Failed: ' + ((res && res.error) || 'unknown error');
+              return;
+            }
             status.textContent = 'Active -> ' + targetEnv.toUpperCase() + ' (' + res.ruleCount + ' rule(s) applied) - reloading page...';
-            setTimeout(function () { location.reload(); }, 150);
+            setTimeout(function () { location.href = reloadUrl; }, 150);
           });
         }
         if (modeSel.value === 'standard') { startBundle(false); return; }
         var backendEnv = modeSel.value === 'full-runtime' ? targetEnv : curEnvSel.value;
         try {
           sessionStorage.setItem('__lgtCrossLayerRuntimeV1', JSON.stringify({
-            enabled: true, expectedUrl: location.href, brand: brand,
+            enabled: true, expectedUrl: reloadUrl, brand: brand,
             pageEnv: curEnvSel.value, bundleEnv: targetEnv,
             backendEnv: backendEnv, mode: modeSel.value, device: deviceSel.value
           }));
@@ -3133,6 +3177,7 @@
           status.textContent = 'Not active on this tab.';
         });
         try { sessionStorage.removeItem('__lgtCrossLayerRuntimeV1'); } catch (e) {}
+        try { sessionStorage.removeItem(BUNDLE_DIAGNOSTICS_KEY); } catch (e) {}
       }
     }, ['Disable']);
 

@@ -69,7 +69,7 @@ async function main() {
     await selects.nth(1).selectOption(config.pageEnv);
     await selects.nth(3).selectOption(config.mode);
     await selects.nth(2).selectOption(config.bundleEnv);
-    await selects.nth(4).selectOption(config.device);
+    if (config.mode !== 'standard') await selects.nth(4).selectOption(config.device);
     bundleRequests.length = 0; coreFailures.length = 0;
     const clearAtReload = (frame) => {
       if (frame !== page.mainFrame()) return;
@@ -84,8 +84,13 @@ async function main() {
     await panel.getByRole('button', { name: 'Apply', exact: true }).click();
     await navigation;
     await page.waitForTimeout(8000);
+    const finalUrl = new URL(page.url());
+    if (finalUrl.searchParams.get('exposeObgState') !== 'true' || finalUrl.searchParams.get('exposeObgRt') !== 'true' || finalUrl.searchParams.get('sealStore') !== 'false') {
+      throw new Error(`diagnostic query parameters missing after Apply: ${finalUrl}`);
+    }
     const runtime = await page.evaluate(() => window.__lgtCrossLayerRuntimeActive);
-    if (!runtime || runtime.bundleEnv !== config.bundleEnv || runtime.backendEnv !== (config.mode === 'hybrid' ? config.pageEnv : config.bundleEnv)) {
+    const expectedBackendEnv = config.mode === 'hybrid' || config.mode === 'standard' ? config.pageEnv : config.bundleEnv;
+    if (config.mode !== 'standard' && (!runtime || runtime.bundleEnv !== config.bundleEnv || runtime.backendEnv !== expectedBackendEnv)) {
       throw new Error(`MAIN-world runtime mismatch: ${JSON.stringify(runtime)}`);
     }
     const bundleRules = await sw.evaluate(async () => (await chrome.declarativeNetRequest.getSessionRules())
@@ -94,7 +99,7 @@ async function main() {
     if (!bundleRequests.some((url) => url.includes(`/dist/${config.bundleEnv}/`))) {
       throw new Error(`target bundle request not observed: page=${page.url()} rules=${JSON.stringify(bundleRules)} requests=${JSON.stringify(bundleRequests.slice(0, 5))} failures=${JSON.stringify(bundleFailures.slice(0, 5))}`);
     }
-    if (!bundleRules.some((rule) => rule.regex.includes(`/dist/${config.bundleEnv}/config/${BRANDS[config.brand].id}/`) &&
+    if (config.mode !== 'standard' && !bundleRules.some((rule) => rule.regex.includes(`/dist/${config.bundleEnv}/config/${BRANDS[config.brand].id}/`) &&
       rule.action.type === 'modifyHeaders' && rule.action.responseHeaders.some((header) => header.header === 'access-control-allow-origin' && header.value === '*'))) {
       throw new Error(`target ClientConfig CORS rule not installed: ${JSON.stringify(bundleRules)}`);
     }
@@ -105,7 +110,7 @@ async function main() {
     if ((await page.locator('body').innerText()).includes('Failed to initialize Sportsbook')) {
       throw new Error('Sportsbook rendered its failed-initialization state');
     }
-    console.log(`PASS Host=${config.pageEnv.toUpperCase()} Bundle=${config.bundleEnv.toUpperCase()} Backend=${runtime.backendEnv.toUpperCase()} (normal Chrome runtime)`);
+    console.log(`PASS Host=${config.pageEnv.toUpperCase()} Bundle=${config.bundleEnv.toUpperCase()} Backend=${expectedBackendEnv.toUpperCase()} (normal Chrome runtime)`);
   } finally { await context.close(); }
 }
 

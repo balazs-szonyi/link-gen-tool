@@ -1767,7 +1767,27 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   // whole URL, not just the origin) - Bundle Override is meant to be tied
   // to one specific tested link, unlike the Sportradar-spoof/BLE-CORS
   // domain-wide fixes.
-  if (sender.tab.url) bundleExpectedUrlByTab[tabId] = sender.tab.url;
+  if (sender.tab.url) {
+    var expectedUrl = sender.tab.url;
+    if (msg.expectedUrl) {
+      try {
+        var currentPageUrl = new URL(sender.tab.url);
+        var requestedExpectedUrl = new URL(msg.expectedUrl);
+        // The content script only needs to add diagnostics query params to
+        // the current page. Do not let this message weaken stale-navigation
+        // cleanup by authorizing a different origin or pathname.
+        if (requestedExpectedUrl.origin !== currentPageUrl.origin || requestedExpectedUrl.pathname !== currentPageUrl.pathname) {
+          sendResponse({ ok: false, error: 'expected reload URL must keep the current origin and pathname' });
+          return false;
+        }
+        expectedUrl = requestedExpectedUrl.toString();
+      } catch (expectedUrlError) {
+        sendResponse({ ok: false, error: 'invalid expected reload URL' });
+        return false;
+      }
+    }
+    bundleExpectedUrlByTab[tabId] = expectedUrl;
+  }
   startBundleOverrideRule(tabId, targetEnv, brandId, currentEnv).then(function (result) {
     return setBundleMfeOverrideFlag(tabId, targetEnv).then(function (flagResult) {
       sendResponse({ ok: true, ruleCount: result.ruleCount, targetEnv: targetEnv, mfeFlag: flagResult });

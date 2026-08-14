@@ -411,7 +411,7 @@ running.
 
 ## Known limitations (Chrome extension)
 
-### Experimental Cross-Layer runtime (v1.20.1)
+### Experimental Cross-Layer runtime (v1.20.2)
 
 Cross-layer hybrid mode now runs directly in the current normal Chrome tab.
 There is no CLI, token, Playwright browser, separate profile, or manual binding.
@@ -427,6 +427,9 @@ Select `hybrid`, the target bundle and device, then Apply. The tab displays
 this is the primary environment diagnostic for cross-layer runs. `hybrid` keeps
 the page backend while loading the target bundle. `full-runtime` is disabled
 until target static/user-context bootstrap is available extension-native.
+Bundle Apply preserves the current link and adds
+`exposeObgState=true&exposeObgRt=true&sealStore=false` before reloading, so
+the runtime diagnostics remain available on the resulting page.
 
 PROD place-bet is fail-closed in extension-only cross-layer mode. It is never
 submitted automatically.
