@@ -22,6 +22,8 @@ const CURRENT_ENV = process.env.LGT_CURRENT_ENV || 'test';
 const TARGET_ENV = process.env.LGT_TARGET_ENV || CURRENT_ENV; // default behavior: pin to page env
 const TARGET_URL = 'https://' + (CURRENT_ENV === 'prod' ? '' : CURRENT_ENV + '.') + 'nordicbet.com/en/sportsbook';
 const MOBILE = process.env.LGT_MOBILE === '1';
+const CHECK_SPORTSBOOK_TOOL = process.env.LGT_CHECK_SPORTSBOOK_TOOL === '1';
+const SPORTSBOOK_TOOL_URL = 'https://betssongroup.github.io/sportsbook/qa/sportsbook-tool/sportsbookTool.min.js';
 
 function log(msg) { console.log('[test] ' + new Date().toISOString().slice(11, 19) + ' ' + msg); }
 
@@ -149,7 +151,8 @@ async function main() {
   const targetEnvSel = panel.locator('select:visible').nth(2);
   const selectedTarget = await targetEnvSel.inputValue();
   if (selectedTarget !== TARGET_ENV) {
-    throw new Error('Target bundle environment did not default to the page environment "' + TARGET_ENV + '", got: ' + selectedTarget);
+    await targetEnvSel.selectOption(TARGET_ENV);
+    log('Selected explicit target environment ' + TARGET_ENV + ' (default was ' + selectedTarget + ').');
   }
 
   const targetHint = await panel.locator('.lgt-hint:visible').first().textContent();
@@ -180,6 +183,13 @@ async function main() {
   log('Live bundle rules after automatic reload: ' + liveBundleRuleCount);
   if (!liveBundleRuleCount) throw new Error('Bundle override rules did not survive the automatic same-URL reload.');
   log('PASS: background.js fetched the live ' + TARGET_ENV + ' indexer.json and installed at least one declarativeNetRequest rule.');
+
+  const expectedMfeOverrideFlag = TARGET_ENV === 'alpha' || TARGET_ENV === 'test';
+  const mfeOverrideFlag = await page.evaluate(() => window.xSbIsMfeOverrideApplied);
+  if ((mfeOverrideFlag === true) !== expectedMfeOverrideFlag) {
+    throw new Error('xSbIsMfeOverrideApplied lifecycle mismatch for target ' + TARGET_ENV + ': got ' + JSON.stringify(mfeOverrideFlag));
+  }
+  log('PASS: MAIN-world xSbIsMfeOverrideApplied flag matches target environment semantics (' + expectedMfeOverrideFlag + ').');
 
   const panelAfterReload = page.locator('#lgt-panel');
 
@@ -257,6 +267,40 @@ async function main() {
     throw new Error('REGRESSION: page body has almost no rendered text (' + bodyText.length + ' chars) after Bundle Override + reload - the app likely failed to render. Snippet: ' + JSON.stringify(bodyText.slice(0, 300)));
   }
   log('PASS: page still renders real content (' + bodyText.length + ' chars) after Bundle Override + reload - not a blank page.');
+
+  if (CHECK_SPORTSBOOK_TOOL) {
+    await page.addScriptTag({ url: SPORTSBOOK_TOOL_URL });
+    await page.waitForSelector('#mfeEnvMismatchSection', { state: 'attached', timeout: 15000 });
+    await page.waitForTimeout(1000);
+    const sportsbookToolState = await page.evaluate(() => {
+      const mismatch = document.querySelector('#mfeEnvMismatchSection');
+      return {
+        mismatchHidden: !!mismatch && mismatch.classList.contains('hide'),
+        mismatchText: mismatch ? mismatch.innerText : '',
+        environmentText: document.querySelector('#environment')?.innerText || '',
+      };
+    });
+    log('Sportsbook Tool environment: ' + sportsbookToolState.environmentText + '; mismatch hidden=' + sportsbookToolState.mismatchHidden);
+    if (TARGET_ENV === CURRENT_ENV && !sportsbookToolState.mismatchHidden) {
+      throw new Error('QA Sportsbook Tool still reports a false environment mismatch: ' + sportsbookToolState.mismatchText);
+    }
+    if (TARGET_ENV === CURRENT_ENV && sportsbookToolState.environmentText.toLowerCase() !== TARGET_ENV) {
+      throw new Error('QA Sportsbook Tool reports ' + sportsbookToolState.environmentText + ' instead of ' + TARGET_ENV.toUpperCase());
+    }
+    log('PASS: QA Sportsbook Tool reports the effective target environment without a false mismatch.');
+  }
+
+  await panelAfterReload.locator('.lgt-tab').filter({ hasText: 'Bundle' }).click();
+  await panelAfterReload.getByRole('button', { name: 'Disable', exact: true }).click();
+  await page.waitForTimeout(500);
+  const flagAfterDisable = await page.evaluate(() => ({
+    value: window.xSbIsMfeOverrideApplied,
+    owned: window.__linkGenToolOwnsXSbIsMfeOverrideApplied,
+  }));
+  if (typeof flagAfterDisable.value !== 'undefined' || typeof flagAfterDisable.owned !== 'undefined') {
+    throw new Error('Disable did not remove the Link Gen Tool-owned MAIN-world flag: ' + JSON.stringify(flagAfterDisable));
+  }
+  log('PASS: Disable removes the Link Gen Tool-owned MAIN-world compatibility flag.');
 
   log('Test run complete.');
   await context.close();

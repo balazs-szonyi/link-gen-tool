@@ -50,6 +50,10 @@ brand page you're already logged into — no CLI, no headless automation.
   both builds cannot execute in a mixed state. The matching ClientConfig
   request is pinned to the same target environment as the JavaScript bundle,
   preventing a valid ALPHA bundle from falling back to a failing PROD config.
+  For ALPHA/TEST targets it also publishes the MAIN-world
+  `xSbIsMfeOverrideApplied` compatibility flag used by the QA Sportsbook Tool,
+  so that tool reports the effective overridden environment instead of the
+  unchanged PROD/QA startup-context metadata; Disable removes the flag again.
   Auto-detects brand/environment from the page you're currently on and only
   offers targets from the same layer (mixing QA/TEST with ALPHA/PROD loads a
   broken build with no explicit error, so this isn't selectable). Scoped to
@@ -406,6 +410,34 @@ running.
   brand's domain manually.
 
 ## Known limitations (Chrome extension)
+
+### Experimental Cross-Layer Lab (v1.19.0)
+
+Betsson and NordicBet can opt into cross-layer testing in a dedicated,
+Playwright-managed Chrome profile. Normal Bundle-tab behavior remains
+same-layer only and needs no companion. Start a cross-layer session with:
+
+```powershell
+node cross-layer-lab/cli.cjs --brand betsson --page-env test --bundle-env prod --mode hybrid --device desktop
+```
+
+Use the printed one-run token in the Bundle tab, select the matching mode and
+device, then Apply. The tab displays `Host`, `Bundle`, and `Backend` separately;
+this is the primary environment diagnostic for cross-layer runs. `hybrid` keeps
+the page backend while loading the target bundle; `full-runtime` opens the
+target login origin in the same browser context and uses the target backend.
+
+The companion listens only on `127.0.0.1:8845`, stores its token only in
+`chrome.storage.session`, and uses `cross-layer-lab/.chrome-profile` rather than
+the normal Chrome profile. Copy `accounts.local.example.json` to the ignored
+`accounts.local.json` only for approved PROD test customers; never put a
+password, token, or secret in it. Every PROD place-bet pauses for a fresh
+Approve/Cancel prompt and is rejected on timeout, panel/browser close, or
+companion loss. Audit JSONL excludes cookies, auth tokens, and passwords.
+
+Run the offline contract, safety, and 32-case mock matrix with `npm test`.
+Live logged-in/betslip coverage still requires valid test accounts and manual
+PROD UAT approval; the companion never submits a PROD bet automatically.
 
 The extension structurally avoids the capture-timing-race and navigation-
 lifecycle issues above (`chrome.webRequest` + `chrome.storage.local`), and

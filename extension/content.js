@@ -34,6 +34,15 @@
   // panel title always matches it.
   var VERSION = 'v' + chrome.runtime.getManifest().version;
 
+  // A Bundle Override's DNR rules survive the Apply-triggered reload, but
+  // page globals do not. Ask the service worker to restore the MAIN-world
+  // xSbIsMfeOverrideApplied compatibility flag on every fresh document so
+  // the QA Sportsbook Tool reports the effective ALPHA/TEST mFE environment
+  // instead of the unchanged PROD/QA startup-context metadata.
+  chrome.runtime.sendMessage({ type: 'lgt-bundle-sync-page-flag' }, function () {
+    void chrome.runtime.lastError;
+  });
+
   if (window.__lgtExtInstance) {
     window.__lgtExtInstance.destroy();
   }
@@ -3011,9 +3020,20 @@
     if (detected.environment) curEnvSel.value = detected.environment;
 
     var targetEnvSel = el('select', {}, []);
+    var modeSel = el('select', {}, [
+      el('option', { value: 'standard' }, ['standard']),
+      el('option', { value: 'hybrid' }, ['hybrid (target bundle + page backend)']),
+      el('option', { value: 'full-runtime' }, ['full-runtime (target bundle + target backend)'])
+    ]);
+    var deviceSel = el('select', {}, [el('option', { value: 'desktop' }, ['desktop']), el('option', { value: 'mobile' }, ['mobile'])]);
+    var tokenInput = el('input', { type: 'password', placeholder: 'One-time token printed by the companion CLI', autocomplete: 'off' });
+    var runtimeTruth = el('div', { class: 'lgt-result' }, ['Host: ?  |  Bundle: ?  |  Backend: ?']);
     var targetEnvBadge = el('div', { class: 'lgt-hint' }, ['']);
     function refreshTargetEnv(resetToPageEnvironment) {
-      var allowed = bundleLayerEnvironments(curEnvSel.value);
+      var crossLayer = modeSel.value !== 'standard';
+      var allowed = crossLayer
+        ? ENV_LABELS.filter(function (candidate) { return BUNDLE_LAYER[candidate] !== BUNDLE_LAYER[curEnvSel.value]; })
+        : bundleLayerEnvironments(curEnvSel.value);
       var previousTarget = targetEnvSel.value;
       targetEnvSel.innerHTML = '';
       allowed.forEach(function (environment) {
@@ -3025,8 +3045,12 @@
       if (allowed.indexOf(target) !== -1) targetEnvSel.value = target;
       targetEnvBadge.textContent = allowed.length
         ? ('Target build: ' + targetEnvSel.value.toUpperCase() +
-          (targetEnvSel.value === curEnvSel.value ? ' (pinned to this page environment)' : ' (same-layer override)'))
+          (crossLayer ? ' (experimental Cross-Layer Lab)' : (targetEnvSel.value === curEnvSel.value ? ' (pinned to this page environment)' : ' (same-layer override)')))
         : 'Unknown layer for this environment.';
+      var backendEnv = modeSel.value === 'full-runtime' ? targetEnvSel.value : curEnvSel.value;
+      runtimeTruth.textContent = 'Host: ' + curEnvSel.value.toUpperCase() + '  |  Bundle: ' + (targetEnvSel.value || '?').toUpperCase() + '  |  Backend: ' + (backendEnv || '?').toUpperCase();
+      tokenInput.parentElement && (tokenInput.parentElement.style.display = crossLayer ? '' : 'none');
+      deviceSel.parentElement && (deviceSel.parentElement.style.display = crossLayer ? '' : 'none');
       return targetEnvSel.value || null;
     }
 
@@ -3060,7 +3084,7 @@
       chrome.runtime.sendMessage({ type: 'lgt-bundle-status' }, function (res) {
         void chrome.runtime.lastError;
         if (!res || !res.ok) return;
-        if (res.active && res.targetEnv && bundleLayerEnvironments(curEnvSel.value).indexOf(res.targetEnv) !== -1) {
+        if (res.active && res.targetEnv && ENV_LABELS.indexOf(res.targetEnv) !== -1) {
           targetEnvSel.value = res.targetEnv;
           refreshTargetEnv(false);
         }
@@ -3080,11 +3104,20 @@
         if (!brandGuid) { status.textContent = 'Unknown brand.'; return; }
         if (!targetEnv) { status.textContent = 'Could not determine a same-layer target environment.'; return; }
         status.textContent = 'Applying...';
-        chrome.runtime.sendMessage({ type: 'lgt-bundle-start', currentEnv: curEnvSel.value, targetEnv: targetEnv, brandId: brandGuid }, function (res) {
+        function startBundle(labAuthorized) {
+          chrome.runtime.sendMessage({ type: 'lgt-bundle-start', currentEnv: curEnvSel.value, targetEnv: targetEnv, brandId: brandGuid, labAuthorized: !!labAuthorized }, function (res) {
+            void chrome.runtime.lastError;
+            if (!res || !res.ok) { status.textContent = 'Failed: ' + ((res && res.error) || 'unknown error'); return; }
+            status.textContent = 'Active -> ' + targetEnv.toUpperCase() + ' (' + res.ruleCount + ' rule(s) applied) - reloading page...';
+            setTimeout(function () { location.reload(); }, 150);
+          });
+        }
+        if (modeSel.value === 'standard') { startBundle(false); return; }
+        var config = { brand: brand, pageEnv: curEnvSel.value, bundleEnv: targetEnv, mode: modeSel.value, device: deviceSel.value };
+        chrome.runtime.sendMessage({ type: 'lgt-lab-authorize', token: tokenInput.value, config: config }, function (labRes) {
           void chrome.runtime.lastError;
-          if (!res || !res.ok) { status.textContent = 'Failed: ' + ((res && res.error) || 'unknown error'); return; }
-          status.textContent = 'Active -> ' + targetEnv.toUpperCase() + ' (' + res.ruleCount + ' rule(s) applied) - reloading page...';
-          setTimeout(function () { location.reload(); }, 150);
+          if (!labRes || !labRes.ok) { status.textContent = 'Cross-Layer Lab refused: ' + ((labRes && labRes.error) || 'companion unavailable'); return; }
+          startBundle(true);
         });
       }
     }, ['Apply']);
@@ -3095,6 +3128,7 @@
           void chrome.runtime.lastError;
           status.textContent = 'Not active on this tab.';
         });
+        if (modeSel.value !== 'standard') chrome.runtime.sendMessage({ type: 'lgt-lab-stop' }, function () { void chrome.runtime.lastError; });
       }
     }, ['Disable']);
 
@@ -3104,6 +3138,8 @@
     // remembered value from a different tab/environment).
     curEnvSel.addEventListener('change', function () { refreshTargetEnv(true); });
     targetEnvSel.addEventListener('change', function () { refreshTargetEnv(false); });
+    modeSel.addEventListener('change', function () { saveBundleState({ mode: modeSel.value }); refreshTargetEnv(true); });
+    deviceSel.addEventListener('change', function () { saveBundleState({ device: deviceSel.value }); refreshTargetEnv(false); });
 
     wrap.appendChild(el('label', {}, ['Brand']));
     wrap.appendChild(brandSel);
@@ -3112,10 +3148,19 @@
     wrap.appendChild(el('label', {}, ['Target bundle environment']));
     wrap.appendChild(targetEnvSel);
     wrap.appendChild(targetEnvBadge);
+    // Keep Brand / Current env / Target env as the first three selects for
+    // backwards-compatible automation (v1.18.x Playwright regressions).
+    wrap.appendChild(el('label', {}, ['Mode']));
+    wrap.appendChild(modeSel);
+    wrap.appendChild(runtimeTruth);
+    wrap.appendChild(el('label', { style: 'display:none' }, ['Device', deviceSel]));
+    wrap.appendChild(el('label', { style: 'display:none' }, ['Companion token', tokenInput]));
     wrap.appendChild(sandboxWarning);
     wrap.appendChild(el('div', { style: 'display:flex;gap:6px;margin-top:6px' }, [applyBtn, disableBtn]));
     wrap.appendChild(status);
     wrap.appendChild(el('div', { class: 'lgt-hint', style: 'margin-top:8px' }, [
+      'Standard preserves the existing same-layer DNR behavior. Hybrid and full-runtime are experimental and require ' +
+      'this page to run inside the dedicated Chrome profile opened by cross-layer-lab/cli.cjs. The companion token stays in chrome.storage.session only. ' +
       'Pins this brand\u2019s sportsbook bundle (main-*.js and other listed entry files) on THIS tab ' +
       'to the selected environment. It defaults to the page\u2019s own environment, ' +
       'or you can deliberately choose the other environment in the same layer ' +
@@ -3141,8 +3186,27 @@
       // the "other" target - i.e. redirect QA to QA, a silent no-op that
       // looked identical whether Apply/Disable was clicked.
       if (saved && saved.brand && BRANDS[saved.brand]) brandSel.value = saved.brand;
+      if (saved && ['standard', 'hybrid', 'full-runtime'].indexOf(saved.mode) !== -1) modeSel.value = saved.mode;
+      if (saved && ['desktop', 'mobile'].indexOf(saved.device) !== -1) deviceSel.value = saved.device;
       refreshTargetEnv(true);
     });
+
+    // A production place-bet is held by the companion until this explicit,
+    // one-shot decision. Closing the panel simply stops polling; the server's
+    // timeout/context-close lifecycle rejects the request fail-closed.
+    var shownPendingId = null;
+    pollWhileExtensionValid(function () {
+      if (modeSel.value === 'standard') return;
+      chrome.runtime.sendMessage({ type: 'lgt-lab-pending' }, function (pendingRes) {
+        void chrome.runtime.lastError;
+        var action = pendingRes && pendingRes.actions && pendingRes.actions[0];
+        if (!action || action.id === shownPendingId) return;
+        shownPendingId = action.id;
+        var summary = 'PROD bet submit\nBrand: ' + action.brand + '\nAccount: ' + action.accountId + '\nStake: ' + action.stake + ' ' + (action.currency || '') + '\nSelections: ' + (action.selectionIds || []).join(', ');
+        var decision = window.confirm(summary + '\n\nApprove this request once?') ? 'approve' : 'cancel';
+        chrome.runtime.sendMessage({ type: 'lgt-lab-decision', id: action.id, decision: decision }, function () { void chrome.runtime.lastError; });
+      });
+    }, 1000);
 
     return wrap;
   }

@@ -1380,6 +1380,81 @@ var bundleIndexerCache = {}; // targetEnv -> {ts, data} - avoids re-fetching
 // beyond BUNDLE_INDEXER_CACHE_MS.
 var BUNDLE_INDEXER_CACHE_MS = 5 * 60 * 1000;
 
+// The QA Sportsbook Tool derives the effective mFE environment from the
+// page's startup context, which stays at the layer's base environment even
+// after a network-level bundle override (PROD for ALPHA, QA for TEST). Its
+// own override implementation publishes xSbIsMfeOverrideApplied in MAIN
+// world to tell the tool to translate those two values. Mirror that public
+// compatibility signal while our equivalent override is active. Do not set
+// it for PROD/QA targets: there the unmodified startup context is already
+// the right answer, and forcing the flag would invert a correct result.
+function bundleTargetNeedsMfeOverrideFlag(targetEnv) {
+  return targetEnv === 'alpha' || targetEnv === 'test';
+}
+
+function setBundleMfeOverrideFlag(tabId, targetEnv) {
+  var enabled = bundleTargetNeedsMfeOverrideFlag(targetEnv);
+  return new Promise(function (resolve) {
+    chrome.scripting.executeScript({
+      target: { tabId: tabId },
+      world: 'MAIN',
+      args: [enabled],
+      func: function (shouldEnable) {
+        var ownerKey = '__linkGenToolOwnsXSbIsMfeOverrideApplied';
+        if (shouldEnable) {
+          // Respect a flag owned by another tool. The Link Gen Tool UI warns
+          // against running both overrides together, but avoiding ownership
+          // theft makes Disable safe even if somebody does.
+          if (typeof window.xSbIsMfeOverrideApplied === 'undefined' || window[ownerKey]) {
+            window.xSbIsMfeOverrideApplied = true;
+            window[ownerKey] = true;
+          }
+        } else if (window[ownerKey]) {
+          delete window.xSbIsMfeOverrideApplied;
+          delete window[ownerKey];
+        }
+        return {
+          enabled: window.xSbIsMfeOverrideApplied === true,
+          owned: window[ownerKey] === true
+        };
+      }
+    }, function (results) {
+      var error = chrome.runtime.lastError;
+      resolve({
+        ok: !error,
+        error: error ? error.message : null,
+        state: results && results[0] ? results[0].result : null
+      });
+    });
+  });
+}
+
+function getLiveBundleRulesForTab(tabId) {
+  return new Promise(function (resolve) {
+    chrome.declarativeNetRequest.getSessionRules(function (allRules) {
+      resolve((allRules || []).filter(function (rule) {
+        return rule.id >= BUNDLE_RULE_ID_START && rule.id < SR_SPOOF_RULE_ID_START &&
+          rule.condition && Array.isArray(rule.condition.tabIds) && rule.condition.tabIds.indexOf(tabId) !== -1;
+      }));
+    });
+  });
+}
+
+function bundleTargetEnvFromRules(liveRules) {
+  var targetEnvs = (liveRules || []).map(function (rule) {
+    var redirectUrl = rule.action && rule.action.redirect && rule.action.redirect.url;
+    if (!redirectUrl) return null;
+    try { return envLabelFromHostname(new URL(redirectUrl).hostname); } catch (e) { return null; }
+  }).filter(function (env, index, values) { return env && values.indexOf(env) === index; });
+  return targetEnvs.length === 1 ? targetEnvs[0] : null;
+}
+
+function syncBundleMfeOverrideFlag(tabId) {
+  return getLiveBundleRulesForTab(tabId).then(function (liveRules) {
+    return setBundleMfeOverrideFlag(tabId, bundleTargetEnvFromRules(liveRules));
+  });
+}
+
 function fetchBundleIndexer(targetEnv) {
   var cached = bundleIndexerCache[targetEnv];
   if (cached && (Date.now() - cached.ts) < BUNDLE_INDEXER_CACHE_MS) {
@@ -1551,12 +1626,17 @@ function buildBundleRedirectRules(indexerData, layerIndexerData, brandId, target
   return { rules: rules, skippedNoBrand: false };
 }
 
-function startBundleOverrideRule(tabId, targetEnv, brandId) {
+function startBundleOverrideRule(tabId, targetEnv, brandId, currentEnv) {
   var previousRuleIds = bundleRuleIdsByTab[tabId]; // swap atomically, same
   // reasoning as the other three declarativeNetRequest features above -
   // re-applying (e.g. switching target env without disabling first) must
   // not leave the old rules alongside the new ones.
-  var layerEnvironments = bundleEnvironmentsInLayer(targetEnv);
+  // Cross-Layer Lab compares all four live indexers so source-only main/shell
+  // entrypoints are neutralized as well. Standard mode retains the narrower
+  // same-layer lookup and behavior.
+  var layerEnvironments = currentEnv && BUNDLE_ENV_LAYERS[currentEnv] !== BUNDLE_ENV_LAYERS[targetEnv]
+    ? Object.keys(BUNDLE_INDEXER_URLS)
+    : bundleEnvironmentsInLayer(targetEnv);
   return Promise.all(layerEnvironments.map(function (environment) {
     return fetchBundleIndexer(environment).then(function (data) {
       return { environment: environment, data: data };
@@ -1607,6 +1687,8 @@ function stopBundleOverrideRule(tabId) {
         resolve();
       });
     });
+  }).then(function () {
+    return setBundleMfeOverrideFlag(tabId, null);
   });
 }
 
@@ -1633,8 +1715,10 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   if (!targetEnv || !brandId) { sendResponse({ ok: false, error: 'missing targetEnv or brandId' }); return false; }
   if (!BUNDLE_ENV_LAYERS[targetEnv]) { sendResponse({ ok: false, error: 'unknown target environment: ' + targetEnv }); return false; }
   if (currentEnv && BUNDLE_ENV_LAYERS[currentEnv] !== BUNDLE_ENV_LAYERS[targetEnv]) {
-    sendResponse({ ok: false, error: 'cross-layer bundle override is not allowed (' + currentEnv + ' -> ' + targetEnv + ')' });
-    return false;
+    if (!msg.labAuthorized) {
+      sendResponse({ ok: false, error: 'cross-layer bundle override requires an authorized Cross-Layer Lab session (' + currentEnv + ' -> ' + targetEnv + ')' });
+      return false;
+    }
   }
   // Remember the exact URL the override was applied for (see the
   // stale-cleanup logic in chrome.webNavigation.onBeforeNavigate above,
@@ -1643,8 +1727,10 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   // to one specific tested link, unlike the Sportradar-spoof/BLE-CORS
   // domain-wide fixes.
   if (sender.tab.url) bundleExpectedUrlByTab[tabId] = sender.tab.url;
-  startBundleOverrideRule(tabId, targetEnv, brandId).then(function (result) {
-    sendResponse({ ok: true, ruleCount: result.ruleCount, targetEnv: targetEnv });
+  startBundleOverrideRule(tabId, targetEnv, brandId, currentEnv).then(function (result) {
+    return setBundleMfeOverrideFlag(tabId, targetEnv).then(function (flagResult) {
+      sendResponse({ ok: true, ruleCount: result.ruleCount, targetEnv: targetEnv, mfeFlag: flagResult });
+    });
   }).catch(function (err) {
     sendResponse({ ok: false, error: String(err && err.message || err) });
   });
@@ -1687,6 +1773,79 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       matched: bundleMatchedByTab[tabId] || [],
       targetEnv: targetEnvs.length === 1 ? targetEnvs[0] : null
     });
+  });
+  return true;
+});
+
+// Cross-Layer Lab bridge. The one-time bearer token is held only in
+// chrome.storage.session and is never written to disk or storage.local.
+// Bundle rules are allowed across layers only after the companion reports a
+// matching ready session for this exact brand/page/bundle/mode/device tuple.
+var LAB_ORIGIN = 'http://127.0.0.1:8845';
+
+function labToken() {
+  return new Promise(function (resolve) {
+    chrome.storage.session.get(['lgt-cross-layer-token'], function (value) {
+      resolve(value && value['lgt-cross-layer-token']);
+    });
+  });
+}
+
+function labFetch(path, options) {
+  return labToken().then(function (token) {
+    if (!token) throw new Error('Cross-Layer Lab token is missing');
+    var request = Object.assign({}, options || {});
+    request.headers = Object.assign({}, request.headers || {}, { authorization: 'Bearer ' + token });
+    return fetch(LAB_ORIGIN + path, request).then(function (response) {
+      return response.json().catch(function () { return {}; }).then(function (body) {
+        if (!response.ok) throw new Error(body.error || ('HTTP ' + response.status));
+        return body;
+      });
+    });
+  });
+}
+
+chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+  if (!msg || msg.type !== 'lgt-lab-authorize') return false;
+  var config = msg.config || {};
+  var tokenValue = String(msg.token || '').trim();
+  if (!tokenValue) { sendResponse({ ok: false, error: 'Enter the one-time companion token' }); return false; }
+  chrome.storage.session.set({ 'lgt-cross-layer-token': tokenValue }, function () {
+    labFetch('/v1/session').then(function (body) {
+      var session = body.session;
+      var matches = session && session.status === 'ready' &&
+        ['brand', 'pageEnv', 'bundleEnv', 'mode', 'device'].every(function (key) { return session[key] === config[key]; });
+      if (!matches) throw new Error('Companion session does not match the Bundle tab selection; restart the CLI with these values');
+      sendResponse({ ok: true, session: session });
+    }).catch(function (error) { sendResponse({ ok: false, error: error.message }); });
+  });
+  return true;
+});
+
+chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+  if (!msg || (msg.type !== 'lgt-lab-pending' && msg.type !== 'lgt-lab-decision' && msg.type !== 'lgt-lab-stop')) return false;
+  var action;
+  if (msg.type === 'lgt-lab-pending') action = labFetch('/v1/pending-actions');
+  if (msg.type === 'lgt-lab-decision') action = labFetch('/v1/pending-actions/' + encodeURIComponent(msg.id) + '/decision', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ decision: msg.decision })
+  });
+  if (msg.type === 'lgt-lab-stop') action = labFetch('/v1/session', { method: 'DELETE' }).then(function (body) {
+    return new Promise(function (resolve) { chrome.storage.session.remove(['lgt-cross-layer-token'], function () { resolve(body); }); });
+  });
+  action.then(function (body) { sendResponse(Object.assign({ ok: true }, body)); })
+    .catch(function (error) { sendResponse({ ok: false, error: error.message }); });
+  return true;
+});
+
+// content.js calls this on every new document, independently of whether the
+// Link Gen Tool panel is open. Session DNR rules survive an MV3 service-worker
+// restart, while MAIN-world globals do not survive a page reload; deriving the
+// target from Chrome's live rules restores the compatibility flag reliably.
+chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+  if (!msg || msg.type !== 'lgt-bundle-sync-page-flag') return false;
+  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
+  syncBundleMfeOverrideFlag(sender.tab.id).then(function (result) {
+    sendResponse(result);
   });
   return true;
 });
