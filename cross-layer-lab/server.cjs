@@ -19,12 +19,11 @@ function readBody(req) {
 }
 
 function send(res, status, body) {
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*', 'access-control-allow-headers': 'authorization, content-type', 'access-control-allow-methods': 'GET, PUT, POST, DELETE, OPTIONS', 'cache-control': 'no-store' });
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*', 'access-control-allow-headers': 'content-type, x-lgt-browser-nonce', 'access-control-allow-methods': 'GET, PUT, POST, DELETE, OPTIONS', 'cache-control': 'no-store' });
   res.end(JSON.stringify(body));
 }
 
 function createLab(options = {}) {
-  const token = options.token || crypto.randomBytes(24).toString('base64url');
   const root = path.resolve(__dirname);
   const audit = options.audit || new AuditLog(path.join(root, 'logs', 'audit.jsonl'));
   const accounts = options.accounts || loadAccounts(path.join(root, 'accounts.local.json'));
@@ -32,29 +31,52 @@ function createLab(options = {}) {
   const browser = options.browser || new LabBrowser({ profileDir: path.join(root, '.chrome-profile') });
   let session = null;
 
-  function authorized(req) { return req.headers.authorization === `Bearer ${token}`; }
+  function publicSession(value) {
+    if (!value) return null;
+    const { browserNonce, ...safe } = value;
+    return safe;
+  }
+
+  function browserBound(req) {
+    return !!session && !!session.browserNonce && req.headers['x-lgt-browser-nonce'] === session.browserNonce;
+  }
+  function localCliRequest(req) {
+    const remote = req.socket && req.socket.remoteAddress;
+    return !req.headers.origin && (remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1');
+  }
   const server = http.createServer(async (req, res) => {
     if (req.method === 'OPTIONS') return send(res, 204, {});
     const url = new URL(req.url, 'http://127.0.0.1:8845');
-    if (url.pathname === '/v1/health' && req.method === 'GET') return send(res, 200, { ok: true, version: '1.19.0', sessionActive: !!session });
-    if (!authorized(req)) return send(res, 401, { error: 'invalid-or-missing-token' });
+    if (url.pathname === '/v1/health' && req.method === 'GET') return send(res, 200, { ok: true, version: '1.19.1', sessionActive: !!session });
     try {
-      if (url.pathname === '/v1/session' && req.method === 'GET') return send(res, 200, { session });
-      if (url.pathname === '/v1/pending-actions' && req.method === 'GET') return send(res, 200, { actions: pending.list() });
+      if (url.pathname === '/v1/session' && req.method === 'GET') return send(res, 200, { session: publicSession(session) });
+      if (url.pathname === '/v1/browser-binding' && req.method === 'GET') {
+        if (!browserBound(req)) {
+          return send(res, 403, { error: 'managed-browser-required' });
+        }
+        return send(res, 200, { bound: true });
+      }
+      if (url.pathname === '/v1/pending-actions' && req.method === 'GET') {
+        return browserBound(req) ? send(res, 200, { actions: pending.list() }) : send(res, 403, { error: 'managed-browser-required' });
+      }
       if (url.pathname === '/v1/session' && req.method === 'PUT') {
+        if (!localCliRequest(req)) return send(res, 403, { error: 'cli-session-start-required' });
         const next = normalizeSession(await readBody(req));
+        next.browserNonce = crypto.randomBytes(32).toString('base64url');
         pending.rejectAll('session-replaced');
         session = next;
         const openedUrl = await browser.start(session, { getSession: () => session, pending, accounts, audit });
         session.status = 'ready'; session.openedUrl = openedUrl;
-        return send(res, 200, { session });
+        return send(res, 200, { session: publicSession(session) });
       }
       if (url.pathname === '/v1/session' && req.method === 'DELETE') {
+        if (!browserBound(req)) return send(res, 403, { error: 'managed-browser-required' });
         pending.rejectAll('session-ended'); await browser.stop(); session = null;
         return send(res, 200, { ok: true });
       }
       const match = /^\/v1\/pending-actions\/([^/]+)\/decision$/.exec(url.pathname);
       if (match && req.method === 'POST') {
+        if (!browserBound(req)) return send(res, 403, { error: 'managed-browser-required' });
         const body = await readBody(req);
         if (!['approve', 'cancel'].includes(body.decision)) return send(res, 400, { error: 'decision must be approve or cancel' });
         return pending.decide(match[1], body.decision) ? send(res, 200, { ok: true }) : send(res, 404, { error: 'pending action not found' });
@@ -67,7 +89,7 @@ function createLab(options = {}) {
   });
 
   server.on('close', () => { pending.rejectAll('companion-stopped'); void browser.stop(); });
-  return { server, token, getSession: () => session, pending };
+  return { server, getSession: () => session, pending };
 }
 
 module.exports = { createLab };

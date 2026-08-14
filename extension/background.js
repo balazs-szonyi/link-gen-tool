@@ -1777,66 +1777,6 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   return true;
 });
 
-// Cross-Layer Lab bridge. The one-time bearer token is held only in
-// chrome.storage.session and is never written to disk or storage.local.
-// Bundle rules are allowed across layers only after the companion reports a
-// matching ready session for this exact brand/page/bundle/mode/device tuple.
-var LAB_ORIGIN = 'http://127.0.0.1:8845';
-
-function labToken() {
-  return new Promise(function (resolve) {
-    chrome.storage.session.get(['lgt-cross-layer-token'], function (value) {
-      resolve(value && value['lgt-cross-layer-token']);
-    });
-  });
-}
-
-function labFetch(path, options) {
-  return labToken().then(function (token) {
-    if (!token) throw new Error('Cross-Layer Lab token is missing');
-    var request = Object.assign({}, options || {});
-    request.headers = Object.assign({}, request.headers || {}, { authorization: 'Bearer ' + token });
-    return fetch(LAB_ORIGIN + path, request).then(function (response) {
-      return response.json().catch(function () { return {}; }).then(function (body) {
-        if (!response.ok) throw new Error(body.error || ('HTTP ' + response.status));
-        return body;
-      });
-    });
-  });
-}
-
-chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
-  if (!msg || msg.type !== 'lgt-lab-authorize') return false;
-  var config = msg.config || {};
-  var tokenValue = String(msg.token || '').trim();
-  if (!tokenValue) { sendResponse({ ok: false, error: 'Enter the one-time companion token' }); return false; }
-  chrome.storage.session.set({ 'lgt-cross-layer-token': tokenValue }, function () {
-    labFetch('/v1/session').then(function (body) {
-      var session = body.session;
-      var matches = session && session.status === 'ready' &&
-        ['brand', 'pageEnv', 'bundleEnv', 'mode', 'device'].every(function (key) { return session[key] === config[key]; });
-      if (!matches) throw new Error('Companion session does not match the Bundle tab selection; restart the CLI with these values');
-      sendResponse({ ok: true, session: session });
-    }).catch(function (error) { sendResponse({ ok: false, error: error.message }); });
-  });
-  return true;
-});
-
-chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
-  if (!msg || (msg.type !== 'lgt-lab-pending' && msg.type !== 'lgt-lab-decision' && msg.type !== 'lgt-lab-stop')) return false;
-  var action;
-  if (msg.type === 'lgt-lab-pending') action = labFetch('/v1/pending-actions');
-  if (msg.type === 'lgt-lab-decision') action = labFetch('/v1/pending-actions/' + encodeURIComponent(msg.id) + '/decision', {
-    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ decision: msg.decision })
-  });
-  if (msg.type === 'lgt-lab-stop') action = labFetch('/v1/session', { method: 'DELETE' }).then(function (body) {
-    return new Promise(function (resolve) { chrome.storage.session.remove(['lgt-cross-layer-token'], function () { resolve(body); }); });
-  });
-  action.then(function (body) { sendResponse(Object.assign({ ok: true }, body)); })
-    .catch(function (error) { sendResponse({ ok: false, error: error.message }); });
-  return true;
-});
-
 // content.js calls this on every new document, independently of whether the
 // Link Gen Tool panel is open. Session DNR rules survive an MV3 service-worker
 // restart, while MAIN-world globals do not survive a page reload; deriving the

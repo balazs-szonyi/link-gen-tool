@@ -3023,10 +3023,9 @@
     var modeSel = el('select', {}, [
       el('option', { value: 'standard' }, ['standard']),
       el('option', { value: 'hybrid' }, ['hybrid (target bundle + page backend)']),
-      el('option', { value: 'full-runtime' }, ['full-runtime (target bundle + target backend)'])
+      el('option', { value: 'full-runtime', disabled: 'disabled' }, ['full-runtime (target-context bootstrap pending)'])
     ]);
     var deviceSel = el('select', {}, [el('option', { value: 'desktop' }, ['desktop']), el('option', { value: 'mobile' }, ['mobile'])]);
-    var tokenInput = el('input', { type: 'password', placeholder: 'One-time token printed by the companion CLI', autocomplete: 'off' });
     var runtimeTruth = el('div', { class: 'lgt-result' }, ['Host: ?  |  Bundle: ?  |  Backend: ?']);
     var targetEnvBadge = el('div', { class: 'lgt-hint' }, ['']);
     function refreshTargetEnv(resetToPageEnvironment) {
@@ -3049,7 +3048,6 @@
         : 'Unknown layer for this environment.';
       var backendEnv = modeSel.value === 'full-runtime' ? targetEnvSel.value : curEnvSel.value;
       runtimeTruth.textContent = 'Host: ' + curEnvSel.value.toUpperCase() + '  |  Bundle: ' + (targetEnvSel.value || '?').toUpperCase() + '  |  Backend: ' + (backendEnv || '?').toUpperCase();
-      tokenInput.parentElement && (tokenInput.parentElement.style.display = crossLayer ? '' : 'none');
       deviceSel.parentElement && (deviceSel.parentElement.style.display = crossLayer ? '' : 'none');
       return targetEnvSel.value || null;
     }
@@ -3113,12 +3111,18 @@
           });
         }
         if (modeSel.value === 'standard') { startBundle(false); return; }
-        var config = { brand: brand, pageEnv: curEnvSel.value, bundleEnv: targetEnv, mode: modeSel.value, device: deviceSel.value };
-        chrome.runtime.sendMessage({ type: 'lgt-lab-authorize', token: tokenInput.value, config: config }, function (labRes) {
-          void chrome.runtime.lastError;
-          if (!labRes || !labRes.ok) { status.textContent = 'Cross-Layer Lab refused: ' + ((labRes && labRes.error) || 'companion unavailable'); return; }
-          startBundle(true);
-        });
+        var backendEnv = modeSel.value === 'full-runtime' ? targetEnv : curEnvSel.value;
+        try {
+          sessionStorage.setItem('__lgtCrossLayerRuntimeV1', JSON.stringify({
+            enabled: true, expectedUrl: location.href, brand: brand,
+            pageEnv: curEnvSel.value, bundleEnv: targetEnv,
+            backendEnv: backendEnv, mode: modeSel.value, device: deviceSel.value
+          }));
+        } catch (storageError) {
+          status.textContent = 'Failed to prepare Cross-Layer runtime: ' + storageError.message;
+          return;
+        }
+        startBundle(true);
       }
     }, ['Apply']);
 
@@ -3128,7 +3132,7 @@
           void chrome.runtime.lastError;
           status.textContent = 'Not active on this tab.';
         });
-        if (modeSel.value !== 'standard') chrome.runtime.sendMessage({ type: 'lgt-lab-stop' }, function () { void chrome.runtime.lastError; });
+        try { sessionStorage.removeItem('__lgtCrossLayerRuntimeV1'); } catch (e) {}
       }
     }, ['Disable']);
 
@@ -3154,13 +3158,11 @@
     wrap.appendChild(modeSel);
     wrap.appendChild(runtimeTruth);
     wrap.appendChild(el('label', { style: 'display:none' }, ['Device', deviceSel]));
-    wrap.appendChild(el('label', { style: 'display:none' }, ['Companion token', tokenInput]));
     wrap.appendChild(sandboxWarning);
     wrap.appendChild(el('div', { style: 'display:flex;gap:6px;margin-top:6px' }, [applyBtn, disableBtn]));
     wrap.appendChild(status);
     wrap.appendChild(el('div', { class: 'lgt-hint', style: 'margin-top:8px' }, [
-      'Standard preserves the existing same-layer DNR behavior. Hybrid and full-runtime are experimental and require ' +
-      'this page to run inside the dedicated Chrome profile opened by cross-layer-lab/cli.cjs. The companion token stays in chrome.storage.session only. ' +
+      'Standard preserves the existing same-layer DNR behavior. Hybrid runs directly in this normal Chrome tab; no CLI, token, Playwright, or separate profile is required. Full-runtime stays disabled until target-context bootstrap is available. ' +
       'Pins this brand\u2019s sportsbook bundle (main-*.js and other listed entry files) on THIS tab ' +
       'to the selected environment. It defaults to the page\u2019s own environment, ' +
       'or you can deliberately choose the other environment in the same layer ' +
@@ -3186,27 +3188,10 @@
       // the "other" target - i.e. redirect QA to QA, a silent no-op that
       // looked identical whether Apply/Disable was clicked.
       if (saved && saved.brand && BRANDS[saved.brand]) brandSel.value = saved.brand;
-      if (saved && ['standard', 'hybrid', 'full-runtime'].indexOf(saved.mode) !== -1) modeSel.value = saved.mode;
+      if (saved && ['standard', 'hybrid'].indexOf(saved.mode) !== -1) modeSel.value = saved.mode;
       if (saved && ['desktop', 'mobile'].indexOf(saved.device) !== -1) deviceSel.value = saved.device;
       refreshTargetEnv(true);
     });
-
-    // A production place-bet is held by the companion until this explicit,
-    // one-shot decision. Closing the panel simply stops polling; the server's
-    // timeout/context-close lifecycle rejects the request fail-closed.
-    var shownPendingId = null;
-    pollWhileExtensionValid(function () {
-      if (modeSel.value === 'standard') return;
-      chrome.runtime.sendMessage({ type: 'lgt-lab-pending' }, function (pendingRes) {
-        void chrome.runtime.lastError;
-        var action = pendingRes && pendingRes.actions && pendingRes.actions[0];
-        if (!action || action.id === shownPendingId) return;
-        shownPendingId = action.id;
-        var summary = 'PROD bet submit\nBrand: ' + action.brand + '\nAccount: ' + action.accountId + '\nStake: ' + action.stake + ' ' + (action.currency || '') + '\nSelections: ' + (action.selectionIds || []).join(', ');
-        var decision = window.confirm(summary + '\n\nApprove this request once?') ? 'approve' : 'cancel';
-        chrome.runtime.sendMessage({ type: 'lgt-lab-decision', id: action.id, decision: decision }, function () { void chrome.runtime.lastError; });
-      });
-    }, 1000);
 
     return wrap;
   }

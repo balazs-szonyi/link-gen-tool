@@ -411,33 +411,25 @@ running.
 
 ## Known limitations (Chrome extension)
 
-### Experimental Cross-Layer Lab (v1.19.0)
+### Experimental Cross-Layer runtime (v1.20.0)
 
-Betsson and NordicBet can opt into cross-layer testing in a dedicated,
-Playwright-managed Chrome profile. Normal Bundle-tab behavior remains
-same-layer only and needs no companion. Start a cross-layer session with:
+Cross-layer hybrid mode now runs directly in the current normal Chrome tab.
+There is no CLI, token, Playwright browser, separate profile, or manual binding.
+The extension installs its MAIN-world request/config adapter at document start,
+before the sportsbook runtime captures `fetch` or `XMLHttpRequest`.
 
-```powershell
-node cross-layer-lab/cli.cjs --brand betsson --page-env test --bundle-env prod --mode hybrid --device desktop
-```
-
-Use the printed one-run token in the Bundle tab, select the matching mode and
-device, then Apply. The tab displays `Host`, `Bundle`, and `Backend` separately;
+Betsson and NordicBet can opt into cross-layer testing from the Bundle tab.
+Select `hybrid`, the target bundle and device, then Apply. The tab displays
+`Host`, `Bundle`, and `Backend` separately;
 this is the primary environment diagnostic for cross-layer runs. `hybrid` keeps
-the page backend while loading the target bundle; `full-runtime` opens the
-target login origin in the same browser context and uses the target backend.
+the page backend while loading the target bundle. `full-runtime` is disabled
+until target static/user-context bootstrap is available extension-native.
 
-The companion listens only on `127.0.0.1:8845`, stores its token only in
-`chrome.storage.session`, and uses `cross-layer-lab/.chrome-profile` rather than
-the normal Chrome profile. Copy `accounts.local.example.json` to the ignored
-`accounts.local.json` only for approved PROD test customers; never put a
-password, token, or secret in it. Every PROD place-bet pauses for a fresh
-Approve/Cancel prompt and is rejected on timeout, panel/browser close, or
-companion loss. Audit JSONL excludes cookies, auth tokens, and passwords.
+PROD place-bet is fail-closed in extension-only cross-layer mode. It is never
+submitted automatically.
 
-Run the offline contract, safety, and 32-case mock matrix with `npm test`.
-Live logged-in/betslip coverage still requires valid test accounts and manual
-PROD UAT approval; the companion never submits a PROD bet automatically.
+Run the offline contract/safety suite with `npm test`; the parameterized live
+normal-Chrome smoke remains in `cross-layer-lab/test-live-cross-layer.cjs`.
 
 The extension structurally avoids the capture-timing-race and navigation-
 lifecycle issues above (`chrome.webRequest` + `chrome.storage.local`), and
@@ -454,9 +446,10 @@ is largely unchanged:
   same as the bookmarklet's.
 - Chrome only; not published to the Chrome Web Store — unpacked/ZIP
   install only (see "Install (Chrome extension)" above).
-- **Bundle tab**: only works within the same environment layer (QA↔TEST
-  or ALPHA↔PROD) — the target selector only offers those two layer members
-  and defaults to the current page environment for safe pinning. Only works on a real
+- **Bundle tab**: standard mode works within the same environment layer
+  (QA↔TEST or ALPHA↔PROD); hybrid mode additionally offers cross-layer target
+  bundles while keeping the page backend. It defaults to the current page
+  environment for safe pinning. Only works on a real
   brand-embedded page (the widget's `/dist/.../desktop|mobile/files/...`
   bundle shape) — it structurally cannot work on the tool's own
   standalone sandbox links (see the Bundle tab description above for

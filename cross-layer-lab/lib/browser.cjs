@@ -15,6 +15,11 @@ class LabBrowser {
       userAgent: session.device === 'mobile' ? 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/126 Mobile Safari/537.36' : undefined,
       args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`, '--no-first-run'],
     });
+    let serviceWorker = this.context.serviceWorkers()[0];
+    if (!serviceWorker) serviceWorker = await this.context.waitForEvent('serviceworker', { timeout: 15000 });
+    await serviceWorker.evaluate(async (nonce) => {
+      await chrome.storage.session.set({ 'lgt-cross-layer-managed-nonce': nonce });
+    }, session.browserNonce);
     dependencies.getCookies = (url) => this.context.cookies(url);
     await this.context.route('**/*', createRouteHandler(dependencies));
     if (session.mode === 'full-runtime') {

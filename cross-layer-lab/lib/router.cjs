@@ -77,7 +77,7 @@ function createRouteHandler({ getSession, getCookies, pending, accounts, audit }
     }
 
     try {
-      const overrides = { url: targetUrl };
+      const overrides = { url: targetUrl, timeout: 30000 };
       if (session.mode === 'full-runtime' && typeof getCookies === 'function') {
         // Filled below when the browser dependency exposes target-origin
         // cookies; do not copy source-origin cookies onto another layer.

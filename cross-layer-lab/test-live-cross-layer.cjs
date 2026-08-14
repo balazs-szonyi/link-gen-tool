@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 'use strict';
 
-// Parameterized logged-out smoke. This is intentionally outside `npm test`:
-// it opens the dedicated real Chrome profile and reaches live environments.
-const { createLab } = require('./server.cjs');
-const { LabBrowser } = require('./lib/browser.cjs');
+// Parameterized live smoke for the extension-only normal-Chrome runtime.
+const path = require('node:path');
+const os = require('node:os');
+const { chromium } = require('playwright');
 const { BRANDS } = require('./lib/model.cjs');
 
 const config = {
@@ -16,42 +16,39 @@ const config = {
 };
 
 async function main() {
-  const browser = new LabBrowser({ profileDir: require('node:path').join(__dirname, '.chrome-profile-e2e') });
-  const lab = createLab({ token: 'live-smoke-token', browser });
-  await new Promise((resolve) => lab.server.listen(8845, '127.0.0.1', resolve));
-  const port = 8845;
+  const extensionPath = path.resolve(__dirname, '..', 'extension');
+  const profile = path.join(os.tmpdir(), `lgt-native-cross-${Date.now()}`);
+  const context = await chromium.launchPersistentContext(profile, {
+    channel: 'chromium', headless: true,
+    viewport: config.device === 'mobile' ? { width: 470, height: 944 } : { width: 1280, height: 800 },
+    args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`, '--no-first-run'],
+  });
   try {
-    const setup = await fetch(`http://127.0.0.1:${port}/v1/session`, {
-      method: 'PUT', headers: { authorization: 'Bearer live-smoke-token', 'content-type': 'application/json' }, body: JSON.stringify(config),
-    });
-    if (!setup.ok) throw new Error(`session setup failed: ${await setup.text()}`);
-    const page = browser.page;
-    const context = browser.context;
     let sw = context.serviceWorkers()[0];
     if (!sw) sw = await context.waitForEvent('serviceworker', { timeout: 15000 });
+    const page = await context.newPage();
+    const prefix = config.pageEnv === 'prod' ? 'www.' : `www.${config.pageEnv}.`;
+    const targetUrl = `https://${prefix}${BRANDS[config.brand].domain}/en/sportsbook`;
     const coreFailures = [];
     const bundleRequests = [];
-    page.on('requestfinished', (request) => {
+    const bundleFailures = [];
+    page.on('request', (request) => {
       if (/\/files\/[a-zA-Z0-9]+[.-][^/?]+\.m?js/i.test(request.url())) bundleRequests.push(request.url());
     });
-    page.on('response', async (response) => {
+    page.on('requestfailed', (request) => {
+      if (/\/files\/[a-zA-Z0-9]+[.-][^/?]+\.m?js/i.test(request.url())) bundleFailures.push({ url: request.url(), error: request.failure() });
+    });
+    page.on('response', (response) => {
       if (response.status() >= 400 && /client.?config|static.?context|user.?context|\/api\/sb\/|\/sb\/fe-api\//i.test(response.url())) {
-        const request = response.request();
-        let bodyKeys = [];
-        try { bodyKeys = Object.keys(JSON.parse(request.postData() || '{}')); } catch {}
-        let responseText = '';
-        try { responseText = (await response.text()).slice(0, 500); } catch {}
-        coreFailures.push({ status: response.status(), url: response.url(), method: request.method(), requestHeaderNames: Object.keys(request.headers()).sort(), bodyKeys, responseText });
+        coreFailures.push({ status: response.status(), url: response.url() });
       }
     });
+    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await page.locator('#lgt-panel').waitFor({ state: 'attached', timeout: 15000 });
-    if (!(await page.locator('#lgt-panel').isVisible())) {
-      await sw.evaluate(async ({ targetUrl, domain }) => {
-        const tabs = await chrome.tabs.query({ url: '*://*.' + domain + '/*' });
-        const target = tabs.find((tab) => targetUrl.startsWith(tab.url) || tab.url.startsWith(targetUrl));
-        if (target) chrome.tabs.sendMessage(target.id, { type: 'lgt-toggle-panel' }, () => void chrome.runtime.lastError);
-      }, { targetUrl: page.url().replace(/\/$/, ''), domain: BRANDS[config.brand].domain });
-    }
+    await sw.evaluate(async () => {
+      const tabs = await chrome.tabs.query({});
+      for (const tab of tabs) chrome.tabs.sendMessage(tab.id, { type: 'lgt-toggle-panel' }, () => void chrome.runtime.lastError);
+    });
     await page.locator('#lgt-panel').waitFor({ state: 'visible', timeout: 15000 });
     const panel = page.locator('#lgt-panel');
     await panel.locator('.lgt-tab').filter({ hasText: 'Bundle' }).click();
@@ -60,33 +57,25 @@ async function main() {
     await selects.nth(1).selectOption(config.pageEnv);
     await selects.nth(3).selectOption(config.mode);
     await selects.nth(2).selectOption(config.bundleEnv);
-    await panel.locator('select:visible').nth(4).selectOption(config.device);
-    await panel.locator('input[placeholder^="One-time token"]').fill('live-smoke-token');
+    await selects.nth(4).selectOption(config.device);
+    bundleRequests.length = 0; coreFailures.length = 0;
     const navigation = page.waitForEvent('domcontentloaded', { timeout: 30000 });
     await panel.getByRole('button', { name: 'Apply', exact: true }).click();
-    const applyOutcome = await Promise.race([
-      navigation.then(() => 'navigated'),
-      page.waitForFunction(() => {
-        const visible = [...document.querySelectorAll('#lgt-panel .lgt-log')].find((item) => getComputedStyle(item).display !== 'none' && item.offsetParent);
-        return visible && /Failed:|refused:|Blocked:/.test(visible.textContent) ? visible.textContent : false;
-      }, null, { timeout: 15000 }).then((handle) => handle.jsonValue()),
-    ]);
-    if (applyOutcome !== 'navigated') throw new Error(`Apply did not start: ${applyOutcome}`);
+    await navigation;
     await page.waitForTimeout(8000);
-    const redirectUrls = await sw.evaluate(async () => (await chrome.declarativeNetRequest.getSessionRules())
-      .filter((rule) => rule.id >= 930001 && rule.id < 950001)
-      .map((rule) => rule.action && rule.action.redirect && rule.action.redirect.url).filter(Boolean));
-    if (!redirectUrls.some((url) => url.includes(`/dist/${config.bundleEnv}/`))) {
-      throw new Error(`target bundle rules not installed: ${JSON.stringify(redirectUrls)}`);
+    const runtime = await page.evaluate(() => window.__lgtCrossLayerRuntimeActive);
+    if (!runtime || runtime.bundleEnv !== config.bundleEnv || runtime.backendEnv !== (config.mode === 'hybrid' ? config.pageEnv : config.bundleEnv)) {
+      throw new Error(`MAIN-world runtime mismatch: ${JSON.stringify(runtime)}`);
     }
+    const bundleRules = await sw.evaluate(async () => (await chrome.declarativeNetRequest.getSessionRules())
+      .filter((rule) => rule.id >= 930001 && rule.id < 950001)
+      .map((rule) => ({ regex: rule.condition.regexFilter, redirect: rule.action.redirect })));
     if (!bundleRequests.some((url) => url.includes(`/dist/${config.bundleEnv}/`))) {
-      throw new Error(`target bundle request not observed: ${JSON.stringify(bundleRequests.slice(0, 5))}`);
+      throw new Error(`target bundle request not observed: rules=${JSON.stringify(bundleRules)} requests=${JSON.stringify(bundleRequests.slice(0, 5))} failures=${JSON.stringify(bundleFailures.slice(0, 5))}`);
     }
     if (coreFailures.length) throw new Error(`core 4xx responses: ${JSON.stringify(coreFailures)}`);
-    console.log(`PASS Host=${config.pageEnv.toUpperCase()} Bundle=${config.bundleEnv.toUpperCase()} Backend=${(config.mode === 'hybrid' ? config.pageEnv : config.bundleEnv).toUpperCase()}`);
-  } finally {
-    await new Promise((resolve) => lab.server.close(resolve));
-  }
+    console.log(`PASS Host=${config.pageEnv.toUpperCase()} Bundle=${config.bundleEnv.toUpperCase()} Backend=${runtime.backendEnv.toUpperCase()} (normal Chrome runtime)`);
+  } finally { await context.close(); }
 }
 
 main().catch((error) => { console.error(error); process.exitCode = 1; });
