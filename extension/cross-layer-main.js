@@ -25,6 +25,34 @@
   }
   if (!sameConfiguredPage(location.href, config.expectedUrl)) return;
 
+  // The BLE host's SSR markup creates the sportsbook element without the
+  // BDE component's diagnostic attribute. Reading the query string later is
+  // too late: the target custom element snapshots its attributes in its first
+  // connectedCallback, leaving obgState sealed even though the URL contains
+  // exposeObgState=true. Decorate that lifecycle before the target bundle
+  // registers the element, while retaining the component's own callback.
+  var nativeCustomElementDefine = window.customElements && window.customElements.define;
+  if (nativeCustomElementDefine) {
+    window.customElements.define = function (name, constructor, options) {
+      var isSportsbookElement = /^sb-xp-sportsbook$/i.test(String(name));
+      if (isSportsbookElement && constructor && constructor.prototype) {
+        var originalConnectedCallback = constructor.prototype.connectedCallback;
+        constructor.prototype.connectedCallback = function () {
+          if (location.search && new URLSearchParams(location.search).get('exposeObgState') === 'true') {
+            this.setAttribute('expose-obg-state', 'true');
+          }
+          if (typeof originalConnectedCallback === 'function') return originalConnectedCallback.apply(this, arguments);
+        };
+      }
+      try { return nativeCustomElementDefine.call(this, name, constructor, options); }
+      finally {
+        // The lifecycle decoration is single-purpose. Restore the browser API
+        // immediately after the target component is registered.
+        if (isSportsbookElement) window.customElements.define = nativeCustomElementDefine;
+      }
+    };
+  }
+
   var ENV_LABELS = ['test', 'qa', 'alpha'];
   var ENDPOINT_KEY = /(url|uri|endpoint|host|origin|api|auth|wallet|realtime|signalr)/i;
   function replaceEnvironment(value, environment) {

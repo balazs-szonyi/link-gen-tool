@@ -411,7 +411,7 @@ running.
 
 ## Known limitations (Chrome extension)
 
-### Experimental Cross-Layer runtime (v1.20.5)
+### Experimental Cross-Layer runtime (v1.20.6)
 
 Cross-layer hybrid mode now runs directly in the current normal Chrome tab.
 There is no CLI, token, Playwright browser, separate profile, or manual binding.
@@ -429,7 +429,11 @@ the page backend while loading the target bundle. `full-runtime` is disabled
 until target static/user-context bootstrap is available extension-native.
 Bundle Apply preserves the current link and adds
 `exposeObgState=true&exposeObgRt=true&sealStore=false` before reloading, so
-the runtime diagnostics remain available on the resulting page.
+the runtime diagnostics remain available on the resulting page. When a BLE
+host's SSR markup is combined with a BDE target bundle, the runtime also sets
+`expose-obg-state="true"` before the target custom element's first lifecycle
+callback; this prevents the target component from sealing its state before it
+can observe the diagnostic query flag.
 For Sportsbook Tool v1.6.166 compatibility, cross-layer mode supplies the
 selected bundle environment only during the tool script's synchronous startup
 calculation, then immediately restores the page's real startup context. This

@@ -95,7 +95,15 @@ async function main() {
     const navigation = page.waitForEvent('domcontentloaded', { timeout: 30000 });
     await panel.getByRole('button', { name: 'Apply', exact: true }).click();
     await navigation;
-    await page.waitForTimeout(8000);
+    const failedFetchTimeline = [];
+    for (let elapsed = 0; elapsed <= 8000; elapsed += 500) {
+      const count = await page.getByText('Failed to fetch', { exact: true }).count();
+      if (count) failedFetchTimeline.push(elapsed);
+      if (elapsed < 8000) await page.waitForTimeout(500);
+    }
+    if (failedFetchTimeline.length) {
+      throw new Error(`Sportsbook transiently rendered Failed to fetch at ms: ${failedFetchTimeline.join(',')}`);
+    }
     const finalUrl = new URL(page.url());
     if (finalUrl.searchParams.get('exposeObgState') !== 'true' || finalUrl.searchParams.get('exposeObgRt') !== 'true' || finalUrl.searchParams.get('sealStore') !== 'false') {
       throw new Error(`diagnostic query parameters missing after Apply: ${finalUrl}`);
@@ -104,6 +112,15 @@ async function main() {
     const expectedBackendEnv = config.mode === 'hybrid' || config.mode === 'standard' ? config.pageEnv : config.bundleEnv;
     if (config.mode !== 'standard' && (!runtime || runtime.bundleEnv !== config.bundleEnv || runtime.backendEnv !== expectedBackendEnv)) {
       throw new Error(`MAIN-world runtime mismatch: ${JSON.stringify(runtime)}`);
+    }
+    if (config.mode !== 'standard') {
+      const diagnosticAttributes = await page.locator('sb-xp-sportsbook').first().evaluate((element) => ({
+        exposeObgState: element.getAttribute('expose-obg-state'),
+        attributes: Object.fromEntries(Array.from(element.attributes, (attribute) => [attribute.name, attribute.value])),
+      }));
+      if (diagnosticAttributes.exposeObgState !== 'true') {
+        throw new Error(`sportsbook diagnostic attributes missing: ${JSON.stringify(diagnosticAttributes)}`);
+      }
     }
     const bundleRules = await sw.evaluate(async () => (await chrome.declarativeNetRequest.getSessionRules())
       .filter((rule) => rule.id >= 930001 && rule.id < 950001)
@@ -136,20 +153,33 @@ async function main() {
     if (bodyText.includes('Failed to initialize Sportsbook')) {
       throw new Error('Sportsbook rendered its failed-initialization state');
     }
-    if (bodyText.includes('Failed to fetch')) throw new Error('Sportsbook rendered Failed to fetch');
+    const failedFetch = page.getByText('Failed to fetch', { exact: true });
+    if (await failedFetch.count()) {
+      const context = await failedFetch.first().evaluate((element) => ({
+        html: element.outerHTML,
+        parent: element.parentElement?.outerHTML?.slice(0, 2000),
+        rootHost: element.getRootNode()?.host?.outerHTML?.slice(0, 2000),
+      }));
+      throw new Error(`Sportsbook rendered Failed to fetch: ${JSON.stringify(context)}`);
+    }
     if (config.mode !== 'standard') {
       const startupEnvironmentBeforeTool = await page.evaluate(() => window.sbMfeStartupContext?.appContext?.environment);
-      await page.evaluate(() => new Promise((resolve, reject) => {
-        const script = document.createElement('script');
-        script.id = 'sportsbookToolScript';
-        script.src = 'https://betssongroup.github.io/sportsbook/qa/sportsbook-tool/sportsbookTool.min.js';
-        script.onload = resolve;
-        script.onerror = () => reject(new Error('Sportsbook Tool script failed to load'));
-        document.head.appendChild(script);
-      }));
+      if (!(await page.locator('#sportsbookToolScript').count())) {
+        await page.evaluate(() => new Promise((resolve, reject) => {
+          const script = document.createElement('script');
+          script.id = 'sportsbookToolScript';
+          script.src = 'https://betssongroup.github.io/sportsbook/qa/sportsbook-tool/sportsbookTool.min.js';
+          script.onload = resolve;
+          script.onerror = () => reject(new Error('Sportsbook Tool script failed to load'));
+          document.head.appendChild(script);
+        }));
+      }
       const reportedEnvironment = (await page.locator('#environment').textContent({ timeout: 15000 })).trim();
       if (reportedEnvironment !== config.bundleEnv.toUpperCase()) {
         throw new Error(`Sportsbook Tool environment mismatch: expected ${config.bundleEnv.toUpperCase()}, got ${reportedEnvironment}`);
+      }
+      if (await page.getByText('Features limited as obgState not exposed', { exact: false }).count()) {
+        throw new Error('Sportsbook Tool still reports that obgState is not exposed');
       }
       await page.waitForTimeout(50);
       const startupEnvironmentAfterTool = await page.evaluate(() => window.sbMfeStartupContext?.appContext?.environment);
