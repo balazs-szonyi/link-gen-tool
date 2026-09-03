@@ -1,6 +1,120 @@
 /* Link Gen Tool Cross-Layer runtime - MAIN world, document_start. */
 (function () {
   'use strict';
+  // Bet Void Mock: always installed on every document before the app can
+  // capture fetch/XMLHttpRequest. It passively records a lightweight summary
+  // of every real coupon-history
+  // response it sees (so the content-script UI can list real, current
+  // coupons+legs without the user pasting anything), and only rewrites a
+  // response when a tab+origin-scoped sessionStorage config is both
+  // enabled and targets a coupon actually present in that response.
+  (function installBetVoidMockRuntime() {
+    var betVoidMock = window.LgtBetVoidMock;
+    if (!betVoidMock || window.__lgtBetVoidMockRuntimeInstalled) return;
+    window.__lgtBetVoidMockRuntimeInstalled = true;
+
+    function readConfig() {
+      var raw;
+      try { raw = sessionStorage.getItem(betVoidMock.CONFIG_KEY); } catch (e) { return null; }
+      if (!raw) return null;
+      try {
+        var config = JSON.parse(raw);
+        return config && config.enabled && config.couponId ? config : null;
+      } catch (e) { return null; }
+    }
+
+    function recordSeen(url, payload) {
+      try {
+        sessionStorage.setItem(betVoidMock.LAST_SEEN_KEY, JSON.stringify({
+          url: String(url),
+          capturedAt: Date.now(),
+          coupons: betVoidMock.summarizeCoupons(payload)
+        }));
+      } catch (e) { /* passive telemetry must never affect the response */ }
+    }
+
+    function recordMatch(url, couponId, appliedLegCount) {
+      try {
+        var previousRaw = sessionStorage.getItem(betVoidMock.LAST_MATCH_KEY);
+        var previous = previousRaw ? JSON.parse(previousRaw) : null;
+        sessionStorage.setItem(betVoidMock.LAST_MATCH_KEY, JSON.stringify({
+          url: String(url),
+          couponId: couponId,
+          appliedLegCount: appliedLegCount,
+          count: (previous && previous.count || 0) + 1,
+          matchedAt: Date.now()
+        }));
+      } catch (e) { /* status telemetry must never affect the response */ }
+    }
+
+    function responseWithBetVoidMock(response, url) {
+      var contentType = response.headers.get('content-type') || '';
+      if (!/json/i.test(contentType)) return Promise.resolve(response);
+      return response.clone().json().then(function (original) {
+        if (!betVoidMock.hasResponseShape(original)) return response;
+        recordSeen(url, original);
+        var config = readConfig();
+        if (!config) return response;
+        var result = betVoidMock.applyVoidToCoupon(original, config);
+        if (!result.matched) return response;
+        recordMatch(url, config.couponId, result.appliedLegCount);
+        var headers = new Headers(response.headers);
+        headers.delete('content-length');
+        headers.delete('content-encoding');
+        headers.set('content-type', 'application/json');
+        return new Response(JSON.stringify(result.payload), {
+          status: response.status,
+          statusText: response.statusText,
+          headers: headers
+        });
+      }).catch(function () { return response; });
+    }
+
+    var nativeBetVoidFetch = window.fetch;
+    window.fetch = function (input, init) {
+      var url = typeof input === 'string' || input instanceof URL ? String(input) : input.url;
+      var method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
+      return nativeBetVoidFetch.apply(this, arguments).then(function (response) {
+        if (method !== 'GET' || !betVoidMock.matchesEndpoint(url)) return response;
+        return responseWithBetVoidMock(response, url);
+      });
+    };
+
+    var NativeBetVoidXHR = window.XMLHttpRequest;
+    function BetVoidMockXHR() {
+      var xhr = new NativeBetVoidXHR();
+      var requestUrl = '';
+      var requestMethod = 'GET';
+      var nativeOpen = xhr.open;
+      xhr.open = function (method, url) {
+        requestMethod = String(method || 'GET').toUpperCase();
+        requestUrl = String(url);
+        return nativeOpen.apply(xhr, arguments);
+      };
+      xhr.addEventListener('readystatechange', function () {
+        if (xhr.readyState !== 4 || requestMethod !== 'GET' || !betVoidMock.matchesEndpoint(requestUrl)) return;
+        try {
+          var contentType = xhr.getResponseHeader('content-type') || '';
+          if (!/json/i.test(contentType) || (xhr.responseType && xhr.responseType !== 'json' && xhr.responseType !== 'text')) return;
+          var original = xhr.responseType === 'json' ? xhr.response : JSON.parse(xhr.responseText);
+          if (!betVoidMock.hasResponseShape(original)) return;
+          recordSeen(requestUrl, original);
+          var config = readConfig();
+          if (!config) return;
+          var result = betVoidMock.applyVoidToCoupon(original, config);
+          if (!result.matched) return;
+          recordMatch(requestUrl, config.couponId, result.appliedLegCount);
+          var serialized = JSON.stringify(result.payload);
+          Object.defineProperty(xhr, 'responseText', { configurable: true, get: function () { return serialized; } });
+          Object.defineProperty(xhr, 'response', { configurable: true, get: function () { return xhr.responseType === 'json' ? result.payload : serialized; } });
+        } catch (e) { /* retain the native response */ }
+      });
+      return xhr;
+    }
+    BetVoidMockXHR.prototype = NativeBetVoidXHR.prototype;
+    Object.keys(NativeBetVoidXHR).forEach(function (key) { try { BetVoidMockXHR[key] = NativeBetVoidXHR[key]; } catch (e) {} });
+    window.XMLHttpRequest = BetVoidMockXHR;
+  })();
   var KEY = '__lgtCrossLayerRuntimeV1';
   var raw;
   try { raw = sessionStorage.getItem(KEY); } catch (e) { return; }

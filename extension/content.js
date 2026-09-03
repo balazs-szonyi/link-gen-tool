@@ -1847,21 +1847,24 @@
     var tabC = el('div', { class: 'lgt-tab' }, ['Credentials']);
     var tabD = el('div', { class: 'lgt-tab' }, ['Bundle']);
     var tabE = el('div', { class: 'lgt-tab' }, ['BLE Data']);
-    tabs.appendChild(tabA); tabs.appendChild(tabB); tabs.appendChild(tabC); tabs.appendChild(tabD); tabs.appendChild(tabE);
+    var tabG = el('div', { class: 'lgt-tab' }, ['Bet Void']);
+    tabs.appendChild(tabA); tabs.appendChild(tabB); tabs.appendChild(tabC); tabs.appendChild(tabD); tabs.appendChild(tabE); tabs.appendChild(tabG);
 
     var bodyA = buildModeA();
     var bodyB = buildModeB();
     var bodyC = buildModeC();
     var bodyD = buildModeD();
     var bodyE = buildModeE();
+    var bodyG = buildModeG();
     bodyB.style.display = 'none';
     bodyC.style.display = 'none';
     bodyD.style.display = 'none';
     bodyE.style.display = 'none';
+    bodyG.style.display = 'none';
     bodyB.__lgtGoToCredentials = function () { tabC.click(); };
     bodyA.__lgtGoToCredentials = function () { tabC.click(); };
 
-    var pairs = [[tabA, bodyA], [tabB, bodyB], [tabC, bodyC], [tabD, bodyD], [tabE, bodyE]];
+    var pairs = [[tabA, bodyA], [tabB, bodyB], [tabC, bodyC], [tabD, bodyD], [tabE, bodyE], [tabG, bodyG]];
     pairs.forEach(function (pair) {
       pair[0].addEventListener('click', function () {
         pairs.forEach(function (p) {
@@ -1882,6 +1885,7 @@
     content.appendChild(bodyC);
     content.appendChild(bodyD);
     content.appendChild(bodyE);
+    content.appendChild(bodyG);
 
     panel.appendChild(title);
     panel.appendChild(content);
@@ -3376,6 +3380,163 @@
     return wrap;
   }
 
+  // ---------------------------------------------------------------------
+  // "Bet Void" tab - local, tab+origin-scoped coupon-history response
+  // override that marks one or more legs of a REAL, already-placed coupon
+  // as Void while deliberately leaving that coupon's boostedOdds/
+  // bonusBetType fields untouched, reproducing the stale-Price-Boost-
+  // after-void frontend bug. Narrow-scope by design: it only ever targets
+  // exactly the coupon+legs the tester explicitly picks from a real,
+  // just-observed coupon-history response (see bet-void-mock.js
+  // LAST_SEEN_KEY) - it cannot invent or reassign a bonus.
+  // ---------------------------------------------------------------------
+
+  function buildModeG() {
+    var wrap = el('div', { 'data-lgt-bet-void': 'panel' });
+    var coupons = [];
+    var selectedCoupon = null;
+
+    var seenInfo = el('div', { class: 'lgt-result', 'data-lgt-bet-void-seen': 'true' }, ['No coupon-history response observed yet on this tab. Open Bet History (Open or Settled) once, then click Detect.']);
+    var couponSelect = el('select', { id: 'lgt-bet-void-coupon' }, [el('option', { value: '' }, ['-- detect coupons first --'])]);
+    var legsBox = el('div', { class: 'lgt-result', 'data-lgt-bet-void-legs': 'true' }, ['No coupon selected.']);
+    var oddsInput = el('input', { id: 'lgt-bet-void-odds', type: 'number', step: '0.01', min: '1', placeholder: 'e.g. 4.15 (leave blank to keep odds as-is)' });
+    var voidCouponChk = el('input', { id: 'lgt-bet-void-status', type: 'checkbox' });
+    voidCouponChk.checked = true;
+    var voidCouponLabel = el('label', { class: 'lgt-checkbox-row' }, [voidCouponChk, 'Also mark the whole coupon status as Void (matches the real reproduced bug)']);
+    var status = el('div', { class: 'lgt-log', 'data-lgt-bet-void-status': 'inactive' }, ['Not active on this tab/origin.']);
+
+    function readSeen() {
+      try {
+        var raw = sessionStorage.getItem(LgtBetVoidMock.LAST_SEEN_KEY);
+        return raw ? JSON.parse(raw) : null;
+      } catch (e) { return null; }
+    }
+
+    function readStoredConfig() {
+      try {
+        var raw = sessionStorage.getItem(LgtBetVoidMock.CONFIG_KEY);
+        if (!raw) return null;
+        var config = JSON.parse(raw);
+        return config && config.enabled && config.couponId ? config : null;
+      } catch (e) { return null; }
+    }
+
+    function couponLabel(c) {
+      return c.id + ' - ' + (c.eventNames[0] || c.type) + ' [' + c.status + ']' + (c.bonusBetType && c.bonusBetType !== 'Unset' ? ' (' + c.bonusBetType + ')' : '');
+    }
+
+    function renderLegs() {
+      legsBox.textContent = '';
+      if (!selectedCoupon) { legsBox.appendChild(document.createTextNode('No coupon selected.')); return; }
+      var header = document.createTextNode(
+        selectedCoupon.id + ' - stake ' + selectedCoupon.stake + ', totalOdds ' + selectedCoupon.totalOdds +
+        ', boostedOdds ' + selectedCoupon.boostedOdds + ', bonusBetType ' + selectedCoupon.bonusBetType + '\n'
+      );
+      legsBox.appendChild(header);
+      if (!selectedCoupon.legs.length) { legsBox.appendChild(document.createTextNode('No legs found on this coupon.')); return; }
+      selectedCoupon.legs.forEach(function (leg) {
+        var chk = el('input', { type: 'checkbox', 'data-lgt-bet-void-leg-index': String(leg.legIndex) });
+        var row = el('label', { class: 'lgt-checkbox-row' }, [chk, leg.label + ' (currently: ' + leg.currentStatus + ')']);
+        legsBox.appendChild(row);
+      });
+    }
+
+    function setStatus(state, text) {
+      status.setAttribute('data-lgt-bet-void-status', state);
+      status.textContent = text;
+    }
+
+    function refreshStatus() {
+      var config = readStoredConfig();
+      if (!config) return;
+      var suffix = '';
+      try {
+        var matchRaw = sessionStorage.getItem(LgtBetVoidMock.LAST_MATCH_KEY);
+        var match = matchRaw && JSON.parse(matchRaw);
+        suffix = match && match.count ? ' Last matched response: #' + match.count + ' (' + match.appliedLegCount + ' leg(s) voided).' : ' Waiting for a coupon-history response containing this coupon.';
+      } catch (e) { suffix = ' Waiting for a coupon-history response containing this coupon.'; }
+      setStatus('active', 'Active - coupon ' + config.couponId + ', ' + config.legIndices.length + ' leg(s) targeted.' + suffix);
+    }
+
+    var detectBtn = el('button', { id: 'lgt-bet-void-detect', class: 'secondary', onclick: function () {
+      var seen = readSeen();
+      if (!seen || !seen.coupons || !seen.coupons.length) {
+        seenInfo.textContent = 'No coupon-history response observed yet on this tab. Open Bet History (Open or Settled) once, then click Detect.';
+        return;
+      }
+      coupons = seen.coupons;
+      seenInfo.textContent = coupons.length + ' coupon(s) captured from ' + seen.url + ' (' + new Date(seen.capturedAt).toLocaleTimeString() + ').';
+      couponSelect.textContent = '';
+      couponSelect.appendChild(el('option', { value: '' }, ['-- choose a coupon --']));
+      coupons.forEach(function (c, index) {
+        couponSelect.appendChild(el('option', { value: String(index) }, [couponLabel(c)]));
+      });
+      selectedCoupon = null;
+      renderLegs();
+    } } , ['Detect coupons']);
+
+    couponSelect.addEventListener('change', function () {
+      var index = couponSelect.value;
+      selectedCoupon = index !== '' ? coupons[Number(index)] : null;
+      renderLegs();
+    });
+
+    var applyBtn = el('button', { id: 'lgt-bet-void-apply', onclick: function () {
+      if (!selectedCoupon) { setStatus('error', 'Select a coupon before Apply.'); return; }
+      var legIndices = Array.prototype.slice.call(legsBox.querySelectorAll('[data-lgt-bet-void-leg-index]'))
+        .filter(function (chk) { return chk.checked; })
+        .map(function (chk) { return Number(chk.getAttribute('data-lgt-bet-void-leg-index')); });
+      if (!legIndices.length) { setStatus('error', 'Select at least one leg to void.'); return; }
+      var oddsValue = oddsInput.value.trim();
+      var correctedOdds = oddsValue === '' ? undefined : Number(oddsValue);
+      if (correctedOdds !== undefined && (!isFinite(correctedOdds) || correctedOdds < 1)) {
+        setStatus('error', 'Corrected total odds must be a number >= 1, or left blank.');
+        return;
+      }
+      var config = {
+        enabled: true,
+        couponId: selectedCoupon.id,
+        legIndices: legIndices,
+        voidCouponStatus: voidCouponChk.checked,
+        correctedOdds: correctedOdds,
+        appliedAt: Date.now()
+      };
+      try {
+        sessionStorage.setItem(LgtBetVoidMock.CONFIG_KEY, JSON.stringify(config));
+        sessionStorage.removeItem(LgtBetVoidMock.LAST_MATCH_KEY);
+        setStatus('active', 'Active - coupon ' + config.couponId + ', ' + legIndices.length + ' leg(s) targeted. Reload or re-open Bet History to see it applied.');
+      } catch (err) {
+        setStatus('error', 'Apply failed: ' + friendlyErrorMessage(err));
+      }
+    } }, ['Apply']);
+
+    var stopBtn = el('button', { id: 'lgt-bet-void-stop', class: 'secondary', onclick: function () {
+      try {
+        sessionStorage.removeItem(LgtBetVoidMock.CONFIG_KEY);
+        sessionStorage.removeItem(LgtBetVoidMock.LAST_MATCH_KEY);
+      } catch (e) { /* reload still removes the active read path */ }
+      setStatus('inactive', 'Stopped. Reloading to restore native coupon-history responses...');
+      location.reload();
+    } }, ['Stop']);
+
+    wrap.appendChild(el('div', { class: 'lgt-row' }, [detectBtn]));
+    wrap.appendChild(seenInfo);
+    wrap.appendChild(el('label', {}, ['Target coupon']));
+    wrap.appendChild(couponSelect);
+    wrap.appendChild(legsBox);
+    wrap.appendChild(voidCouponLabel);
+    wrap.appendChild(el('label', {}, ['Corrected total odds (optional - what the backend actually recalculated to)']));
+    wrap.appendChild(oddsInput);
+    wrap.appendChild(el('div', { class: 'lgt-row' }, [applyBtn, stopBtn]));
+    wrap.appendChild(status);
+    wrap.appendChild(el('div', { class: 'lgt-hint', style: 'margin-top:8px' }, [
+      'Local browser-side override only - it does not modify the backend/settlement state, and never creates or voids a real coupon. It marks the selected leg(s) of the chosen REAL coupon as Void in the coupon-history GET response on this tab/origin, optionally recalculates totalOdds/payout, and deliberately leaves boostedOdds/bonusBetType unchanged - reproducing the stale Price Boost badge bug seen after a real trading-side void.'
+    ]));
+
+    pollWhileExtensionValid(refreshStatus, 1000);
+    refreshStatus();
+    return wrap;
+  }
   // ---------------------------------------------------------------------
   // Bootstrap
   // ---------------------------------------------------------------------
