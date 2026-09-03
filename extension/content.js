@@ -3444,6 +3444,7 @@
     function setStatus(state, text) {
       status.setAttribute('data-lgt-bet-void-status', state);
       status.textContent = text;
+      reloadBtn.style.display = state === 'active' ? '' : 'none';
     }
 
     function refreshStatus() {
@@ -3519,6 +3520,14 @@
       location.reload();
     } }, ['Stop']);
 
+    // Apply only writes the config - it deliberately does not force a
+    // reload (matches the existing Bonus Mock tab's behavior), since the
+    // tester may still be on an unrelated page. But without a fresh
+    // coupon-history request nothing on screen changes, which is
+    // confusing - so surface an explicit, one-click way to trigger that
+    // refetch right after Apply.
+    var reloadBtn = el('button', { id: 'lgt-bet-void-reload', class: 'secondary', style: 'display:none', onclick: function () { location.reload(); } }, ['Reload page now']);
+
     wrap.appendChild(el('div', { class: 'lgt-row' }, [detectBtn]));
     wrap.appendChild(seenInfo);
     wrap.appendChild(el('label', {}, ['Target coupon']));
@@ -3527,7 +3536,7 @@
     wrap.appendChild(voidCouponLabel);
     wrap.appendChild(el('label', {}, ['Corrected total odds (optional - what the backend actually recalculated to)']));
     wrap.appendChild(oddsInput);
-    wrap.appendChild(el('div', { class: 'lgt-row' }, [applyBtn, stopBtn]));
+    wrap.appendChild(el('div', { class: 'lgt-row' }, [applyBtn, stopBtn, reloadBtn]));
     wrap.appendChild(status);
     wrap.appendChild(el('div', { class: 'lgt-hint', style: 'margin-top:8px' }, [
       'Local browser-side override only - it does not modify the backend/settlement state, and never creates or voids a real coupon. It marks the selected leg(s) of the chosen REAL coupon as Void in the coupon-history GET response on this tab/origin, optionally recalculates totalOdds/payout, and deliberately leaves boostedOdds/bonusBetType unchanged - reproducing the stale Price Boost badge bug seen after a real trading-side void.'
