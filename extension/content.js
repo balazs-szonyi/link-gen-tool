@@ -1729,6 +1729,7 @@
 
   var PANEL_OPEN_KEY = 'lgt-panel-open';
   var PANEL_COLLAPSED_KEY = 'lgt-panel-collapsed';
+  var ACTIVE_TAB_KEY = 'lgt-active-tab';
 
   var THEME_KEY = 'lgt-theme';
 
@@ -1873,13 +1874,17 @@
     bodyB.__lgtGoToCredentials = function () { tabC.click(); };
     bodyA.__lgtGoToCredentials = function () { tabC.click(); };
 
-    var pairs = [[tabA, bodyA], [tabB, bodyB], [tabC, bodyC], [tabD, bodyD], [tabE, bodyE], [tabF, bodyF]];
+    var pairs = [
+      ['generate', tabA, bodyA], ['live-login', tabB, bodyB], ['credentials', tabC, bodyC],
+      ['bundle', tabD, bodyD], ['ble-data', tabE, bodyE], ['bonus-mock', tabF, bodyF]
+    ];
     pairs.forEach(function (pair) {
-      pair[0].addEventListener('click', function () {
+      pair[1].addEventListener('click', function () {
         pairs.forEach(function (p) {
-          p[0].classList.toggle('active', p === pair);
-          p[1].style.display = p === pair ? '' : 'none';
+          p[1].classList.toggle('active', p === pair);
+          p[2].style.display = p === pair ? '' : 'none';
         });
+        try { sessionStorage.setItem(ACTIVE_TAB_KEY, pair[0]); } catch (e) {}
       });
     });
 
@@ -1920,6 +1925,11 @@
     try {
       if (sessionStorage.getItem(PANEL_COLLAPSED_KEY) === '1') panel.classList.add('lgt-collapsed');
       if (sessionStorage.getItem(PANEL_OPEN_KEY) === '1') panel.style.display = '';
+      var savedTabId = sessionStorage.getItem(ACTIVE_TAB_KEY);
+      if (savedTabId) {
+        var savedPair = pairs.filter(function (p) { return p[0] === savedTabId; })[0];
+        if (savedPair) savedPair[1].click();
+      }
     } catch (e) {}
     return panel;
   }

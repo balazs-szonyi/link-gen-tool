@@ -150,6 +150,11 @@ async function main() {
   bundleRequests.length = 0;
   await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.waitForTimeout(5000);
+  const activeTabAfterReload = ((await page.locator('#lgt-panel .lgt-tab.active').textContent().catch(() => '')) || '').trim();
+  if (activeTabAfterReload !== 'Bundle') {
+    throw new Error('REGRESSION: active panel tab changed after reload; expected "Bundle", got: ' + JSON.stringify(activeTabAfterReload));
+  }
+  log('PASS: Bundle remains the active panel tab after reload.');
   log('Bundle-like requests observed after reload: ' + bundleRequests.length);
   bundleRequests.forEach((u) => log('  ' + u));
   const redirected = bundleRequests.some((u) => u.indexOf('.' + TARGET_ENV + '.') !== -1 || u.indexOf('/' + TARGET_ENV + '/') !== -1);
