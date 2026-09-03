@@ -1720,6 +1720,7 @@
 
   var PANEL_OPEN_KEY = 'lgt-panel-open';
   var PANEL_COLLAPSED_KEY = 'lgt-panel-collapsed';
+  var ACTIVE_TAB_KEY = 'lgt-active-tab';
 
   var THEME_KEY = 'lgt-theme';
 
@@ -1864,13 +1865,24 @@
     bodyB.__lgtGoToCredentials = function () { tabC.click(); };
     bodyA.__lgtGoToCredentials = function () { tabC.click(); };
 
-    var pairs = [[tabA, bodyA], [tabB, bodyB], [tabC, bodyC], [tabD, bodyD], [tabE, bodyE], [tabG, bodyG]];
+    var pairs = [
+      ['gen', tabA, bodyA], ['livelogin', tabB, bodyB], ['creds', tabC, bodyC],
+      ['bundle', tabD, bodyD], ['ble', tabE, bodyE], ['betvoid', tabG, bodyG]
+    ];
     pairs.forEach(function (pair) {
-      pair[0].addEventListener('click', function () {
+      pair[1].addEventListener('click', function () {
         pairs.forEach(function (p) {
-          p[0].classList.toggle('active', p === pair);
-          p[1].style.display = p === pair ? '' : 'none';
+          p[1].classList.toggle('active', p === pair);
+          p[2].style.display = p === pair ? '' : 'none';
         });
+        // Remembers which tab was open so a page reload (whether triggered
+        // by this tool's own Stop/Reload buttons, or the tester's own F5)
+        // reopens the same tab instead of silently falling back to
+        // Generate - previously every reload lost the tester's place,
+        // which was especially confusing right after using Bet Void's
+        // Apply, since the next thing to do is reload and re-check that
+        // same tab.
+        try { sessionStorage.setItem(ACTIVE_TAB_KEY, pair[0]); } catch (e) {}
       });
     });
 
@@ -1911,6 +1923,11 @@
     try {
       if (sessionStorage.getItem(PANEL_COLLAPSED_KEY) === '1') panel.classList.add('lgt-collapsed');
       if (sessionStorage.getItem(PANEL_OPEN_KEY) === '1') panel.style.display = '';
+      var savedTabId = sessionStorage.getItem(ACTIVE_TAB_KEY);
+      if (savedTabId) {
+        var savedPair = pairs.filter(function (p) { return p[0] === savedTabId; })[0];
+        if (savedPair) savedPair[1].click();
+      }
     } catch (e) {}
     return panel;
   }
@@ -3444,7 +3461,6 @@
     function setStatus(state, text) {
       status.setAttribute('data-lgt-bet-void-status', state);
       status.textContent = text;
-      reloadBtn.style.display = state === 'active' ? '' : 'none';
     }
 
     function refreshStatus() {
@@ -3520,14 +3536,6 @@
       location.reload();
     } }, ['Stop']);
 
-    // Apply only writes the config - it deliberately does not force a
-    // reload (matches the existing Bonus Mock tab's behavior), since the
-    // tester may still be on an unrelated page. But without a fresh
-    // coupon-history request nothing on screen changes, which is
-    // confusing - so surface an explicit, one-click way to trigger that
-    // refetch right after Apply.
-    var reloadBtn = el('button', { id: 'lgt-bet-void-reload', class: 'secondary', style: 'display:none', onclick: function () { location.reload(); } }, ['Reload page now']);
-
     wrap.appendChild(el('div', { class: 'lgt-row' }, [detectBtn]));
     wrap.appendChild(seenInfo);
     wrap.appendChild(el('label', {}, ['Target coupon']));
@@ -3536,10 +3544,10 @@
     wrap.appendChild(voidCouponLabel);
     wrap.appendChild(el('label', {}, ['Corrected total odds (optional - what the backend actually recalculated to)']));
     wrap.appendChild(oddsInput);
-    wrap.appendChild(el('div', { class: 'lgt-row' }, [applyBtn, stopBtn, reloadBtn]));
+    wrap.appendChild(el('div', { class: 'lgt-row' }, [applyBtn, stopBtn]));
     wrap.appendChild(status);
     wrap.appendChild(el('div', { class: 'lgt-hint', style: 'margin-top:8px' }, [
-      'Local browser-side override only - it does not modify the backend/settlement state, and never creates or voids a real coupon. It marks the selected leg(s) of the chosen REAL coupon as Void in the coupon-history GET response on this tab/origin, optionally recalculates totalOdds/payout, and deliberately leaves boostedOdds/bonusBetType unchanged - reproducing the stale Price Boost badge bug seen after a real trading-side void.'
+      'Local browser-side override only - it does not modify the backend/settlement state, and never creates or voids a real coupon. It marks the selected leg(s) of the chosen REAL coupon as Void in the coupon-history GET response on this tab/origin, optionally recalculates totalOdds/payout, and deliberately leaves boostedOdds/bonusBetType unchanged - reproducing the stale Price Boost badge bug seen after a real trading-side void. IMPORTANT: after Apply, do NOT do a full browser reload (F5) while on a coupon-detail deep link (a URL containing couponDetail=...) - this QA app has a known race that can falsely redirect you to a logged-out home page. Instead, go back to the plain Bet History list (no couponDetail param) and switch between the Open/Settled tabs there, or re-open the coupon detail from that list - either triggers a fresh in-app request without a full page reload.'
     ]));
 
     pollWhileExtensionValid(refreshStatus, 1000);
