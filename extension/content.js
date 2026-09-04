@@ -3063,11 +3063,25 @@
     var applyDisabledBySandboxGuard = !!detected.isSandboxHost;
     if (applyDisabledBySandboxGuard) sandboxWarning.style.display = '';
 
+    // refreshStatus() below polls every 3s and used to unconditionally
+    // force targetEnvSel back to whatever override is CURRENTLY active,
+    // even if the user had just picked a different, not-yet-applied value
+    // in the dropdown - the very next poll tick (well within a normal
+    // human's "pick a value, then look for the Apply button" pause) would
+    // silently snap it back, making the dropdown look like it "refused" to
+    // change (2026-09-04 bug report). Track whether the user has touched
+    // any of the controls that feed targetEnvSel since the last time it
+    // was known to match reality, and only let the poll resync it while
+    // that is NOT the case - a page reload after Apply (see startBundle
+    // above) rebuilds this whole tab from scratch anyway, so no separate
+    // "clear on success" step is needed for the Apply path.
+    var targetEnvUserDirty = false;
+
     function refreshStatus() {
       chrome.runtime.sendMessage({ type: 'lgt-bundle-status' }, function (res) {
         void chrome.runtime.lastError;
         if (!res || !res.ok) return;
-        if (res.active && res.targetEnv && ENV_LABELS.indexOf(res.targetEnv) !== -1) {
+        if (!targetEnvUserDirty && res.active && res.targetEnv && ENV_LABELS.indexOf(res.targetEnv) !== -1) {
           targetEnvSel.value = res.targetEnv;
           refreshTargetEnv(false);
         }
@@ -3131,6 +3145,7 @@
           void chrome.runtime.lastError;
           status.textContent = 'Not active on this tab.';
         });
+        targetEnvUserDirty = false;
         try { sessionStorage.removeItem('__lgtCrossLayerRuntimeV1'); } catch (e) {}
         try { sessionStorage.removeItem(BUNDLE_DIAGNOSTICS_KEY); } catch (e) {}
       }
@@ -3140,10 +3155,10 @@
     // Environment is intentionally never persisted - see the restore
     // comment below for why (it must always reflect the live page, not a
     // remembered value from a different tab/environment).
-    curEnvSel.addEventListener('change', function () { refreshTargetEnv(true); });
-    targetEnvSel.addEventListener('change', function () { refreshTargetEnv(false); });
-    modeSel.addEventListener('change', function () { saveBundleState({ mode: modeSel.value }); refreshTargetEnv(true); });
-    deviceSel.addEventListener('change', function () { saveBundleState({ device: deviceSel.value }); refreshTargetEnv(false); });
+    curEnvSel.addEventListener('change', function () { targetEnvUserDirty = true; refreshTargetEnv(true); });
+    targetEnvSel.addEventListener('change', function () { targetEnvUserDirty = true; refreshTargetEnv(false); });
+    modeSel.addEventListener('change', function () { saveBundleState({ mode: modeSel.value }); targetEnvUserDirty = true; refreshTargetEnv(true); });
+    deviceSel.addEventListener('change', function () { saveBundleState({ device: deviceSel.value }); targetEnvUserDirty = true; refreshTargetEnv(false); });
 
     wrap.appendChild(el('label', {}, ['Brand']));
     wrap.appendChild(brandSel);
