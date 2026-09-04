@@ -142,12 +142,24 @@ brand page you're already logged into — no CLI, no headless automation.
   visible above the tabs): shows one row per **brand + runtime layer +
   device** combination actually detected on the current tab, across every
   frame, not a single tab-wide guess. A brand's page may run an MFE
-  widget, an iframe/OBGA embed, and a NodeJS integration at once, or the
+  widget, a Fabric/OBGA embed, and a NodeJS integration at once, or the
   same layer in two different frames (e.g. desktop MFE plus a mobile
-  iframe test harness) — each gets its own row, e.g.:
+  Fabric/OBGA test harness) — each gets its own row, e.g.:
   - `Firestorm · MFE: v8.2.3.4918-re0ade7b / QA (desktop) — Confirmed`
-  - `Betsson · iframe: v8.1.15.4896-hc2cb4ed / QA (mobile) — Confirmed`
+  - `Betsson · Fabric: v8.1.15.4896-hc2cb4ed / QA (mobile) — Confirmed`
   - `NordicBet · NodeJS: v8.2.1.4910-h96b2913 / QA — Partially verified`
+
+  > **Naming note**: the layer's display label is **"Fabric"**, not
+  > "iframe" — even though internally (storage keys, code, tests) it is
+  > still identified as `iframe` because that's the term the original
+  > spec used for whatever exposes `obgClientEnvironmentConfig`. That
+  > marker was never a check for a literal DOM `<iframe>` element, only
+  > a JS global read, and "Fabric" is the real dev-team name for this
+  > legacy shell/wrapper runtime (matching the third-party Sportsbook
+  > Tool extension's own `(Fabric + mFE)` label). A developer has
+  > confirmed there is no such thing as "Fabric + iframe" as two
+  > separate, coexisting layers — they are the same shell, so showing
+  > "iframe" as if it were a distinct layer name was a legacy misnomer.
 
   There is no manual verification step any more — the previous **"Verify
   with page state"** button (which read `window.xSbState`) has been
@@ -157,7 +169,7 @@ brand page you're already logged into — no CLI, no headless automation.
     content script running in every frame: `window.sbMfeStartupContext` /
     `sbXpSportsbookAppVersion` for the MFE layer,
     `window.obgClientEnvironmentConfig.startupContext` for the
-    iframe/OBGA layer, `window.nodeContext` for the NodeJS layer. Each
+    Fabric/OBGA layer, `window.nodeContext` for the NodeJS layer. Each
     marker supplies that layer's brandId/brandName, version, and (where
     available) environment. Runtime contexts hydrate **progressively**
     within a single page load (e.g. a marker can appear first with only
@@ -168,7 +180,7 @@ brand page you're already logged into — no CLI, no headless automation.
     its own once the runtime finishes hydrating, without needing a page
     reload.
   - **Independent network confirmation** per layer/frame: the MFE
-    layer's own dist-bundle request, the iframe/OBGA layer's config
+    layer's own dist-bundle request, the Fabric/OBGA layer's config
     request (URL brand/facade/version-family plus the `x-sb-app-version`
     response header — used only as a version source, never as an
     environment source, since the API host serving it can differ from
@@ -210,16 +222,16 @@ brand page you're already logged into — no CLI, no headless automation.
   backward compatibility), and since every value is identical, two rows
   would just be noise. These are merged into **one row listing every
   agreeing layer**, e.g.:
-  - `Firestorm · MFE + iframe: v8.3.0.4928-b1d00c18 / QA (desktop) — Confirmed`
+  - `Firestorm · MFE + Fabric: v8.3.0.4928-b1d00c18 / QA (desktop) — Confirmed`
 
-  with a detail line explaining why (`Hybrid runtime: MFE + iframe
+  with a detail line explaining why (`Hybrid runtime: MFE + Fabric
   markers all present in this frame with matching brand+version+
   environment — shown as one row instead of 2 duplicates.`). A brand
-  that only runs one layer (e.g. a plain iframe/OBGA "B2B" integration
+  that only runs one layer (e.g. a plain Fabric/OBGA "B2B" integration
   with no MFE widget at all) correctly still shows a single row for that
   one layer — the absence of a second row is not a bug, it means the
   page genuinely doesn't expose a second layer's runtime marker. MFE and
-  iframe rows that disagree on version, environment, or device are
+  Fabric rows that disagree on version, environment, or device are
   **not** merged and remain separate rows, exactly as before.
 
   A generic host with no brand in its own hostname (e.g.
@@ -308,8 +320,12 @@ manual pass:
    you:
    - Two brands with different indexer versions each resolve to their
      OWN brandId (never a value from the other brand or environment).
-   - A page with both MFE and iframe layers active shows two independent
-     rows, each with its own status.
+   - A page with MFE and Fabric layers active in *different* frames, or
+     agreeing on different versions, shows independent rows for each; if
+     both layers are Confirmed in the *same* frame on the exact same
+     brand+version+environment+device, they are merged into one row
+     listing both layers instead (see the hybrid-runtime note above) —
+     that merge is expected, not a bug.
    - Desktop and mobile are reported as separate rows/devices, never
      merged into one.
    - A QA-bundle page whose request happens to carry `bleSource=1` to an

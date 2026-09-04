@@ -2932,7 +2932,19 @@
   // the independent network evidence are), so nothing needs a user to
   // click a button to "confirm" it.
   var STATUS_LABELS = { confirmed: 'Confirmed', partial: 'Partially verified', mismatch: 'Mismatch', unclassified: 'Unclassified' };
-  var LAYER_LABELS = { mfe: 'MFE', iframe: 'iframe', nodejs: 'NodeJS' };
+  // Layer -> user-facing label. Internally we key everything on 'iframe'
+  // (network/runtime store keys, classification logic, tests) because
+  // that is the identifier the original spec used for whatever exposes
+  // `obgClientEnvironmentConfig` - but that marker is NOT a check for a
+  // literal DOM <iframe> element, only a JS global read. The actual dev
+  // team's own name for this legacy shell/wrapper runtime is "Fabric"
+  // (confirmed directly by a developer, and matching the third-party
+  // Sportsbook Tool extension's own "(Fabric + mFE)" label) - and per
+  // that same confirmation, "Fabric" and "iframe" are NOT two different
+  // things that can coexist as separate layers; they are the same shell,
+  // so the user-facing text says "Fabric" to avoid implying a second,
+  // independent embed that doesn't exist.
+  var LAYER_LABELS = { mfe: 'MFE', iframe: 'Fabric', nodejs: 'NodeJS' };
 
   function buildDetectionHeader() {
     var wrap = el('div', { class: 'lgt-build-strip' });

@@ -2423,7 +2423,14 @@ function normalizeEnv(value) { return String(value == null ? '' : value).trim().
 // already scoped to the ONE brandId the indexer/config request itself
 // named (see resolveSandboxBundleInfo's own single-brand restriction).
 function computeDetectionRows(tabId) {
-  var LAYER_LABEL_FOR_DETAIL = { mfe: 'MFE', iframe: 'iframe', nodejs: 'NodeJS' };
+  // Display label only (see content.js's LAYER_LABELS for the full
+  // rationale) - internal layer key stays 'iframe' everywhere else, but
+  // the user-facing name is "Fabric": the legacy shell/wrapper runtime
+  // that exposes obgClientEnvironmentConfig, per the dev team's own
+  // terminology - not a literal DOM <iframe> check, and not a second
+  // layer that coexists alongside "Fabric" (confirmed: there is no such
+  // thing as "Fabric + iframe" as two separate layers).
+  var LAYER_LABEL_FOR_DETAIL = { mfe: 'MFE', iframe: 'Fabric', nodejs: 'NodeJS' };
   var runtimeByFrame = runtimeMarkersByTab[tabId] || {};
   var networkByFrame = networkByTab[tabId] || {};
   var docByFrame = frameDocByTab[tabId] || {};

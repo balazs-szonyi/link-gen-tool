@@ -122,8 +122,8 @@ async function main() {
     );
     texts = await waitForRows((t) => t.length === 2, 10000);
     assert.match(texts[0], /Firestorm.*MFE.*v8\.2\.3\.4918-re0ade7b.*QA.*Confirmed/s);
-    assert.match(texts[1], /Nordicbet.*iframe.*v8\.2\.1\.4910-h96b2913.*QA.*Confirmed/s);
-    console.log('PASS: MFE and iframe layers on one page render as two independent rows, each Confirmed on its own evidence.');
+    assert.match(texts[1], /Nordicbet.*Fabric.*v8\.2\.1\.4910-h96b2913.*QA.*Confirmed/s);
+    console.log('PASS: MFE and Fabric/OBGA layers on one page render as two independent rows, each Confirmed on its own evidence.');
 
     // Scenario 3: Mismatch - runtime and network evidence for the SAME
     // brand+layer disagree on version.
@@ -145,7 +145,7 @@ async function main() {
       {}
     );
     texts = await waitForRows((t) => t.length === 1 && /Unclassified/.test(t[0]), 10000);
-    assert.doesNotMatch(texts[0], /MFE|iframe|NodeJS/);
+    assert.doesNotMatch(texts[0], /MFE|Fabric|NodeJS/);
     console.log('PASS: network-only evidence with no runtime marker renders Unclassified with no assumed layer label.');
 
     // Scenario 5: bleSource=1 request to an ALPHA/PROD host must never be
@@ -186,10 +186,10 @@ async function main() {
       {}
     );
     texts = await waitForRows((t) => t.length === 1 && /Confirmed/.test(t[0]), 10000);
-    assert.match(texts[0], /Firestorm.*MFE \+ iframe.*v8\.3\.0\.4928-b1d00c18.*QA.*Confirmed/s);
+    assert.match(texts[0], /Firestorm.*MFE \+ Fabric.*v8\.3\.0\.4928-b1d00c18.*QA.*Confirmed/s);
     const hybridDetail = await panel.locator('.lgt-build-detail').first().innerText();
-    assert.match(hybridDetail, /Hybrid runtime: MFE \+ iframe markers all present.*matching brand\+version\+environment.*shown as one row instead of 2 duplicates/i);
-    console.log('PASS: MFE and iframe both Confirmed in the same frame with matching brand+version+environment are merged into a single hybrid row instead of two duplicate-looking rows.');
+    assert.match(hybridDetail, /Hybrid runtime: MFE \+ Fabric markers all present.*matching brand\+version\+environment.*shown as one row instead of 2 duplicates/i);
+    console.log('PASS: MFE and the legacy Fabric/OBGA shell both Confirmed in the same frame with matching brand+version+environment are merged into a single hybrid row instead of two duplicate-looking rows, and the display label reads "Fabric" (not "iframe" - they are the same shell, not two separate layers).');
 
     // Scenario 7: Partially verified - a runtime marker exists but there
     // is no network confirmation for this layer at all yet. The row must
