@@ -1367,6 +1367,16 @@ var BUNDLE_RULE_ID_START = 930001;
 var bundleRuleIdsByTab = {}; // tabId -> ruleId[] - an override can add up
 // to ~4 rules at once (2 devices x N files-per-device), unlike the single-
 // rule-per-tab features above, so this tracks an array, not one id.
+var bundleTargetEnvByTab = {}; // tabId -> the env the Bundle tab last
+// applied ('alpha'/'prod'/'qa'/'test') - a best-effort synchronous cache
+// (refreshed from the browser's own live session rules on every
+// lgt-bundle-status poll, same self-healing pattern as bundleRuleIdsByTab
+// above) that lets computeDetectionRows recognize the ONE specific,
+// already-documented divergence a Bundle Override intentionally causes
+// (see bundleTargetNeedsMfeOverrideFlag's comment: the startup context
+// stays pinned to the layer's base environment/version even once the
+// actual network artifact has been redirected) instead of flagging it as
+// a false Mismatch.
 var bundleExpectedUrlByTab = {}; // tabId -> the FULL URL (not just origin)
 // the tab was showing when Bundle Override was applied - see the
 // stale-cleanup logic in chrome.webNavigation.onBeforeNavigate above for
@@ -1395,6 +1405,27 @@ var BUNDLE_INDEXER_CACHE_MS = 5 * 60 * 1000;
 // the right answer, and forcing the flag would invert a correct result.
 function bundleTargetNeedsMfeOverrideFlag(targetEnv) {
   return targetEnv === 'alpha' || targetEnv === 'test';
+}
+
+// Same fact as the comment above, reused by computeDetectionRows: when a
+// Bundle Override is active and targets 'alpha'/'test', the runtime marker
+// (sbMfeStartupContext/obgClientEnvironmentConfig.startupContext) is
+// EXPECTED to keep reporting the layer's base environment/version (prod
+// for the alpha/prod "bde" layer, qa for the qa/test "ble" layer) even
+// though the network side now correctly reflects the override target -
+// this is not a detection bug, it's the same startup-context-stays-pinned
+// behavior the third-party Sportsbook Tool's own xSbIsMfeOverrideApplied
+// compatibility flag exists to paper over. Recognizing this exact,
+// deterministic pattern lets the classifier avoid crying Mismatch over a
+// divergence the user (or the Bundle tab) deliberately caused on purpose.
+function bundleOverrideBaseEnvFor(targetEnv) {
+  return BUNDLE_ENV_LAYERS[targetEnv] === 'ble' ? 'qa' : 'prod';
+}
+
+function bundleOverrideExplainsEnvDivergence(tabId, runtimeEnv, networkEnv) {
+  var targetEnv = bundleTargetEnvByTab[tabId];
+  if (!targetEnv || !bundleTargetNeedsMfeOverrideFlag(targetEnv)) return false;
+  return runtimeEnv === bundleOverrideBaseEnvFor(targetEnv) && networkEnv === normalizeEnv(targetEnv);
 }
 
 function setBundleMfeOverrideFlag(tabId, targetEnv) {
@@ -1771,6 +1802,7 @@ function startBundleOverrideRule(tabId, targetEnv, brandId, currentEnv, pageOrig
         }, function () {
           if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
           bundleRuleIdsByTab[tabId] = built.rules.map(function (r) { return r.id; });
+          bundleTargetEnvByTab[tabId] = targetEnv;
           bundleMatchedByTab[tabId] = []; // reset the log for a fresh override
           resolve({ ruleCount: built.rules.length });
         });
@@ -1783,6 +1815,7 @@ function stopBundleOverrideRule(tabId) {
   var ruleIds = bundleRuleIdsByTab[tabId];
   delete bundleExpectedUrlByTab[tabId];
   delete bundleRuleIdsByTab[tabId];
+  delete bundleTargetEnvByTab[tabId];
   delete bundleMatchedByTab[tabId];
   // Same SW-restart-safe cleanup as stopBleDataOverrideRule above - query
   // the browser's own live rules for this tab in our id range, not just
@@ -1898,12 +1931,18 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       if (!redirectUrl) return null;
       try { return envLabelFromHostname(new URL(redirectUrl).hostname); } catch (e) { return null; }
     }).filter(function (env, index, values) { return env && values.indexOf(env) === index; });
+    var resolvedTargetEnv = targetEnvs.length === 1 ? targetEnvs[0] : null;
+    // Keep computeDetectionRows' synchronous cache honest the same way -
+    // it can only recognize an active override's expected runtime/network
+    // divergence if this stays in sync with the browser's own live rules.
+    if (resolvedTargetEnv) bundleTargetEnvByTab[tabId] = resolvedTargetEnv;
+    else delete bundleTargetEnvByTab[tabId];
     sendResponse({
       ok: true,
       active: liveIds.length > 0,
       ruleCount: liveIds.length,
       matched: bundleMatchedByTab[tabId] || [],
-      targetEnv: targetEnvs.length === 1 ? targetEnvs[0] : null
+      targetEnv: resolvedTargetEnv
     });
   });
   return true;
@@ -2470,10 +2509,23 @@ function computeDetectionRows(tabId) {
       var runtimeEnv = runtime ? normalizeEnv(runtime.environment) : '';
       var networkEnv = net ? normalizeEnv(net.artifactEnv || (net.artifactEnvs && net.artifactEnvs.length === 1 ? net.artifactEnvs[0] : '') || net.hostEnv || (layer === 'nodejs' && doc ? doc.env : '')) : '';
 
+      // A Bundle Override the user (or the Bundle tab) deliberately applied
+      // on THIS tab causes one specific, fully-deterministic divergence:
+      // the runtime marker keeps reporting the layer's base
+      // environment/version (the page's own pinned startup context never
+      // gets un-pinned by a network-level redirect) while the network side
+      // correctly reflects the override target. Recognizing that exact
+      // pattern here means it is explained instead of raised as an
+      // unexplained Mismatch - see bundleOverrideExplainsEnvDivergence.
+      var overrideExplainsEnvDivergence = !!(runtime && net &&
+        bundleOverrideExplainsEnvDivergence(tabId, runtimeEnv, networkEnv));
+
       var conflicts = [];
       if (runtimeBrandKey && networkBrandKey && runtimeBrandKey !== networkBrandKey) conflicts.push('brand: runtime=' + runtimeBrandKey + ' vs network=' + networkBrandKey);
-      if (runtimeVersion && networkVersion && runtimeVersion !== networkVersion) conflicts.push('version: runtime=v' + runtimeVersion + ' vs network=v' + networkVersion);
-      if (runtimeEnv && networkEnv && runtimeEnv !== networkEnv) conflicts.push('environment: runtime=' + runtimeEnv.toUpperCase() + ' vs network=' + networkEnv.toUpperCase());
+      if (!overrideExplainsEnvDivergence) {
+        if (runtimeVersion && networkVersion && runtimeVersion !== networkVersion) conflicts.push('version: runtime=v' + runtimeVersion + ' vs network=v' + networkVersion);
+        if (runtimeEnv && networkEnv && runtimeEnv !== networkEnv) conflicts.push('environment: runtime=' + runtimeEnv.toUpperCase() + ' vs network=' + networkEnv.toUpperCase());
+      }
 
       // Confirmed: both runtime and network evidence exist for this
       // brand+layer+device, and version+environment are each present on
@@ -2509,13 +2561,24 @@ function computeDetectionRows(tabId) {
         }
       }
 
+      // Explain, don't hide, the one divergence an active Bundle Override
+      // is known to cause (see bundleOverrideExplainsEnvDivergence) - and
+      // since the network side is what the page is ACTUALLY running right
+      // now, prefer it over the runtime marker's pinned base value for
+      // this row's displayed version/environment.
+      var bundleOverrideNote = overrideExplainsEnvDivergence
+        ? ('Bundle Override active (target ' + bundleTargetEnvByTab[tabId].toUpperCase() + '): runtime marker still reports the base build v' +
+          runtimeVersion + '/' + runtimeEnv.toUpperCase() + ' - this brand\'s startup context stays pinned to its base environment even once overridden; network evidence v' +
+          networkVersion + '/' + networkEnv.toUpperCase() + ' reflects what is actually running and is shown here.')
+        : null;
+
       frameRows.push({
         tabId: tabId, frameId: frameId, layer: layer, status: status,
         brand: brandKey, brandId: (runtime && runtime.brandId) || (net && (net.matchedBrandId || net.brandId)) || null,
         device: net && net.device || null,
-        version: runtimeVersion || networkVersion || null,
-        environment: (runtimeEnv || networkEnv || null),
-        detail: conflicts.join('; ') || partialReasons.join('; ') || null
+        version: (overrideExplainsEnvDivergence ? networkVersion : (runtimeVersion || networkVersion)) || null,
+        environment: (overrideExplainsEnvDivergence ? networkEnv : (runtimeEnv || networkEnv)) || null,
+        detail: conflicts.join('; ') || partialReasons.join('; ') || bundleOverrideNote || null
       });
     });
 
@@ -2549,7 +2612,12 @@ function computeDetectionRows(tabId) {
         layers: group.map(function (r) { return r.layer; }),
         status: 'confirmed', brand: row.brand, brandId: row.brandId,
         device: row.device, version: row.version, environment: row.environment,
-        detail: null
+        // A plain hybrid merge has nothing left to explain (both layers
+        // simply agree), but if any layer in the group carried a Bundle
+        // Override note (the only detail a 'confirmed' row can ever have),
+        // that is real, actionable state - not merge-implementation
+        // trivia - so it must survive the merge, not get discarded.
+        detail: group.map(function (r) { return r.detail; }).filter(Boolean)[0] || null
       });
     });
 

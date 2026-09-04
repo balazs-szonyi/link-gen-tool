@@ -214,6 +214,31 @@ brand page you're already logged into — no CLI, no headless automation.
     all in that frame; the brand is still shown if resolvable, but no
     layer is guessed.
 
+  **Bundle Override exception**: applying this extension's own Bundle
+  Override (the Bundle tab's Apply button, targeting ALPHA or TEST)
+  redirects a brand's JS bundle and `config.json` request, but not the
+  page's own top-level document — so on brands whose runtime marker
+  (`sbMfeStartupContext`/`obgClientEnvironmentConfig.startupContext`)
+  gets its version/environment from a server-rendered startup context
+  baked into that document at load time, the runtime marker keeps
+  reporting the layer's *base* environment (PROD for the alpha/prod
+  layer, QA for the qa/test layer) even after a successful override,
+  while the network evidence correctly reflects the override target.
+  This is the exact same limitation already documented for the
+  third-party Sportsbook Tool extension, which works around it by
+  reading a compatibility flag (`xSbIsMfeOverrideApplied`) that an
+  active override publishes — a flag this extension's own Bundle
+  Override already sets for that tool's benefit. The detection header
+  now recognizes this same, fully-deterministic pattern for itself: when
+  an active Bundle Override on the current tab explains a runtime-vs-network
+  version/environment split, the row is shown as **Confirmed** (using
+  the network-side values, since that's what's actually running) with a
+  detail note explaining the pinned-runtime-vs-live-network split,
+  instead of a confusing Mismatch. If the same split occurs *without*
+  this extension's own Bundle Override active (e.g. a real VPN/whitelisted
+  session that reaches ALPHA/TEST content some other way), it correctly
+  remains a Mismatch, since there's no known reason to explain it away.
+
   Two or more layers in the *same frame* that all reach Confirmed on the
   exact same brand+version+environment+device are not shown as separate
   duplicate-looking rows — some brands genuinely run a hybrid runtime

@@ -58,6 +58,20 @@ async function main() {
       }, { runtimeMarkers, network, frameDoc });
     }
 
+    // Seeds/clears the synchronous "Bundle Override is active on this tab"
+    // cache directly (background.js normally sets this from the Bundle
+    // tab's Apply/Stop handlers and the lgt-bundle-status poll) so the
+    // classifier's bundleOverrideExplainsEnvDivergence check can be
+    // exercised without actually driving the Bundle UI end-to-end.
+    async function setBundleOverrideTarget(targetEnv) {
+      await serviceWorker.evaluate(async (targetEnv) => {
+        const tabs = await chrome.tabs.query({ active: true });
+        const tabId = tabs[0].id;
+        if (targetEnv) bundleTargetEnvByTab[tabId] = targetEnv;
+        else delete bundleTargetEnvByTab[tabId];
+      }, targetEnv);
+    }
+
     // The header only refreshes on its own 3s poll (buildDetectionHeader's
     // pollWhileExtensionValid), so seeding new background.js state does
     // NOT update the DOM synchronously - a locator .waitFor() only waits
@@ -205,7 +219,43 @@ async function main() {
     assert.match(partialDetail, /no network confirmation seen for this layer yet/);
     console.log('PASS: Partially verified rows include a specific reason (missing network confirmation) instead of a blank detail.');
 
-    console.log('ALL PASS: brand+layer detection engine (Confirmed/Mismatch/Unclassified, multi-row, bleSource exclusion, hybrid-layer flagging, partial-reason detail).');
+    // Scenario 8: a real live pattern (confirmed 2026-09-04 against
+    // alpha.betsson.com) - the runtime marker keeps reporting the layer's
+    // base build (PROD) while the network side correctly reflects an
+    // ALPHA Bundle Override the user deliberately applied. WITHOUT an
+    // active override recorded for this tab, this must still be a
+    // Mismatch (the baseline/safety case - nothing should silently
+    // swallow a real disagreement by default).
+    await seed(
+      { 0: { mfe: { brandId: '6a6d80b9-16ac-4387-a413-244d93a74deb', brandName: 'Betsson', version: '8.1.16.4855-rb8bfa90', environment: 'prod', ts: Date.now() } } },
+      { 0: { mfe: { brandId: '6a6d80b9-16ac-4387-a413-244d93a74deb', brand: 'betsson', device: 'desktop', version: '8.2.5.4941-reba6fd9', hostEnv: 'alpha', artifactEnv: 'alpha', artifactEnvs: ['alpha'], url: PAGE_URL, ts: Date.now() } } },
+      {}
+    );
+    texts = await waitForRows((t) => t.length === 1 && /Mismatch/.test(t[0]), 10000);
+    let bundleMismatchDetail = await panel.locator('.lgt-build-detail').first().innerText();
+    assert.match(bundleMismatchDetail, /environment: runtime=PROD vs network=ALPHA/);
+    console.log('PASS: without a recorded active Bundle Override, a runtime=PROD/network=ALPHA split for the same brand+layer still renders Mismatch (the safety baseline).');
+
+    // Now record that a Bundle Override targeting ALPHA is active on this
+    // tab (as background.js itself does after a real Apply) and re-seed
+    // the identical runtime/network split - this must now resolve as
+    // Confirmed, showing the network (actually-running) values, with a
+    // detail note explaining the pinned-runtime-marker behavior instead of
+    // an unexplained conflict.
+    await setBundleOverrideTarget('alpha');
+    await seed(
+      { 0: { mfe: { brandId: '6a6d80b9-16ac-4387-a413-244d93a74deb', brandName: 'Betsson', version: '8.1.16.4855-rb8bfa90', environment: 'prod', ts: Date.now() } } },
+      { 0: { mfe: { brandId: '6a6d80b9-16ac-4387-a413-244d93a74deb', brand: 'betsson', device: 'desktop', version: '8.2.5.4941-reba6fd9', hostEnv: 'alpha', artifactEnv: 'alpha', artifactEnvs: ['alpha'], url: PAGE_URL, ts: Date.now() } } },
+      {}
+    );
+    texts = await waitForRows((t) => t.length === 1 && /Confirmed/.test(t[0]), 10000);
+    assert.match(texts[0], /Betsson.*MFE.*v8\.2\.5\.4941-reba6fd9.*ALPHA.*Confirmed/s);
+    const bundleOverrideDetail = await panel.locator('.lgt-build-detail').first().innerText();
+    assert.match(bundleOverrideDetail, /Bundle Override active \(target ALPHA\).*runtime marker still reports the base build v8\.1\.16\.4855-rb8bfa90\/PROD.*network evidence v8\.2\.5\.4941-reba6fd9\/ALPHA reflects what is actually running/s);
+    await setBundleOverrideTarget(null);
+    console.log('PASS: with an active Bundle Override targeting ALPHA recorded for this tab, the SAME runtime=PROD/network=ALPHA split is recognized as the known pinned-startup-context pattern and renders Confirmed (network values shown) with an explanatory detail instead of Mismatch.');
+
+    console.log('ALL PASS: brand+layer detection engine (Confirmed/Mismatch/Unclassified, multi-row, bleSource exclusion, hybrid-layer flagging, partial-reason detail, Bundle Override-aware classification).');
   } finally {
     await context.close();
   }

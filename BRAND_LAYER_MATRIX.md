@@ -59,7 +59,7 @@ tests run automatically; live brand tests are manual).
 | Brand | Layer(s) observed | Device | Environment | Status | Last verified | Notes |
 |---|---|---|---|---|---|---|
 | Firestorm | Fabric | desktop | QA | Confirmed | _(spec example, not yet independently re-verified)_ | QA-only brand, no real domain (`BRAND_DOMAINS` has no entry) |
-| Betsson | MFE + Fabric | desktop | ALPHA (runtime says PROD) | **Mismatch** | 2026-09-04 | `alpha.betsson.com/en/sportsbook/live/tennis?exposeObgState=true&exposeObgRt=true&sealStore=false` — see "Known observed Mismatch patterns" below; the third-party Sportsbook Tool extension and our own network confirmation both agree on `v8.2.5.4941-reba6fd9 / ALPHA`, but `sbMfeStartupContext`/`obgClientEnvironmentConfig.startupContext` report a stale `v8.1.16.4855-rb8bfa90 / PROD` — a real page-side data split, not a detection bug |
+| Betsson | MFE + Fabric | desktop | ALPHA (runtime says PROD) | **Mismatch, or Confirmed if our Bundle Override applied it** | 2026-09-05 | `alpha.betsson.com/en/sportsbook/live/tennis?exposeObgState=true&exposeObgRt=true&sealStore=false` — see "Known observed Mismatch patterns" below; the third-party Sportsbook Tool extension and our own network confirmation both agree on `v8.2.5.4941-reba6fd9 / ALPHA`, but `sbMfeStartupContext`/`obgClientEnvironmentConfig.startupContext` report a stale `v8.1.16.4855-rb8bfa90 / PROD` — a real page-side data split. If reached via this extension's own Bundle Override (Apply → ALPHA), the row auto-resolves to Confirmed with an explanatory note; otherwise it stays Mismatch |
 | NordicBet | — | — | — | — | _(pending)_ | Real domain: nordicbet.com |
 | _(remaining ~39 QA-indexer brands)_ | — | — | — | — | _(pending)_ | Populate using the procedure above as brands are tested |
 
@@ -84,11 +84,50 @@ tests run automatically; live brand tests are manual).
   PROD snapshot — most likely because the ALPHA page's server-rendered
   shell (or an `exposeObgState`/`sealStore` debug-tooling replay of a
   captured state) embeds a stale/pinned context object that never gets
-  refreshed to match the live artifact actually fetched. **Conclusion:
-  this is a genuine data split on the brand page itself, correctly
-  surfaced as Mismatch — not a bug in the extension's detection logic.**
-  Treat any brand+layer row that stays on Mismatch indefinitely (i.e.
-  does not self-resolve like a `Partially verified` row does once
-  network confirmation catches up) as a real signal worth reporting to
-  the brand/page owner, not as a tool defect.
+  refreshed to match the live artifact actually fetched.
+
+  **Root cause confirmed (2026-09-05)**: this is not page-specific
+  flakiness — it is the SAME underlying limitation already known and
+  handled for the third-party Sportsbook Tool extension (see
+  `background.js`, `bundleTargetNeedsMfeOverrideFlag`): a brand page's
+  `sbMfeStartupContext`/`obgClientEnvironmentConfig.startupContext` gets
+  its version/environment fields from the page's server-rendered startup
+  context at load time, which stays pinned to the layer's "base"
+  environment (PROD for the alpha/prod layer, QA for the qa/test layer)
+  and is **never** refreshed by a later network-level bundle swap. This
+  happens for two distinct reasons, with two different outcomes:
+  - **Our own Bundle Override was applied on this tab** (Bundle tab →
+    Apply, targeting ALPHA or TEST): fully deterministic and now
+    **auto-resolved**. `computeDetectionRows` recognizes this exact
+    pattern (`bundleOverrideExplainsEnvDivergence`, added 2026-09-05) via
+    a per-tab record of the active override's target env, and renders
+    the row as **Confirmed** using the network-side version/environment
+    (what is actually running), with a `detail` note explaining the
+    pinned-runtime-vs-live-network split — instead of Mismatch. This
+    mirrors how the third-party Sportsbook Tool's own override already
+    "translates" the same pinned value for its own display, via its
+    `xSbIsMfeOverrideApplied` compatibility flag (which our Bundle
+    Override already sets for that tool's benefit — `computeDetectionRows`
+    simply did not consult that same fact about itself until this fix).
+  - **The page reached ALPHA/TEST content some other way** (a real
+    VPN'd/whitelisted session, or an upstream environment-level routing
+    decision — i.e. *not* via this extension's own Bundle Override):
+    still correctly surfaced as **Mismatch**, because there is no
+    per-tab override record to explain the split. This is the scenario
+    the original 2026-09-04 screenshot most likely reflects, and it
+    remains a real, actionable signal — either report it to the
+    brand/page owner, or reproduce it with our own Bundle Override
+    applied first to get the auto-resolved Confirmed view instead.
+
+  **Conclusion**: the split itself is a genuine, expected characteristic
+  of how these brand pages embed their startup context — not a detection
+  bug. Whether it should *display* as Confirmed (our own override
+  explains it) or Mismatch (no known explanation) now depends on whether
+  the Bundle Override that produced the ALPHA/TEST network traffic was
+  applied through this extension's own Bundle tab. Treat any brand+layer
+  row that stays on Mismatch indefinitely with no Bundle Override active
+  (i.e. does not self-resolve like a `Partially verified` row does once
+  network confirmation catches up, and isn't explained by an active
+  override) as a real signal worth reporting to the brand/page owner, not
+  as a tool defect.
 
