@@ -2561,11 +2561,30 @@ function computeDetectionRows(tabId) {
         }
       }
 
-      // Explain, don't hide, the one divergence an active Bundle Override
-      // is known to cause (see bundleOverrideExplainsEnvDivergence) - and
-      // since the network side is what the page is ACTUALLY running right
-      // now, prefer it over the runtime marker's pinned base value for
-      // this row's displayed version/environment.
+      // The row's headline version/environment ALWAYS prefers network
+      // evidence over the runtime marker whenever network evidence
+      // exists - consistently, in EVERY status (Confirmed, Partially
+      // verified, AND Mismatch alike). This used to only apply when an
+      // active Bundle Override explained the split, and fell back to
+      // showing the raw runtime value for an unexplained Mismatch - which
+      // produced a real, reported anomaly: the same underlying fact (the
+      // runtime marker on a given brand page is invariably pinned to its
+      // layer's base build, e.g. PROD, no matter what is actually
+      // running - independently verified live: a real, successful ALPHA
+      // Bundle Override left 34/34 redirected requests returning 200 with
+      // real ALPHA content, yet the runtime marker read back
+      // byte-for-byte identical to its un-overridden value) was DISPLAYED
+      // inconsistently - as "ALPHA" in the explained/Confirmed case (since
+      // network was substituted in) and as "PROD" in an unexplained
+      // Mismatch case (since runtime was shown raw), even though in both
+      // cases runtime itself never said anything but the pinned base
+      // value. Network evidence is a direct observation of which files
+      // were actually requested and loaded, so it is the more meaningful
+      // "what's really running" signal in every case - the Confirmed vs
+      // Mismatch STATUS is what tells the user whether that value is
+      // trusted/explained or flagged as a real, unexplained conflict; the
+      // headline value itself no longer flips between two different
+      // selection rules depending on which bucket a row lands in.
       var bundleOverrideNote = overrideExplainsEnvDivergence
         ? ('Bundle Override active (target ' + bundleTargetEnvByTab[tabId].toUpperCase() + '): runtime marker still reports the base build v' +
           runtimeVersion + '/' + runtimeEnv.toUpperCase() + ' - this brand\'s startup context stays pinned to its base environment even once overridden; network evidence v' +
@@ -2576,8 +2595,8 @@ function computeDetectionRows(tabId) {
         tabId: tabId, frameId: frameId, layer: layer, status: status,
         brand: brandKey, brandId: (runtime && runtime.brandId) || (net && (net.matchedBrandId || net.brandId)) || null,
         device: net && net.device || null,
-        version: (overrideExplainsEnvDivergence ? networkVersion : (runtimeVersion || networkVersion)) || null,
-        environment: (overrideExplainsEnvDivergence ? networkEnv : (runtimeEnv || networkEnv)) || null,
+        version: (networkVersion || runtimeVersion) || null,
+        environment: (networkEnv || runtimeEnv) || null,
         detail: conflicts.join('; ') || partialReasons.join('; ') || bundleOverrideNote || null
       });
     });

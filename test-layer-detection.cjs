@@ -149,7 +149,18 @@ async function main() {
     texts = await waitForRows((t) => t.length === 1 && /Mismatch/.test(t[0]), 10000);
     const detailText = await panel.locator('.lgt-build-detail').first().innerText();
     assert.match(detailText, /version: runtime=v8\.2\.3\.4918-re0ade7b vs network=v8\.1\.15\.4896-hc2cb4ed/);
-    console.log('PASS: disagreeing runtime vs network version for the same brand+layer renders Mismatch with conflict detail.');
+    // The row's headline must show the NETWORK-confirmed version, not the
+    // raw runtime marker value, even for a genuinely unexplained Mismatch
+    // (no active Bundle Override involved here at all) - this is the
+    // consistency fix: the headline selection rule (prefer network
+    // whenever it exists) must be identical regardless of whether the
+    // divergence ends up Confirmed-via-override or a flagged Mismatch, so
+    // the same underlying pinned-runtime-marker fact is never displayed
+    // differently (e.g. looking like "ALPHA was detected" in one row and
+    // "PROD" in another) depending on which bucket a row lands in.
+    assert.match(texts[0], /v8\.1\.15\.4896-hc2cb4ed/);
+    assert.doesNotMatch(texts[0], /v8\.2\.3\.4918-re0ade7b/);
+    console.log('PASS: disagreeing runtime vs network version for the same brand+layer renders Mismatch with conflict detail, and the headline consistently shows the network-confirmed value (not the raw runtime marker) - the same selection rule used for override-explained Confirmed rows.');
 
     // Scenario 4: Unclassified - a network hit with NO runtime marker in
     // that frame at all must not get an assumed layer label.
@@ -234,7 +245,16 @@ async function main() {
     texts = await waitForRows((t) => t.length === 1 && /Mismatch/.test(t[0]), 10000);
     let bundleMismatchDetail = await panel.locator('.lgt-build-detail').first().innerText();
     assert.match(bundleMismatchDetail, /environment: runtime=PROD vs network=ALPHA/);
-    console.log('PASS: without a recorded active Bundle Override, a runtime=PROD/network=ALPHA split for the same brand+layer still renders Mismatch (the safety baseline).');
+    // Even in this baseline/unexplained Mismatch, the headline must show
+    // the network-confirmed ALPHA build, not the raw pinned PROD runtime
+    // value - the SAME headline selection rule as the override-explained
+    // Confirmed case below. This is the exact anomaly the user reported:
+    // without this, an unexplained Mismatch would show "PROD" while an
+    // override-explained Confirmed row for the identical runtime/network
+    // split shows "ALPHA" - two different displays for the same
+    // underlying always-pinned-runtime-marker fact.
+    assert.match(texts[0], /v8\.2\.5\.4941-reba6fd9.*ALPHA/s);
+    console.log('PASS: without a recorded active Bundle Override, a runtime=PROD/network=ALPHA split for the same brand+layer still renders Mismatch (the safety baseline), and its headline already shows the network-confirmed ALPHA build (not the raw pinned PROD runtime value) - identical headline selection rule as the override-explained Confirmed case below.');
 
     // Now record that a Bundle Override targeting ALPHA is active on this
     // tab (as background.js itself does after a real Apply) and re-seed

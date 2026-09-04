@@ -160,3 +160,34 @@ tests run automatically; live brand tests are manual).
   override) as a real signal worth reporting to the brand/page owner, not
   as a tool defect.
 
+  **Headline display consistency fix (2026-09-05)**: a real, reported
+  inconsistency was found in how the two outcomes above were *displayed*.
+  Before this fix, `computeDetectionRows` only substituted the
+  network-side version/environment into the row's headline when
+  `bundleOverrideExplainsEnvDivergence` was true (the auto-resolved
+  Confirmed case); an otherwise-identical, unexplained Mismatch (e.g. the
+  cross-layer hybrid case, or any Mismatch reached without this
+  extension's own Bundle Override) instead displayed the raw runtime
+  marker value. Since the runtime marker is *always* pinned to its
+  layer's base build regardless of override (proven above), this meant
+  the exact same underlying fact — a page's runtime marker never reflects
+  which bundle is truly executing — was shown two different ways
+  depending on which bucket a row landed in: "ALPHA" in the
+  override-explained Confirmed row, "PROD" in the unexplained Mismatch
+  row. This looked like the tool sometimes could detect an override in
+  the runtime and sometimes couldn't, when in truth it never can — only
+  the network side ever reflects it.
+
+  The fix makes the headline selection rule identical in every status:
+  whenever network evidence exists for a row, its version/environment is
+  the headline value; the runtime marker is only used as the headline
+  when no network evidence exists at all (Partially verified). The
+  runtime marker's differing value is still fully preserved in the
+  conflict-detail text for Mismatch rows (`version: runtime=... vs
+  network=...`) — only the headline's *selection rule* changed, not what
+  evidence is shown or how Confirmed vs. Mismatch is decided. See
+  `test-layer-detection.cjs` Scenario 3 and Scenario 8 for the automated
+  assertions locking this in (both the baseline unexplained-Mismatch case
+  and the override-explained Confirmed case must show the identical
+  network-confirmed headline value).
+

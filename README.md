@@ -214,6 +214,27 @@ brand page you're already logged into — no CLI, no headless automation.
     all in that frame; the brand is still shown if resolvable, but no
     layer is guessed.
 
+  **Headline version/environment selection is the same rule in every
+  status**: whenever network evidence exists for a row, its
+  version/environment is what's shown as the headline value — in a
+  Confirmed row this is moot (both sides already agree), but in a
+  Mismatch row it means the headline shows the *network-confirmed*
+  value, not the raw runtime marker, with the runtime marker's
+  conflicting value spelled out in the detail line instead
+  (`version: runtime=... vs network=...`). This used to differ by
+  status — an override-explained Confirmed row substituted the
+  network value while an otherwise-identical, unexplained Mismatch
+  row displayed the raw runtime value — which made the exact same
+  underlying fact (a brand's runtime marker is pinned to its layer's
+  base build no matter what actually loads; see below) look
+  inconsistent, as if the tool sometimes "detected" the overridden
+  environment in the runtime and sometimes didn't. The rule is now a
+  single, status-independent selection: prefer network evidence,
+  fall back to the runtime marker only when no network evidence
+  exists at all (the Partially verified case). The Confirmed/Mismatch
+  status is what tells you whether that headline value is trusted or
+  flagged as an unresolved conflict — not which value gets shown.
+
   **Bundle Override exception**: applying this extension's own Bundle
   Override (the Bundle tab's Apply button, targeting ALPHA or TEST)
   redirects a brand's JS bundle and `config.json` request, but not the
@@ -231,13 +252,18 @@ brand page you're already logged into — no CLI, no headless automation.
   Override already sets for that tool's benefit. The detection header
   now recognizes this same, fully-deterministic pattern for itself: when
   an active Bundle Override on the current tab explains a runtime-vs-network
-  version/environment split, the row is shown as **Confirmed** (using
-  the network-side values, since that's what's actually running) with a
-  detail note explaining the pinned-runtime-vs-live-network split,
-  instead of a confusing Mismatch. If the same split occurs *without*
-  this extension's own Bundle Override active (e.g. a real VPN/whitelisted
-  session that reaches ALPHA/TEST content some other way), it correctly
-  remains a Mismatch, since there's no known reason to explain it away.
+  version/environment split, the row's *status* is upgraded to
+  **Confirmed** (the headline already showed the network-side values
+  either way, per the rule above) with a detail note explaining the
+  pinned-runtime-vs-live-network split, instead of a confusing Mismatch.
+  If the same split occurs *without* this extension's own Bundle
+  Override active (e.g. a real VPN/whitelisted session that reaches
+  ALPHA/TEST content some other way), the status correctly remains a
+  Mismatch, since there's no known reason to explain it away — but even
+  then, the headline still shows the network-confirmed value, not a
+  raw pinned-PROD runtime value, so the same override-vs-no-override
+  runtime split is never displayed two different ways depending on
+  whether it happens to be explained.
 
   Two or more layers in the *same frame* that all reach Confirmed on the
   exact same brand+version+environment+device are not shown as separate
