@@ -34,7 +34,6 @@
   // panel title always matches it.
   var VERSION = 'v' + chrome.runtime.getManifest().version;
   var BUNDLE_DIAGNOSTICS_KEY = '__lgtBundleDiagnosticsV1';
-  var PAGE_STATE_VERIFY_RESUME_KEY = '__lgtVerifyPageStateAfterReloadV1';
 
   // Brand shells may normalize the address bar after bootstrap and remove
   // diagnostics parameters even though they were present on the actual
@@ -1805,16 +1804,20 @@
       '#lgt-panel .lgt-cred-badge{display:block;font-size:10px;margin-top:4px;padding:1px 6px;border-radius:8px;white-space:nowrap;width:fit-content}',
       '#lgt-panel .lgt-cred-badge.has{background:#1e7e34;color:#fff}',
       '#lgt-panel .lgt-cred-badge.none{background:#a02020;color:#fff}',
-      // "Detected build" strip - always visible above the tabs, on every
-      // tab (unlike the Bundle tab's own controls). See buildDetectedBuildStrip().
+      // Automatic per brand/layer detection header - always visible above
+      // the tabs, on every tab (unlike the Bundle tab's own controls).
+      // See buildDetectionHeader().
       '#lgt-panel .lgt-build-strip{background:var(--lgt-tab-bg);border-radius:6px;padding:6px 8px;margin-bottom:10px;font-size:11px}',
-      '#lgt-panel .lgt-build-row{display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap}',
+      '#lgt-panel .lgt-build-row{display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;padding:2px 0}',
+      '#lgt-panel .lgt-build-row + .lgt-build-row{border-top:1px solid var(--lgt-border,rgba(255,255,255,.08));margin-top:2px;padding-top:4px}',
       '#lgt-panel .lgt-build-badge{padding:1px 6px;border-radius:8px;font-weight:700;white-space:nowrap;font-size:10px}',
-      '#lgt-panel .lgt-build-badge.match{background:#1e7e34;color:#fff}',
-      '#lgt-panel .lgt-build-badge.mismatch{background:#c77900;color:#fff}',
+      '#lgt-panel .lgt-build-badge.confirmed{background:#1e7e34;color:#fff}',
+      '#lgt-panel .lgt-build-badge.partial{background:#c77900;color:#fff}',
+      '#lgt-panel .lgt-build-badge.mismatch{background:#a02020;color:#fff}',
+      '#lgt-panel .lgt-build-badge.unclassified{background:#555;color:#fff}',
       '#lgt-panel .lgt-build-strip button{width:auto;margin:0;padding:3px 8px;font-size:10px;flex:none}',
       '#lgt-panel .lgt-build-strip .lgt-build-actions{display:flex;gap:6px;flex:none}',
-      '#lgt-panel .lgt-build-verify{margin-top:4px;font-size:10px;color:var(--lgt-muted);white-space:pre-wrap}'
+      '#lgt-panel .lgt-build-detail{margin-top:2px;font-size:10px;color:var(--lgt-muted);white-space:pre-wrap;width:100%}'
     ].join('');
     document.head.appendChild(style);
 
@@ -1903,7 +1906,7 @@
     // bodies with a single CSS rule (see ".lgt-collapsed .lgt-content"
     // above) instead of having to touch each of them individually.
     var content = el('div', { class: 'lgt-content' });
-    content.appendChild(buildDetectedBuildStrip());
+    content.appendChild(buildDetectionHeader());
     content.appendChild(tabs);
     content.appendChild(bodyA);
     content.appendChild(bodyB);
@@ -2914,252 +2917,58 @@
     });
   }
 
-  // "Detected build" strip - always visible above the tabs, regardless of
-  // which tab is active. Answers "what environment/version is THIS page's
-  // sportsbook bundle actually loaded from?" from the one source that
-  // cannot be wrong: the real network request the browser already made
-  // (see background.js's bundleObservedByTab / lgt-bundle-observed). This
-  // is deliberately independent of the Bundle tab above - it works
-  // whether or not an override was ever applied, and is meant to replace
-  // relying on the separate "Sportsbook Tool" bookmarklet's own "SB
-  // Version" field or manually checking the DevTools Network tab.
-  function buildDetectedBuildStrip() {
+  // Automatic per brand/layer detection header - always visible above the
+  // tabs, regardless of which tab is active. Answers "what brand/layer is
+  // running on THIS page, and what version/environment is it actually
+  // loaded from?" purely from evidence background.js already collected
+  // (runtime layer markers relayed by layer-detect.js/layer-relay.js, plus
+  // the independent network observations - bundle/config requests, the
+  // x-sb-app-version header, and frame navigation hostnames). One row per
+  // detected brand+layer(+device) combination; MFE/iframe/NodeJS on the
+  // same page, or the same layer in two frames, always get their own row
+  // (see background.js's computeDetectionRows). There is no manual
+  // verification step any more - window.xSbState is never used as a
+  // version/environment source (only the runtime layer markers above and
+  // the independent network evidence are), so nothing needs a user to
+  // click a button to "confirm" it.
+  var STATUS_LABELS = { confirmed: 'Confirmed', partial: 'Partially verified', mismatch: 'Mismatch', unclassified: 'Unclassified' };
+  var LAYER_LABELS = { mfe: 'MFE', iframe: 'iframe', nodejs: 'NodeJS' };
+
+  function buildDetectionHeader() {
     var wrap = el('div', { class: 'lgt-build-strip' });
-    var row = el('div', { class: 'lgt-build-row' });
-    var label = el('span', {}, ['Detecting sportsbook bundle\u2026']);
-    var badge = el('span', { class: 'lgt-build-badge', style: 'display:none' }, ['']);
-    var verifyBtn = el('button', { class: 'secondary', title: 'Double-check against window.xSbState (requires exposeObgState=true)' }, ['Verify with page state']);
-    var actions = el('div', { class: 'lgt-build-actions' }, [verifyBtn]);
-    row.appendChild(label);
-    row.appendChild(badge);
-    row.appendChild(actions);
-    var verifyResult = el('div', { class: 'lgt-build-verify', style: 'display:none' }, ['']);
-    wrap.appendChild(row);
-    wrap.appendChild(verifyResult);
+    var emptyLabel = el('span', {}, ['Detecting sportsbook runtime layers\u2026']);
+    wrap.appendChild(emptyLabel);
 
-    var lastObserved = null;
-
-    function normalizedVersion(value) {
-      return String(value == null ? '' : value).trim().replace(/^v/i, '');
+    function brandLabel(row) {
+      if (row.brand) return row.brand.charAt(0).toUpperCase() + row.brand.slice(1);
+      return row.brandId ? row.brandId : 'Unknown brand';
     }
 
-    function normalizedEnvironment(value) {
-      return String(value == null ? '' : value).trim().toLowerCase();
-    }
-
-    function expectedObservedEnvironments(observed) {
-      if (!observed) return [];
-      if (observed.shape === 'sandbox') return observed.hostEnv ? [normalizedEnvironment(observed.hostEnv)] : [];
-      if (observed.artifactEnv) return [normalizedEnvironment(observed.artifactEnv)];
-      if (Array.isArray(observed.artifactEnvs) && observed.artifactEnvs.length) {
-        return observed.artifactEnvs.map(normalizedEnvironment).filter(function (env, index, all) {
-          return env && all.indexOf(env) === index;
-        });
+    function render(rows) {
+      wrap.innerHTML = '';
+      if (!rows || !rows.length) {
+        wrap.appendChild(emptyLabel);
+        return;
       }
-      return observed.hostEnv ? [normalizedEnvironment(observed.hostEnv)] : [];
+      rows.forEach(function (row) {
+        var buildText = (row.version ? 'v' + row.version : 'version unknown') + ' / ' + (row.environment ? row.environment.toUpperCase() : 'ENV unknown') + (row.device ? ' (' + row.device + ')' : '');
+        var titlePrefix = brandLabel(row) + ' \u00b7 ' + (row.layer ? LAYER_LABELS[row.layer] : 'Unclassified SB build');
+        var label = el('span', {}, [titlePrefix + ': ' + buildText]);
+        var badge = el('span', { class: 'lgt-build-badge ' + row.status }, [STATUS_LABELS[row.status] || row.status]);
+        var line = el('div', { class: 'lgt-build-row' }, [label, badge]);
+        wrap.appendChild(line);
+        if (row.detail) wrap.appendChild(el('div', { class: 'lgt-build-detail' }, [row.detail]));
+      });
     }
 
     function refresh() {
-      chrome.runtime.sendMessage({ type: 'lgt-bundle-observed' }, function (res) {
+      chrome.runtime.sendMessage({ type: 'lgt-detection-rows' }, function (res) {
         void chrome.runtime.lastError;
         if (!res || !res.ok) return;
-        var o = res.observed;
-        lastObserved = o;
-        if (!o) {
-          label.textContent = 'No sportsbook bundle detected on this tab yet.';
-          badge.style.display = 'none';
-          return;
-        }
-        var pageEnv = (detectBrandAndEnv().environment || 'prod');
-        // Use hostEnv (which HOST actually served this file), not the
-        // internal /dist/<label>/ path segment - confirmed live
-        // 2026-08-10 that a brand's own TEST site can serve its bundle
-        // from a path literally labeled "qa" with no override applied
-        // (TEST/QA share one underlying BLE-layer build artifact
-        // folder), so the path label alone is not a trustworthy
-        // "which environment" answer. The request's own hostname is:
-        // on a native load it's the same host as the page itself
-        // (hostEnv === pageEnv), on an active override it's a
-        // different env's CDN host entirely.
-        var artifactEnvs = Array.isArray(o.artifactEnvs) ? o.artifactEnvs : [];
-        var effectiveEnv = o.shape === 'dist' ? o.artifactEnv : o.hostEnv;
-        var mismatch = effectiveEnv ? effectiveEnv !== pageEnv :
-          (o.shape === 'dist' && artifactEnvs.length ? artifactEnvs.indexOf(pageEnv) === -1 : false);
-        // Sandbox-shape links (the tool's own standalone "Generate" tab
-        // output) carry no version/device in the bundle URL at all - see
-        // BUNDLE_OBSERVE_SANDBOX_RE in background.js. Show what we DO
-        // know (env) rather than a misleading "vundefined (undefined)".
-        if (o.shape === 'sandbox') {
-          // 2026-08-10: the URL itself never carries version/device for
-          // this shape, but background.js may have asynchronously
-          // resolved the version (and, when unambiguous, the device) via
-          // an indexer.json reverse-lookup against the observed chunk
-          // filenames (the sandbox page's OWN main-*.js is a different
-          // build artifact than the widget's federated entry point, so
-          // it rarely matches - the shared chunk-*.js files are what
-          // actually resolve, confirmed live 2026-08-10). A brand's
-          // desktop/mobile versions are the same build in the
-          // overwhelming majority of cases even when the specific device
-          // can't be pinned down (a shared chunk matches both) - so show
-          // the version alone when device is unresolved, rather than
-          // discarding a real, useful answer. Only fall back to the
-          // honest "not encoded in URL" message when nothing resolved at
-          // all.
-          // Show the actual detected brand (e.g. "nordicbet") instead of
-          // the generic literal word "sandbox" - background.js already
-          // resolves this from the sandbox link's own hostname (see
-          // detectBrandAndEnvFromPlaygroundHost) and always includes it
-          // on the observation object for this shape; "sandbox" remains
-          // only as a defensive fallback in the unlikely case it's ever
-          // missing.
-          var sandboxLabel = o.brand || 'sandbox';
-          if (o.version) {
-            label.textContent = 'SB build: v' + o.version + (o.device ? ' (' + o.device + ')' : '') + ' [' + sandboxLabel + ', ' + o.hostEnv.toUpperCase() + ']' + (mismatch ? ' \u2013 overridden from ' + pageEnv.toUpperCase() : '');
-          } else {
-            label.textContent = 'SB build: ' + o.hostEnv.toUpperCase() + ' (' + sandboxLabel + ' sandbox link \u2013 version/device not encoded in URL)' + (mismatch ? ' \u2013 overridden from ' + pageEnv.toUpperCase() : '');
-          }
-        } else {
-          var environmentDetail;
-          if (o.artifactEnv) {
-            environmentDetail = o.artifactEnv.toUpperCase() + ' artifact via ' + o.hostEnv.toUpperCase() + ' host';
-          } else if (artifactEnvs.length > 1) {
-            environmentDetail = 'shared by ' + artifactEnvs.map(function (env) { return env.toUpperCase(); }).join('/') + ' via ' + o.hostEnv.toUpperCase() + ' host';
-          } else if (o.artifactResolutionPending) {
-            environmentDetail = 'resolving artifact environment; request host ' + o.hostEnv.toUpperCase();
-          } else {
-            environmentDetail = 'artifact environment unknown; request host ' + o.hostEnv.toUpperCase();
-          }
-          label.textContent = 'SB build: v' + o.version + ' (' + o.device + ') [' + environmentDetail + ']' + (mismatch ? ' \u2013 page is ' + pageEnv.toUpperCase() : '');
-        }
-        var badgeEnv = effectiveEnv || (artifactEnvs.length > 1 ? 'shared' : (o.shape === 'dist' ? 'unknown' : o.hostEnv));
-        badge.textContent = badgeEnv.toUpperCase();
-        badge.className = 'lgt-build-badge ' + (mismatch || badgeEnv === 'unknown' ? 'mismatch' : 'match');
-        badge.style.display = '';
-        badge.title = o.url;
+        render(res.rows);
       });
     }
     pollWhileExtensionValid(refresh, 3000);
-
-    // Secondary, on-demand confirmation via window.xSbState - only
-    // meaningful on a link carrying exposeObgState=true.
-    //
-    // REWRITTEN 2026-08-10: the previous implementation injected a plain
-    // <script> tag to read window.xSbState from the page's own (MAIN
-    // world) context, since a content script's isolated world cannot
-    // read the page's own JS variables directly - but that technique IS
-    // a DOM script element, so it's subject to the page's own script-src
-    // CSP. Confirmed live on a real sandbox link (strict CSP, no
-    // 'unsafe-inline') that this silently blocked the injected script
-    // every time, which is why the button always ended up showing the
-    // "No response after 5s" timeout message - NOT a rare edge case, but
-    // the normal outcome on any CSP-hardened page. Now delegates to
-    // background.js's chrome.scripting.executeScript({world:'MAIN'})
-    // (see its lgt-verify-xsbstate handler), which runs in the page's
-    // real JS context WITHOUT being subject to page CSP at all - no more
-    // <script> tag, postMessage roundtrip, or securitypolicyviolation
-    // heuristic needed. A short client-side timeout remains only as a
-    // defensive fallback in case the service worker itself is ever slow
-    // to respond.
-    function renderEnablePageStatePrompt() {
-      verifyResult.style.display = '';
-      verifyResult.innerHTML = '';
-      verifyResult.appendChild(el('div', {}, [
-        'Page-state verification needs exposeObgState=true. Add it and reload this tab?'
-      ]));
-      var enableBtn = el('button', { class: 'secondary' }, ['Enable & reload']);
-      var cancelBtn = el('button', { class: 'secondary' }, ['Cancel']);
-      enableBtn.addEventListener('click', function () {
-        var nextUrl = new URL(location.href);
-        nextUrl.searchParams.set('exposeObgState', 'true');
-        try { sessionStorage.setItem(PAGE_STATE_VERIFY_RESUME_KEY, nextUrl.toString()); } catch (e) {}
-        enableBtn.disabled = true;
-        cancelBtn.disabled = true;
-        verifyResult.firstChild.textContent = 'Enabling page state and reloading\u2026';
-        location.href = nextUrl.toString();
-      });
-      cancelBtn.addEventListener('click', function () {
-        verifyResult.style.display = 'none';
-        verifyResult.innerHTML = '';
-      });
-      verifyResult.appendChild(el('div', { class: 'lgt-row', style: 'margin-top:6px' }, [enableBtn, cancelBtn]));
-    }
-
-    function runPageStateVerification() {
-      if (location.search.indexOf('exposeObgState=true') === -1) {
-        renderEnablePageStatePrompt();
-        return;
-      }
-      verifyResult.style.display = '';
-      verifyResult.textContent = 'Checking window.xSbState\u2026';
-      verifyBtn.disabled = true;
-      var settled = false;
-      var timeoutId = null;
-      function finish(text) {
-        if (settled) return;
-        settled = true;
-        if (timeoutId) clearTimeout(timeoutId);
-        verifyBtn.disabled = false;
-        verifyResult.textContent = text;
-      }
-      timeoutId = setTimeout(function () {
-        finish('Could not verify page state: the extension did not respond within 5 seconds. Reload the Link Gen Tool on chrome://extensions, then try again.');
-      }, 5000);
-
-      try {
-        chrome.runtime.sendMessage({ type: 'lgt-verify-xsbstate' }, function (d) {
-          var runtimeError = chrome.runtime.lastError;
-          if (runtimeError) {
-            finish('Could not verify page state: ' + runtimeError.message + '. Reload the Link Gen Tool on chrome://extensions, then try again.');
-            return;
-          }
-          if (!d || !d.ok) { finish('Page-state check failed: ' + ((d && d.error) || 'no response')); return; }
-          if (!d.hasState) {
-            finish('exposeObgState=true is enabled, but window.xSbState is not available yet. Wait for Sportsbook to finish loading, then try again.');
-            return;
-          }
-          var stateVersion = normalizedVersion(d.version);
-          var stateEnvironment = normalizedEnvironment(d.environment);
-          var observedVersion = normalizedVersion(lastObserved && lastObserved.version);
-          var observedEnvironments = expectedObservedEnvironments(lastObserved);
-          var lines = [];
-          if (!stateVersion) lines.push('\u26a0 xSbState.appContext.version is missing; the SB version cannot be confirmed from page state.');
-          if (!stateEnvironment) lines.push('\u26a0 xSbState.appContext.environment is missing; the environment cannot be confirmed from page state.');
-          if (stateVersion || stateEnvironment) {
-            lines.unshift('Page state: version=' + (stateVersion ? 'v' + stateVersion : '?') + ' environment=' + (stateEnvironment ? stateEnvironment.toUpperCase() : '?'));
-          }
-          var versionMatches = !!(stateVersion && observedVersion && stateVersion === observedVersion);
-          var environmentMatches = !!(stateEnvironment && observedEnvironments.indexOf(stateEnvironment) !== -1);
-          if (stateVersion && observedVersion && !versionMatches) {
-            lines.push('\u26a0 State version v' + stateVersion + ' does not match network version v' + observedVersion + '.');
-          }
-          if (stateEnvironment && observedEnvironments.length && !environmentMatches) {
-            lines.push('\u26a0 State environment ' + stateEnvironment.toUpperCase() + ' does not match network environment ' + observedEnvironments.map(function (env) { return env.toUpperCase(); }).join('/') + '.');
-          }
-          if (!lastObserved || (!observedVersion && !observedEnvironments.length)) {
-            lines.push('\u26a0 No network-detected SB build is available yet, so page state cannot be cross-checked.');
-          } else {
-            if (!observedVersion) lines.push('\u26a0 The network observation has no resolved version yet.');
-            if (!observedEnvironments.length) lines.push('\u26a0 The network observation has no resolved environment yet.');
-          }
-          if (versionMatches && environmentMatches) {
-            lines.push('\u2713 Page state confirms both the network-detected SB version and environment.');
-          }
-          finish(lines.join('\n'));
-        });
-      } catch (err) {
-        finish('Could not verify page state: ' + friendlyErrorMessage(err) + '. Reload the Link Gen Tool on chrome://extensions, then try again.');
-      }
-    }
-
-    verifyBtn.addEventListener('click', runPageStateVerification);
-
-    try {
-      var resumeUrl = sessionStorage.getItem(PAGE_STATE_VERIFY_RESUME_KEY);
-      if (resumeUrl) {
-        sessionStorage.removeItem(PAGE_STATE_VERIFY_RESUME_KEY);
-        if (location.search.indexOf('exposeObgState=true') !== -1) setTimeout(runPageStateVerification, 0);
-      }
-    } catch (e) {}
 
     return wrap;
   }

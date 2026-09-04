@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Link Gen Tool",
-  "version": "1.22.5",
+  "version": "1.22.6",
   "description": "Generate environment-correct Betsson sportsbook QA links and capture live-login session context (network-level, immune to page fetch/XHR timing races). Companion to the link-gen-tool bookmarklet.",
   "permissions": ["storage", "webRequest", "webNavigation", "debugger", "tabs", "declarativeNetRequest", "declarativeNetRequestFeedback", "scripting"],
   "host_permissions": ["<all_urls>"],
@@ -21,6 +21,19 @@
       "js": ["bonus-mock.js", "bet-void-mock.js", "content.js"],
       "run_at": "document_idle",
       "all_frames": false
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["layer-detect.js"],
+      "run_at": "document_idle",
+      "world": "MAIN",
+      "all_frames": true
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["layer-relay.js"],
+      "run_at": "document_idle",
+      "all_frames": true
     }
   ],
   "web_accessible_resources": [

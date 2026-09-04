@@ -683,7 +683,9 @@ chrome.tabs.onRemoved.addListener(function (tabId) {
   stopBundleOverrideRule(tabId);
   stopBleDataOverrideRule(tabId);
   keepAttachedTabs.delete(tabId);
-  delete bundleObservedByTab[tabId];
+  delete runtimeMarkersByTab[tabId];
+  delete networkByTab[tabId];
+  delete frameDocByTab[tabId];
 });
 chrome.tabs.onUpdated.addListener(function (tabId, changeInfo) {
   if (changeInfo.status === 'loading' && embedRuleIdByTab[tabId]) stopEmbedRule(tabId);
@@ -1933,13 +1935,67 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
 // the 2026-08-10 Bundle-tab bug this was built in response to).
 // ---------------------------------------------------------------------
 
-var bundleObservedByTab = {}; // tabId -> {buildFolder, version, device,
-// brandId, filePrefix, host, hostEnv, url, ts}. Last-write-wins on
-// purpose: every fresh page load/reload always re-requests the bundle
-// (hashed filenames, not cached across deploys), so the most recent
-// observation IS the current truth for that tab - no separate "is this
-// stale" check needed beyond clearing it on a real cross-page navigation
-// (below).
+// ---------------------------------------------------------------------
+// Brand- and layer-scoped SB version/environment detection.
+//
+// A brand is not one architecture: the SAME brand page can run an MFE
+// widget, an iframe/OBGA embed, and/or a NodeJS-rendered layer at once,
+// each potentially on a different version/environment, each potentially
+// in its OWN frame. Everything below is keyed by tabId -> frameId ->
+// layer ('mfe'|'iframe'|'nodejs') so two layers on one page, or the same
+// layer in two frames, never overwrite each other's evidence.
+//
+// runtimeMarkersByTab[tabId][frameId][layer] = {brandId, brandName,
+//   version, environment, appHash, versionSource, environmentSource, ts}
+//   - populated by the 'lgt-layer-marker' message from layer-relay.js
+//     (itself just forwarding layer-detect.js's MAIN-world reads of
+//     window.sbMfeStartupContext/sbXpSportsbookAppVersion,
+//     window.obgClientEnvironmentConfig.startupContext, window.nodeContext).
+//
+// networkByTab[tabId][frameId][layer] = {brandId, brand, matchedBrandId,
+//   device, version, headerVersion, hostEnv, artifactEnv, artifactEnvs,
+//   url, ts} - the independent, network-observed side of the same
+// evidence. Last-write-wins per layer on purpose: every fresh page
+// load/reload always re-requests the bundle/config (hashed filenames,
+// not cached across deploys), so the most recent observation IS the
+// current truth for that frame+layer.
+//
+// frameDocByTab[tabId][frameId] = {url, hostname, env} - the frame's own
+// committed navigation URL, used as the NodeJS layer's environment
+// source (nodeContext.environment is not guaranteed) and as a last-
+// resort hostname brand fallback.
+var runtimeMarkersByTab = {};
+var networkByTab = {};
+var frameDocByTab = {};
+
+// Resolves a brand key from either a known GUID or a free-text brand
+// name (as reported by a runtime marker's brandId/brandName - the two
+// markers are not guaranteed to agree on which of the two they populate).
+function brandKeyFromMarker(brandId, brandName) {
+  if (brandId) {
+    var byGuid = bundleBrandKeyFromGuid(brandId);
+    if (byGuid) return byGuid;
+    // Not a known GUID - it may already BE the brand key/slug itself.
+    if (BUNDLE_BRAND_GUIDS[String(brandId).toLowerCase()]) return String(brandId).toLowerCase();
+  }
+  if (brandName) {
+    var normalized = String(brandName).toLowerCase().replace(/[^a-z0-9]/g, '');
+    var match = Object.keys(BUNDLE_BRAND_GUIDS).filter(function (key) { return key.replace(/[^a-z0-9]/g, '') === normalized; });
+    if (match.length === 1) return match[0];
+  }
+  return null;
+}
+
+// bleSource=1 exists ONLY to force a QA/TEST-bundle page to talk to the
+// ALWAYS-live PROD/ALPHA backend (see content.js's `apiEnv = opts.bleSource
+// ? 'prod' : ...`). Those ALPHA/PROD backend requests are a deliberate,
+// expected mismatch versus the QA/TEST bundle actually running the page -
+// they must never be allowed to leak into (or poison) the bundle
+// environment computation.
+function isBleExcludedRequest(url, hostEnv) {
+  if (hostEnv !== 'alpha' && hostEnv !== 'prod') return false;
+  try { return new URL(url).searchParams.get('bleSource') === '1'; } catch (e) { return false; }
+}
 
 var BUNDLE_OBSERVE_RE = /\/dist\/([a-z]+)\/xp\/widgets\/sportsbook\/([0-9a-fA-F-]{36})\/([^/]+)\/(desktop|mobile)\/files\/([a-zA-Z0-9]+)-[^/.]+\.js/i;
 
@@ -2160,29 +2216,23 @@ if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
     // attribute the observation to.
     var hostname = '';
     try { hostname = new URL(details.url).hostname; } catch (e) { /* leave empty */ }
+    var frameId = details.frameId || 0;
 
     var m = BUNDLE_OBSERVE_RE.exec(details.url);
     if (m) {
       var observedTabId = details.tabId;
+      var observedFrameId = frameId;
       var observedUrl = details.url;
       var observedHostEnv = envLabelFromHostname(hostname);
+      if (isBleExcludedRequest(details.url, observedHostEnv)) return; // bleSource=1 ALPHA/PROD - excluded from bundle-environment computation
       var observation = {
-        shape: 'dist',
-        // m[1] ("dist/<label>/") is NOT a reliable environment indicator on
-        // its own - confirmed live 2026-08-10 that a brand's TEST site can
-        // serve its bundle from a path literally labeled "qa" with NO
-        // override applied (TEST/QA apparently share one underlying BLE-
-        // layer build artifact folder). Kept only as a diagnostic detail
-        // (buildFolder); the actual "which environment served this file"
-        // answer is hostEnv below, derived from the REQUEST'S OWN HOST -
-        // which correctly differs between a native load (same host as the
-        // page) and an active override (redirected to a different env's
-        // CDN host).
-        buildFolder: m[1].toLowerCase(),
+        // MFE layer - the widget's own federated bundle, brandId+device
+        // encoded directly in the URL.
+        layer: 'mfe',
         brandId: m[2],
+        brand: bundleBrandKeyFromGuid(m[2]),
         version: m[3],
         device: m[4],
-        filePrefix: m[5],
         host: hostname,
         hostEnv: observedHostEnv,
         artifactEnv: null,
@@ -2191,16 +2241,18 @@ if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
         url: details.url,
         ts: Date.now()
       };
-      bundleObservedByTab[observedTabId] = observation;
+      networkByTab[observedTabId] = networkByTab[observedTabId] || {};
+      networkByTab[observedTabId][observedFrameId] = networkByTab[observedTabId][observedFrameId] || {};
+      networkByTab[observedTabId][observedFrameId].mfe = observation;
       resolveDistBundleEnvironments(observedHostEnv, observation.brandId, observation.device, observation.version).then(function (artifactEnvs) {
-        var current = bundleObservedByTab[observedTabId];
-        if (!current || current.shape !== 'dist' || current.url !== observedUrl) return;
+        var current = networkByTab[observedTabId] && networkByTab[observedTabId][observedFrameId] && networkByTab[observedTabId][observedFrameId].mfe;
+        if (!current || current.url !== observedUrl) return;
         current.artifactEnvs = artifactEnvs;
         current.artifactEnv = artifactEnvs.length === 1 ? artifactEnvs[0] : null;
         current.artifactResolutionPending = false;
       }).catch(function () {
-        var current = bundleObservedByTab[observedTabId];
-        if (current && current.shape === 'dist' && current.url === observedUrl) current.artifactResolutionPending = false;
+        var current = networkByTab[observedTabId] && networkByTab[observedTabId][observedFrameId] && networkByTab[observedTabId][observedFrameId].mfe;
+        if (current && current.url === observedUrl) current.artifactResolutionPending = false;
       });
       return;
     }
@@ -2208,19 +2260,27 @@ if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
     var configMatch = BUNDLE_OBSERVE_SANDBOX_CONFIG_RE.exec(details.url);
     if (configMatch) {
       var configTabId = details.tabId;
+      var configFrameId = frameId;
       var configUrl = details.url;
       var configBrandId = configMatch[2].toLowerCase();
       var configFacadeId = configMatch[3].toLowerCase();
       var configVersionHint = configMatch[4];
       var configHostEnv = envLabelFromHostname(hostname);
-      bundleObservedByTab[configTabId] = {
-        shape: 'sandbox',
-        buildFolder: configMatch[1].toLowerCase(),
+      if (isBleExcludedRequest(details.url, configHostEnv)) return;
+      networkByTab[configTabId] = networkByTab[configTabId] || {};
+      networkByTab[configTabId][configFrameId] = networkByTab[configTabId][configFrameId] || {};
+      // iframe/OBGA layer - the config request is this layer's own
+      // network confirmation source (per spec: config URL brandId is
+      // also the last network fallback for brand identification, used
+      // generically here whether this is a real brand page's embed or
+      // the tool's own sandbox/Generate-tab link).
+      networkByTab[configTabId][configFrameId].iframe = {
+        layer: 'iframe',
         brandId: configBrandId,
         brand: bundleBrandKeyFromGuid(configBrandId),
         version: configVersionHint,
         device: null,
-        filePrefix: 'config',
+        headerVersion: null,
         host: hostname,
         hostEnv: configHostEnv,
         url: configUrl,
@@ -2228,176 +2288,227 @@ if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
       };
       resolveSandboxConfigInfo(configHostEnv, configBrandId, configFacadeId, configVersionHint).then(function (found) {
         if (!found) return;
-        var current = bundleObservedByTab[configTabId];
-        if (!current || current.shape !== 'sandbox') return;
+        var current = networkByTab[configTabId] && networkByTab[configTabId][configFrameId] && networkByTab[configTabId][configFrameId].iframe;
+        if (!current) return;
         current.version = found.version;
         current.device = found.device;
-        current.brandId = found.brandId;
         current.matchedBrandId = found.brandId;
         current.brand = current.brand || bundleBrandKeyFromGuid(found.brandId);
       }).catch(function (err) {
-        console.warn('[link-gen-tool] sandbox config/indexer version lookup failed:', err);
+        console.warn('[link-gen-tool] iframe/OBGA config indexer lookup failed:', err);
       });
       return;
     }
 
-    // Sandbox shape (see BUNDLE_OBSERVE_SANDBOX_RE comment above): no
-    // version/brandId/device in the URL at all, so the ONLY way to avoid
-    // false positives on completely unrelated websites (which may very
-    // well also serve a `/assets/main-<hash>.js`, this pattern is generic
-    // Angular CLI output, not unique to us) is to require the REQUEST'S
-    // OWN HOSTNAME to already be a recognized sbplayground CDN host. If it
-    // isn't, silently ignore the request - it's not one of ours.
+    // Generic Angular-CLI-shaped `/assets/*.js` (see BUNDLE_OBSERVE_SANDBOX_RE
+    // comment): no version/brandId/device in the URL at all, so this only
+    // fires as SUPPLEMENTARY enrichment for an already brand-known iframe
+    // observation in the SAME frame (chunk hash reverse-lookup against
+    // that ONE brand's indexer entry only - never a cross-brand scan, see
+    // resolveSandboxBundleInfo's own guard). It never creates a brand-new
+    // observation by itself.
     var sm = BUNDLE_OBSERVE_SANDBOX_RE.exec(details.url);
     if (!sm) return;
     var known = detectBrandAndEnvFromPlaygroundHost(hostname) || genericSandboxInfoFromHostname(hostname);
-    if (!known) return;
-    // Carry forward a previously-resolved version/device across this same
-    // tab's later requests (e.g. a page load fires a dozen chunk
-    // requests in quick succession) - only ONE of them typically matches
-    // indexer.json (most sandbox-page chunks are the host app's own,
-    // unrelated to the widget - see resolveSandboxBundleInfo comment
-    // below), so a later, non-matching chunk's observation must not blow
-    // away an earlier chunk's already-successful enrichment. Only reset
-    // to null on a genuinely different page (onBeforeNavigate below
-    // clears the whole entry on real navigation, or the shape itself
-    // changed, e.g. dist->sandbox).
-    var priorSandbox = bundleObservedByTab[details.tabId];
-    var carriedVersion = (priorSandbox && priorSandbox.shape === 'sandbox') ? priorSandbox.version : null;
-    var carriedDevice = (priorSandbox && priorSandbox.shape === 'sandbox') ? priorSandbox.device : null;
-    var carriedBrand = (priorSandbox && priorSandbox.shape === 'sandbox') ? priorSandbox.brand : null;
-    var carriedBrandId = (priorSandbox && priorSandbox.shape === 'sandbox') ? (priorSandbox.matchedBrandId || priorSandbox.brandId) : null;
-    bundleObservedByTab[details.tabId] = {
-      shape: 'sandbox',
-      buildFolder: null,
-      brandId: carriedBrandId,
-      brand: known.brand || carriedBrand,
-      // version/device are simply not encoded in this URL shape at all -
-      // carried forward from a prior request's successful enrichment (see
-      // above), or null until/unless one resolves.
-      version: carriedVersion,
-      device: carriedDevice,
-      filePrefix: sm[1].toLowerCase(),
-      host: hostname,
-      hostEnv: envLabelFromHostname(hostname),
-      url: details.url,
-      ts: Date.now()
-    };
-
-    // Reverse-lookup enrichment (2026-08-10, revised): run for every
-    // sandbox-shape observation, not just main-*.js - live testing showed
-    // the sandbox host page's own main-*.js is a different build artifact
-    // than the widget's federated entry point (see resolveSandboxBundleInfo
-    // comment above), so it essentially never matches; the chunk-*.js
-    // requests are what actually resolve via indexer.json's per-facade
-    // chunk listings. Fire-and-forget: the synchronous env-only
-    // observation above already gives the UI something to show
-    // immediately; this just patches it in place if/when the async lookup
-    // resolves.
+    var priorIframe = networkByTab[details.tabId] && networkByTab[details.tabId][frameId] && networkByTab[details.tabId][frameId].iframe;
+    var lookupBrand = (known && known.brand) || (priorIframe && priorIframe.brand);
+    var lookupEnv = (known && known.environment) || (priorIframe && priorIframe.hostEnv);
+    if (!lookupBrand || !lookupEnv || !priorIframe) return; // nothing to enrich
     var enrichTabId = details.tabId;
+    var enrichFrameId = frameId;
     var enrichFilename = details.url.split('/').pop().split('?')[0].split('#')[0];
-    var lookupBrand = known.brand || carriedBrand;
-    if (!lookupBrand) return;
-    resolveSandboxBundleInfo(known.environment, enrichFilename, lookupBrand).then(function (found) {
+    resolveSandboxBundleInfo(lookupEnv, enrichFilename, lookupBrand).then(function (found) {
       if (!found) return;
-      // Guard: only patch if this tab is still showing a sandbox-shape
-      // observation at all - a real navigation (onBeforeNavigate below)
-      // clears the entry entirely, or a dist-shape request may have since
-      // taken over (an embedded, not standalone, page) - either way this
-      // stale lookup no longer applies. Deliberately NOT keyed to the
-      // exact request URL (unlike an earlier version of this guard) -
-      // that was too strict: since only a handful of a sandbox page's many
-      // chunk requests actually match indexer.json, a later NON-matching
-      // chunk's own (already-applied, still-pending) request must not be
-      // allowed to invalidate an earlier chunk's genuinely successful
-      // match once it resolves.
-      var current = bundleObservedByTab[enrichTabId];
-      if (!current || current.shape !== 'sandbox') return;
-      current.version = found.version;
-      current.device = found.device;
-      current.matchedBrandId = found.brandId;
+      var current = networkByTab[enrichTabId] && networkByTab[enrichTabId][enrichFrameId] && networkByTab[enrichTabId][enrichFrameId].iframe;
+      if (!current) return;
+      current.version = current.version || found.version;
+      current.device = current.device || found.device;
+      current.matchedBrandId = current.matchedBrandId || found.brandId;
     }).catch(function (err) {
-      console.warn('[link-gen-tool] sandbox bundle indexer reverse-lookup failed:', err);
+      console.warn('[link-gen-tool] iframe/OBGA sandbox chunk reverse-lookup failed:', err);
     });
   }, { urls: ['*://*/dist/*/xp/widgets/sportsbook/*', '*://*/dist/*/config/*', '*://*/assets/*'], types: ['script', 'xmlhttprequest'] });
 }
 
-// Clear a tab's observation on a genuine top-level navigation to a
-// different page - without this, navigating away from a sportsbook page
-// to something unrelated would leave the last build's info visible,
-// silently misleading ("Detected build" would show the OLD page's data).
-// Deliberately not tied to same-origin SPA route changes (those don't
-// fire onBeforeNavigate at all) or to the embedded-iframe case (the SB
-// app frequently runs inside an iframe on a real brand site, not the top
-// frame - clearing only on frameId 0 means an iframe-only reload doesn't
-// wipe a still-valid observation; a fresh bundle request will simply
-// overwrite it moments later anyway).
-if (chrome.webNavigation && chrome.webNavigation.onBeforeNavigate) {
-  chrome.webNavigation.onBeforeNavigate.addListener(function (details) {
-    if (details.frameId !== 0) return;
-    delete bundleObservedByTab[details.tabId];
+// x-sb-app-version response header - a VERSION-only source for the
+// iframe/OBGA layer (per spec, the API URL that carries this header must
+// never be used as an environment source - only its config/bundle-URL
+// hostname evidence above may supply environment). Restricted to the
+// same `sb/fe-api/` and `/api/sb/v1/` path conventions already used
+// elsewhere in this file for other SB-specific header capture, so this
+// never fires (and never pays the `extraHeaders` cost) on arbitrary
+// third-party sites.
+if (chrome.webRequest && chrome.webRequest.onHeadersReceived) {
+  chrome.webRequest.onHeadersReceived.addListener(function (details) {
+    if (details.tabId == null || details.tabId < 0) return;
+    var hostname = '';
+    try { hostname = new URL(details.url).hostname; } catch (e) { /* leave empty */ }
+    var hostEnv = envLabelFromHostname(hostname);
+    if (isBleExcludedRequest(details.url, hostEnv)) return; // bleSource=1 ALPHA/PROD backend - excluded entirely
+    var headerValue = null;
+    (details.responseHeaders || []).forEach(function (h) {
+      if (String(h.name || '').toLowerCase() === 'x-sb-app-version') headerValue = h.value;
+    });
+    if (headerValue == null) return;
+    var frameId = details.frameId || 0;
+    var frameEntry = networkByTab[details.tabId] && networkByTab[details.tabId][frameId];
+    if (frameEntry && frameEntry.iframe) frameEntry.iframe.headerVersion = headerValue;
+  }, { urls: ['*://*/*sb/fe-api/*', '*://*/*api/sb/v1/*'] }, ['responseHeaders', 'extraHeaders']);
+}
+
+// The frame's own committed navigation URL - the NodeJS layer's
+// environment source (nodeContext.environment is explicitly NOT
+// guaranteed by the spec), and a last-resort hostname brand fallback for
+// any layer. Recorded for every frame, not just the top one, since the
+// SB app frequently runs inside an iframe on a real brand site.
+if (chrome.webNavigation && chrome.webNavigation.onCommitted) {
+  chrome.webNavigation.onCommitted.addListener(function (details) {
+    var hostname = '';
+    try { hostname = new URL(details.url).hostname; } catch (e) { /* leave empty */ }
+    if (!hostname) return;
+    frameDocByTab[details.tabId] = frameDocByTab[details.tabId] || {};
+    var fromPlayground = detectBrandAndEnvFromPlaygroundHost(hostname);
+    frameDocByTab[details.tabId][details.frameId] = {
+      url: details.url,
+      hostname: hostname,
+      env: (fromPlayground && fromPlayground.environment) || envLabelFromHostname(hostname),
+      brand: fromPlayground && fromPlayground.brand
+    };
   });
 }
 
+// Runtime marker relay (see layer-detect.js / layer-relay.js) - one entry
+// per frame per layer, last-write-wins (a fresh navigation re-injects
+// layer-detect.js fresh into that frame, so a later report always
+// reflects the frame's current reality).
 chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
-  if (!msg || msg.type !== 'lgt-bundle-observed') return false;
-  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
-  sendResponse({ ok: true, observed: bundleObservedByTab[sender.tab.id] || null });
+  if (!msg || msg.type !== 'lgt-layer-marker') return false;
+  if (!sender.tab || sender.tab.id == null) return false;
+  var tabId = sender.tab.id;
+  var frameId = sender.frameId || 0;
+  runtimeMarkersByTab[tabId] = runtimeMarkersByTab[tabId] || {};
+  runtimeMarkersByTab[tabId][frameId] = runtimeMarkersByTab[tabId][frameId] || {};
+  (msg.markers || []).forEach(function (marker) {
+    if (!marker || !marker.layer) return;
+    runtimeMarkersByTab[tabId][frameId][marker.layer] = Object.assign({ ts: Date.now() }, marker);
+  });
   return false;
 });
 
-// "Verify with page state" (2026-08-10, rewritten after live testing
-// found the ORIGINAL implementation's real root cause): content.js used
-// to inject a plain <script> tag to read window.xSbState from the
-// page's own MAIN-world context, since a content script's isolated
-// world cannot see the page's own JS variables directly. That technique
-// is a DOM script element, so it IS subject to the page's own
-// script-src CSP - confirmed live on a NordicBet QA sandbox link, whose
-// CSP is `script-src 'self' 'wasm-unsafe-eval' ...` with no
-// 'unsafe-inline', which silently blocked the injected script (a real
-// "Executing inline script violates ... Content-Security-Policy"
-// console error was captured). An earlier page.evaluate()-based probe
-// had misleadingly suggested the injection technique "worked" - that
-// call goes through the DevTools Protocol, which always bypasses page
-// CSP entirely, unlike an actual DOM <script> tag. The correct, official
-// fix is chrome.scripting.executeScript with world:'MAIN', which is
-// explicitly documented to run in the page's real JS context WITHOUT
-// being subject to the page's script-src CSP (it's not parsed as a
-// same-origin resource at all) - this can only be called from the
-// service worker (content scripts have no "scripting" permission
-// access), hence this message-based bridge.
-chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
-  if (!msg || msg.type !== 'lgt-verify-xsbstate') return false;
-  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
-  chrome.scripting.executeScript({
-    target: { tabId: sender.tab.id },
-    world: 'MAIN',
-    func: function () {
-      var s = window.xSbState;
-      if (!s) return { ok: true, hasState: false };
-      // These are the same canonical xSbState paths used by the official
-      // Sportsbook Tool. Do not silently treat an exposed object as a
-      // successful verification when either value is absent: the caller
-      // must compare both values with the independently observed bundle.
-      var appContext = s.appContext || null;
-      var version = appContext && appContext.version != null ? appContext.version : null;
-      var environment = appContext && appContext.environment != null ? appContext.environment : null;
-      return {
-        ok: true,
-        hasState: true,
-        version: version,
-        environment: environment,
-        versionSource: version != null ? 'xSbState.appContext.version' : null,
-        environmentSource: environment != null ? 'xSbState.appContext.environment' : null,
-        keys: Object.keys(s)
-      };
+// Clear a frame's observations on its own navigation - without this,
+// navigating away would leave stale evidence visible. A top-level
+// (frameId 0) navigation clears the WHOLE tab (subframes are about to be
+// torn down and re-created anyway); a subframe navigation only clears
+// that one frameId, leaving sibling frames/layers untouched.
+if (chrome.webNavigation && chrome.webNavigation.onBeforeNavigate) {
+  chrome.webNavigation.onBeforeNavigate.addListener(function (details) {
+    if (details.frameId === 0) {
+      delete runtimeMarkersByTab[details.tabId];
+      delete networkByTab[details.tabId];
+      delete frameDocByTab[details.tabId];
+      return;
     }
-  }).then(function (results) {
-    sendResponse((results && results[0] && results[0].result) || { ok: false, error: 'no result from executeScript' });
-  }, function (err) {
-    sendResponse({ ok: false, error: String((err && err.message) || err) });
+    if (runtimeMarkersByTab[details.tabId]) delete runtimeMarkersByTab[details.tabId][details.frameId];
+    if (networkByTab[details.tabId]) delete networkByTab[details.tabId][details.frameId];
+    if (frameDocByTab[details.tabId]) delete frameDocByTab[details.tabId][details.frameId];
   });
-  return true; // keep sendResponse alive for the async executeScript call
+}
+
+function normalizeVersion(value) { return String(value == null ? '' : value).trim().replace(/^v/i, ''); }
+function normalizeEnv(value) { return String(value == null ? '' : value).trim().toLowerCase(); }
+
+// The confidence classifier - brand+layer+device is ALWAYS the unit of
+// comparison; a common chunk hash or version shared by unrelated brands
+// never causes cross-brand mixing because every network observation is
+// already scoped to the ONE brandId the indexer/config request itself
+// named (see resolveSandboxBundleInfo's own single-brand restriction).
+function computeDetectionRows(tabId) {
+  var runtimeByFrame = runtimeMarkersByTab[tabId] || {};
+  var networkByFrame = networkByTab[tabId] || {};
+  var docByFrame = frameDocByTab[tabId] || {};
+  var frameIds = Object.keys(Object.assign({}, runtimeByFrame, networkByFrame));
+  var rows = [];
+
+  frameIds.forEach(function (frameIdStr) {
+    var frameId = Number(frameIdStr);
+    var runtimeLayers = runtimeByFrame[frameId] || {};
+    var networkLayers = networkByFrame[frameId] || {};
+    var doc = docByFrame[frameId];
+    var hasAnyRuntimeMarker = Object.keys(runtimeLayers).length > 0;
+
+    if (!hasAnyRuntimeMarker) {
+      // Network evidence with no runtime marker at all in this frame -
+      // Unclassified: brand shown (if resolvable), but deliberately no
+      // assumed layer label.
+      Object.keys(networkLayers).forEach(function (layer) {
+        var net = networkLayers[layer];
+        var brandKey = net.matchedBrandId ? bundleBrandKeyFromGuid(net.matchedBrandId) : (net.brand || (doc && doc.brand));
+        rows.push({
+          tabId: tabId, frameId: frameId, layer: null, status: 'unclassified',
+          brand: brandKey, brandId: net.matchedBrandId || net.brandId,
+          device: net.device || null,
+          version: net.version || net.headerVersion || null,
+          environment: net.artifactEnv || (net.artifactEnvs && net.artifactEnvs.length === 1 ? net.artifactEnvs[0] : null) || net.hostEnv || (doc && doc.env) || null,
+          detail: 'Network hit with no runtime layer marker in this frame.'
+        });
+      });
+      return;
+    }
+
+    ['mfe', 'iframe', 'nodejs'].forEach(function (layer) {
+      var runtime = runtimeLayers[layer];
+      var net = networkLayers[layer];
+      if (!runtime && !net) return;
+
+      var runtimeBrandKey = runtime ? brandKeyFromMarker(runtime.brandId, runtime.brandName) : null;
+      var networkBrandKey = net ? (net.matchedBrandId ? bundleBrandKeyFromGuid(net.matchedBrandId) : net.brand) : null;
+      var brandKey = runtimeBrandKey || networkBrandKey || (doc && doc.brand) || null;
+
+      var runtimeVersion = runtime ? normalizeVersion(runtime.version) : '';
+      var networkVersion = net ? normalizeVersion(net.version || net.headerVersion) : '';
+      var runtimeEnv = runtime ? normalizeEnv(runtime.environment) : '';
+      var networkEnv = net ? normalizeEnv(net.artifactEnv || (net.artifactEnvs && net.artifactEnvs.length === 1 ? net.artifactEnvs[0] : '') || net.hostEnv || (layer === 'nodejs' && doc ? doc.env : '')) : '';
+
+      var conflicts = [];
+      if (runtimeBrandKey && networkBrandKey && runtimeBrandKey !== networkBrandKey) conflicts.push('brand: runtime=' + runtimeBrandKey + ' vs network=' + networkBrandKey);
+      if (runtimeVersion && networkVersion && runtimeVersion !== networkVersion) conflicts.push('version: runtime=v' + runtimeVersion + ' vs network=v' + networkVersion);
+      if (runtimeEnv && networkEnv && runtimeEnv !== networkEnv) conflicts.push('environment: runtime=' + runtimeEnv.toUpperCase() + ' vs network=' + networkEnv.toUpperCase());
+
+      // Confirmed: both runtime and network evidence exist for this
+      // brand+layer+device, and version+environment are each present on
+      // BOTH sides with no conflict. Partially verified: the layer is
+      // recognized (a runtime marker exists) but some value only has one
+      // reliable source (missing on either side, or network evidence
+      // absent entirely). Mismatch takes priority over both whenever any
+      // conflict was recorded above.
+      var status;
+      if (conflicts.length) {
+        status = 'mismatch';
+      } else if (runtime && net && runtimeVersion && networkVersion && runtimeEnv && networkEnv) {
+        status = 'confirmed';
+      } else {
+        status = 'partial';
+      }
+
+      rows.push({
+        tabId: tabId, frameId: frameId, layer: layer, status: status,
+        brand: brandKey, brandId: (runtime && runtime.brandId) || (net && (net.matchedBrandId || net.brandId)) || null,
+        device: net && net.device || null,
+        version: runtimeVersion || networkVersion || null,
+        environment: (runtimeEnv || networkEnv || null),
+        detail: conflicts.join('; ') || null
+      });
+    });
+  });
+
+  return rows;
+}
+
+chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+  if (!msg || msg.type !== 'lgt-detection-rows') return false;
+  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
+  sendResponse({ ok: true, rows: computeDetectionRows(sender.tab.id) });
+  return false;
 });
 
 // Opens a NEW tab for the given generated link with Sportradar spoofing
