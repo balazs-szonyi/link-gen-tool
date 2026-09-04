@@ -195,17 +195,25 @@ brand page you're already logged into — no CLI, no headless automation.
     all in that frame; the brand is still shown if resolvable, but no
     layer is guessed.
 
-  Two Confirmed rows in the *same frame* are not always two independent
-  integrations: some brands genuinely run a hybrid runtime (e.g. an MFE
-  widget layered on top of the legacy Fabric/OBGA runtime, which still
-  populates its own `obgClientEnvironmentConfig` for backward
-  compatibility). When two layers in one frame are both Confirmed on the
-  exact same brand+version+environment+device, each row's detail line
-  calls out its sibling explicitly (e.g. `Same brand+version+environment
-  as the "iframe" row in this frame — likely one hybrid runtime exposing
-  both markers, not two independent layers.`) so this isn't mistaken for
-  a detection bug — both rows still stay separate, since each has its
-  own genuine, independent evidence.
+  Two or more layers in the *same frame* that all reach Confirmed on the
+  exact same brand+version+environment+device are not shown as separate
+  duplicate-looking rows — some brands genuinely run a hybrid runtime
+  (e.g. an MFE widget layered on top of the legacy Fabric/OBGA runtime,
+  which still populates its own `obgClientEnvironmentConfig` for
+  backward compatibility), and since every value is identical, two rows
+  would just be noise. These are merged into **one row listing every
+  agreeing layer**, e.g.:
+  - `Firestorm · MFE + iframe: v8.3.0.4928-b1d00c18 / QA (desktop) — Confirmed`
+
+  with a detail line explaining why (`Hybrid runtime: MFE + iframe
+  markers all present in this frame with matching brand+version+
+  environment — shown as one row instead of 2 duplicates.`). A brand
+  that only runs one layer (e.g. a plain iframe/OBGA "B2B" integration
+  with no MFE widget at all) correctly still shows a single row for that
+  one layer — the absence of a second row is not a bug, it means the
+  page genuinely doesn't expose a second layer's runtime marker. MFE and
+  iframe rows that disagree on version, environment, or device are
+  **not** merged and remain separate rows, exactly as before.
 
   A generic host with no brand in its own hostname (e.g.
   `d-cf.qa.sbplayground1.net`) is resolved purely from whichever

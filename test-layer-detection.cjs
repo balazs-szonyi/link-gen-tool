@@ -165,10 +165,11 @@ async function main() {
     // Scenario 6: hybrid runtime - MFE and iframe markers BOTH present in
     // the SAME frame and BOTH independently Confirmed on the same
     // brand+version+environment+device. This is a real, observed Betsson
-    // QA shape (mFE layered on top of the legacy Fabric/OBGA runtime) -
-    // still two rows (each has its own genuine evidence), but each row's
-    // detail must call out that its sibling agrees, so a user does not
-    // mistake it for two unrelated/conflicting integrations.
+    // QA shape (mFE layered on top of the legacy Fabric/OBGA runtime).
+    // Since both layers report the exact same version/environment,
+    // showing two duplicate-looking rows is just noise - they must be
+    // merged into ONE row listing every agreeing layer, with a detail
+    // explaining why.
     await seed(
       {
         0: {
@@ -184,13 +185,11 @@ async function main() {
       },
       {}
     );
-    texts = await waitForRows((t) => t.length === 2 && /Confirmed/.test(t[0]) && /Confirmed/.test(t[1]), 10000);
-    assert.match(texts[0], /Firestorm.*MFE.*v8\.3\.0\.4928-b1d00c18.*QA.*Confirmed/s);
-    assert.match(texts[1], /Firestorm.*iframe.*v8\.3\.0\.4928-b1d00c18.*QA.*Confirmed/s);
-    const hybridDetails = await panel.locator('.lgt-build-detail').allInnerTexts();
-    assert.match(hybridDetails[0], /same brand\+version\+environment as the "iframe" row/i);
-    assert.match(hybridDetails[1], /same brand\+version\+environment as the "MFE" row/i);
-    console.log('PASS: MFE and iframe both Confirmed in the same frame with matching brand+version+environment are flagged as one hybrid runtime, not silently treated as two independent integrations.');
+    texts = await waitForRows((t) => t.length === 1 && /Confirmed/.test(t[0]), 10000);
+    assert.match(texts[0], /Firestorm.*MFE \+ iframe.*v8\.3\.0\.4928-b1d00c18.*QA.*Confirmed/s);
+    const hybridDetail = await panel.locator('.lgt-build-detail').first().innerText();
+    assert.match(hybridDetail, /Hybrid runtime: MFE \+ iframe markers all present.*matching brand\+version\+environment.*shown as one row instead of 2 duplicates/i);
+    console.log('PASS: MFE and iframe both Confirmed in the same frame with matching brand+version+environment are merged into a single hybrid row instead of two duplicate-looking rows.');
 
     // Scenario 7: Partially verified - a runtime marker exists but there
     // is no network confirmation for this layer at all yet. The row must

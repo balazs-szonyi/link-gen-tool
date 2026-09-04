@@ -2952,7 +2952,10 @@
       }
       rows.forEach(function (row) {
         var buildText = (row.version ? 'v' + row.version : 'version unknown') + ' / ' + (row.environment ? row.environment.toUpperCase() : 'ENV unknown') + (row.device ? ' (' + row.device + ')' : '');
-        var titlePrefix = brandLabel(row) + ' \u00b7 ' + (row.layer ? LAYER_LABELS[row.layer] : 'Unclassified SB build');
+        var layerLabel = row.layers && row.layers.length
+          ? row.layers.map(function (l) { return LAYER_LABELS[l]; }).join(' + ')
+          : (row.layer ? LAYER_LABELS[row.layer] : 'Unclassified SB build');
+        var titlePrefix = brandLabel(row) + ' \u00b7 ' + layerLabel;
         var label = el('span', {}, [titlePrefix + ': ' + buildText]);
         var badge = el('span', { class: 'lgt-build-badge ' + row.status }, [STATUS_LABELS[row.status] || row.status]);
         var line = el('div', { class: 'lgt-build-row' }, [label, badge]);

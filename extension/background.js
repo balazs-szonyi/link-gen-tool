@@ -2520,26 +2520,42 @@ function computeDetectionRows(tabId) {
       });
     });
 
-    // Two layers in the SAME frame that agree on brand+version+device+
-    // environment (both Confirmed) are not necessarily two independently
+    // Two layers in the SAME frame that both reach Confirmed on the exact
+    // same brand+version+environment+device are not two independently
     // swappable architectures - some brands run a genuinely hybrid
     // runtime (e.g. an mFE app layered on top of the legacy OBGA/"Fabric"
     // context, which the mFE app deliberately also populates for
-    // backward compatibility with older tooling). Flag this explicitly
-    // rather than silently implying two unrelated active integrations.
+    // backward compatibility with older tooling). Since the numbers are
+    // identical, showing two rows is just noise - merge them into ONE
+    // row that lists every agreeing layer, instead of repeating the same
+    // version/environment/status twice.
+    var mergedFrameRows = [];
+    var consumed = {};
     frameRows.forEach(function (row, i) {
-      if (row.status !== 'confirmed') return;
-      var sibling = frameRows.find(function (other, j) {
-        return j !== i && other.status === 'confirmed' && other.layer !== row.layer &&
-          other.brand === row.brand && other.version === row.version &&
-          other.environment === row.environment && other.device === row.device;
+      if (consumed[i]) return;
+      consumed[i] = true;
+      if (row.status !== 'confirmed') { mergedFrameRows.push(row); return; }
+      var group = [row];
+      frameRows.forEach(function (other, j) {
+        if (consumed[j] || other.status !== 'confirmed' || other.layer === row.layer) return;
+        if (other.brand === row.brand && other.version === row.version &&
+            other.environment === row.environment && other.device === row.device) {
+          group.push(other);
+          consumed[j] = true;
+        }
       });
-      if (sibling) {
-        row.detail = 'Same brand+version+environment as the "' + LAYER_LABEL_FOR_DETAIL[sibling.layer] + '" row in this frame - likely one hybrid runtime exposing both markers, not two independent layers.';
-      }
+      if (group.length === 1) { mergedFrameRows.push(row); return; }
+      var layerLabels = group.map(function (r) { return LAYER_LABEL_FOR_DETAIL[r.layer]; });
+      mergedFrameRows.push({
+        tabId: row.tabId, frameId: row.frameId, layer: null,
+        layers: group.map(function (r) { return r.layer; }),
+        status: 'confirmed', brand: row.brand, brandId: row.brandId,
+        device: row.device, version: row.version, environment: row.environment,
+        detail: 'Hybrid runtime: ' + layerLabels.join(' + ') + ' markers all present in this frame with matching brand+version+environment - shown as one row instead of ' + group.length + ' duplicates.'
+      });
     });
 
-    Array.prototype.push.apply(rows, frameRows);
+    Array.prototype.push.apply(rows, mergedFrameRows);
   });
 
   return rows;
