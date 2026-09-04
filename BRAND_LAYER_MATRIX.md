@@ -59,7 +59,36 @@ tests run automatically; live brand tests are manual).
 | Brand | Layer(s) observed | Device | Environment | Status | Last verified | Notes |
 |---|---|---|---|---|---|---|
 | Firestorm | Fabric | desktop | QA | Confirmed | _(spec example, not yet independently re-verified)_ | QA-only brand, no real domain (`BRAND_DOMAINS` has no entry) |
+| Betsson | MFE + Fabric | desktop | ALPHA (runtime says PROD) | **Mismatch** | 2026-09-04 | `alpha.betsson.com/en/sportsbook/live/tennis?exposeObgState=true&exposeObgRt=true&sealStore=false` — see "Known observed Mismatch patterns" below; the third-party Sportsbook Tool extension and our own network confirmation both agree on `v8.2.5.4941-reba6fd9 / ALPHA`, but `sbMfeStartupContext`/`obgClientEnvironmentConfig.startupContext` report a stale `v8.1.16.4855-rb8bfa90 / PROD` — a real page-side data split, not a detection bug |
 | NordicBet | — | — | — | — | _(pending)_ | Real domain: nordicbet.com |
-| Betsson | — | — | — | — | _(pending)_ | Real domain: betsson.com |
 | _(remaining ~39 QA-indexer brands)_ | — | — | — | — | _(pending)_ | Populate using the procedure above as brands are tested |
+
+## Known observed Mismatch patterns
+
+- **`alpha.betsson.com` + `exposeObgState=true&exposeObgRt=true&sealStore=false`
+  (2026-09-04)**: both the MFE and Fabric rows show Mismatch — runtime
+  reports `v8.1.16.4855-rb8bfa90 / PROD`, network reports
+  `v8.2.5.4941-reba6fd9 / ALPHA`. Verified independently with a
+  standalone Playwright script (no extension) against the same URL: a
+  non-VPN/non-whitelisted request to `alpha.betsson.com` gets served a
+  self-consistent PROD fallback where the runtime marker AND every
+  `xp/widgets/sportsbook/.../<version>/` network request agree on
+  `8.1.16.4855-rb8bfa90` from a `/dist/prod/` path — i.e. our runtime
+  marker *extraction* itself is behaving correctly and consistently
+  whenever the browser session actually only has PROD access. On a
+  VPN'd/whitelisted employee session that genuinely reaches the ALPHA
+  build, the network layer (and the third-party Sportsbook Tool, which
+  reads the live artifact the same way) correctly picks up
+  `8.2.5.4941-reba6fd9 / ALPHA`, while `sbMfeStartupContext`/
+  `obgClientEnvironmentConfig.startupContext` keep reporting the older
+  PROD snapshot — most likely because the ALPHA page's server-rendered
+  shell (or an `exposeObgState`/`sealStore` debug-tooling replay of a
+  captured state) embeds a stale/pinned context object that never gets
+  refreshed to match the live artifact actually fetched. **Conclusion:
+  this is a genuine data split on the brand page itself, correctly
+  surfaced as Mismatch — not a bug in the extension's detection logic.**
+  Treat any brand+layer row that stays on Mismatch indefinitely (i.e.
+  does not self-resolve like a `Partially verified` row does once
+  network confirmation catches up) as a real signal worth reporting to
+  the brand/page owner, not as a tool defect.
 
