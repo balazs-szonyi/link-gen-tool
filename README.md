@@ -146,9 +146,10 @@ brand page you're already logged into — no CLI, no headless automation.
   can silently show a stale/wrong value. Flags with an orange badge when
   the served environment differs from the page's own (i.e. a Bundle
   override is active). An optional, on-demand **"Verify with page
-  state"** button cross-checks against `window.xSbState` (only useful on
-  a link with `exposeObgState=true`) for anyone who wants a second,
-  independent confirmation. It reads the page's real, live JS context via
+  state"** button cross-checks `window.xSbState.appContext.version` and
+  `window.xSbState.appContext.environment` against the independently
+  network-detected build (only useful on a link with
+  `exposeObgState=true`). It reads the page's real, live JS context via
   `chrome.scripting.executeScript({world: 'MAIN'})` from the background
   service worker — the officially-documented way to run code in a page's
   actual context without being subject to that page's own
@@ -576,12 +577,13 @@ is largely unchanged:
   run code in a page's real JS context) — an earlier
   DOM-`<script>`-injection-based implementation silently failed forever
   ("No response after 5s") on any page whose CSP lacked `unsafe-inline`,
-  which in practice was every sandbox page tested. The exact
-  version/environment field names inside `window.xSbState` aren't
-  officially documented, so that secondary check falls back to listing
-  the object's top-level keys if none of its best-effort field guesses
-  match — the primary, always-on network-based reading doesn't depend on
-  this at all.
+  which in practice was every sandbox page tested. The check uses the
+  canonical paths also consumed by the Sportsbook Tool:
+  `xSbState.appContext.version` and
+  `xSbState.appContext.environment`. It reports success only when both
+  values are present and both match the independently observed network
+  build; missing fields, unavailable network data, or either mismatch are
+  shown as warnings rather than as a successful verification.
 - **Detected build strip / Bundle tab background polling**: both poll
   `background.js` on a 3s timer for as long as the panel is open. If the
   extension itself gets reloaded/updated (e.g. a dev `chrome://extensions`

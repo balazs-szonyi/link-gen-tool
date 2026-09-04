@@ -2939,6 +2939,26 @@
 
     var lastObserved = null;
 
+    function normalizedVersion(value) {
+      return String(value == null ? '' : value).trim().replace(/^v/i, '');
+    }
+
+    function normalizedEnvironment(value) {
+      return String(value == null ? '' : value).trim().toLowerCase();
+    }
+
+    function expectedObservedEnvironments(observed) {
+      if (!observed) return [];
+      if (observed.shape === 'sandbox') return observed.hostEnv ? [normalizedEnvironment(observed.hostEnv)] : [];
+      if (observed.artifactEnv) return [normalizedEnvironment(observed.artifactEnv)];
+      if (Array.isArray(observed.artifactEnvs) && observed.artifactEnvs.length) {
+        return observed.artifactEnvs.map(normalizedEnvironment).filter(function (env, index, all) {
+          return env && all.indexOf(env) === index;
+        });
+      }
+      return observed.hostEnv ? [normalizedEnvironment(observed.hostEnv)] : [];
+    }
+
     function refresh() {
       chrome.runtime.sendMessage({ type: 'lgt-bundle-observed' }, function (res) {
         void chrome.runtime.lastError;
@@ -3097,17 +3117,34 @@
             finish('exposeObgState=true is enabled, but window.xSbState is not available yet. Wait for Sportsbook to finish loading, then try again.');
             return;
           }
-          if (d.version || d.environment) {
-            var lines = ['\u2713 Page state is exposed: version=' + (d.version || '?') + ' environment=' + (d.environment || '?')];
-            if (lastObserved && lastObserved.version && d.version && String(d.version).indexOf(lastObserved.version) === -1 && lastObserved.version.indexOf(String(d.version)) === -1) {
-              lines.push('\u26a0 It does not match the network-detected version (' + lastObserved.version + ').');
-            } else if (lastObserved && lastObserved.version && d.version) {
-              lines.push('\u2713 It matches the network-detected version.');
-            }
-            finish(lines.join('\n'));
-          } else {
-            finish('\u2713 Page state is exposed and responding. This app state does not publish version/environment fields, so the network-detected SB build shown above remains authoritative.');
+          var stateVersion = normalizedVersion(d.version);
+          var stateEnvironment = normalizedEnvironment(d.environment);
+          var observedVersion = normalizedVersion(lastObserved && lastObserved.version);
+          var observedEnvironments = expectedObservedEnvironments(lastObserved);
+          var lines = [];
+          if (!stateVersion) lines.push('\u26a0 xSbState.appContext.version is missing; the SB version cannot be confirmed from page state.');
+          if (!stateEnvironment) lines.push('\u26a0 xSbState.appContext.environment is missing; the environment cannot be confirmed from page state.');
+          if (stateVersion || stateEnvironment) {
+            lines.unshift('Page state: version=' + (stateVersion ? 'v' + stateVersion : '?') + ' environment=' + (stateEnvironment ? stateEnvironment.toUpperCase() : '?'));
           }
+          var versionMatches = !!(stateVersion && observedVersion && stateVersion === observedVersion);
+          var environmentMatches = !!(stateEnvironment && observedEnvironments.indexOf(stateEnvironment) !== -1);
+          if (stateVersion && observedVersion && !versionMatches) {
+            lines.push('\u26a0 State version v' + stateVersion + ' does not match network version v' + observedVersion + '.');
+          }
+          if (stateEnvironment && observedEnvironments.length && !environmentMatches) {
+            lines.push('\u26a0 State environment ' + stateEnvironment.toUpperCase() + ' does not match network environment ' + observedEnvironments.map(function (env) { return env.toUpperCase(); }).join('/') + '.');
+          }
+          if (!lastObserved || (!observedVersion && !observedEnvironments.length)) {
+            lines.push('\u26a0 No network-detected SB build is available yet, so page state cannot be cross-checked.');
+          } else {
+            if (!observedVersion) lines.push('\u26a0 The network observation has no resolved version yet.');
+            if (!observedEnvironments.length) lines.push('\u26a0 The network observation has no resolved environment yet.');
+          }
+          if (versionMatches && environmentMatches) {
+            lines.push('\u2713 Page state confirms both the network-detected SB version and environment.');
+          }
+          finish(lines.join('\n'));
         });
       } catch (err) {
         finish('Could not verify page state: ' + friendlyErrorMessage(err) + '. Reload the Link Gen Tool on chrome://extensions, then try again.');

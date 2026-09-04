@@ -2375,14 +2375,22 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
     func: function () {
       var s = window.xSbState;
       if (!s) return { ok: true, hasState: false };
-      // Exact field names for version/environment are unconfirmed (see
-      // REFERENCE.md - only sportsbook.statistics/scoreboard are
-      // documented) - best-effort guesses with a safe fallback to just
-      // listing top-level keys so this remains useful even if none of
-      // the guesses match the real shape.
-      var version = (s.app && s.app.version) || s.version || s.buildVersion || null;
-      var environment = (s.app && s.app.environment) || s.environment || null;
-      return { ok: true, hasState: true, version: version, environment: environment, keys: Object.keys(s) };
+      // These are the same canonical xSbState paths used by the official
+      // Sportsbook Tool. Do not silently treat an exposed object as a
+      // successful verification when either value is absent: the caller
+      // must compare both values with the independently observed bundle.
+      var appContext = s.appContext || null;
+      var version = appContext && appContext.version != null ? appContext.version : null;
+      var environment = appContext && appContext.environment != null ? appContext.environment : null;
+      return {
+        ok: true,
+        hasState: true,
+        version: version,
+        environment: environment,
+        versionSource: version != null ? 'xSbState.appContext.version' : null,
+        environmentSource: environment != null ? 'xSbState.appContext.environment' : null,
+        keys: Object.keys(s)
+      };
     }
   }).then(function (results) {
     sendResponse((results && results[0] && results[0].result) || { ok: false, error: 'no result from executeScript' });

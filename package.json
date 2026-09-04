@@ -1,11 +1,12 @@
 {
   "name": "link-gen-tool",
   "private": true,
-  "version": "1.22.4",
+  "version": "1.22.5",
   "scripts": {
     "test": "node --test cross-layer-lab/test/*.test.cjs",
     "test:bonus": "node --test ../.agents/skills/sportsbook-bonus-override/scripts/bonus-override.test.cjs && node test-sportsbook-bonus-override.cjs && node test-bonus-mock-extension.cjs",
-    "test:bet-void": "node test-bet-void-mock.cjs"
+    "test:bet-void": "node test-bet-void-mock.cjs",
+    "test:page-state": "node test-page-state-verification.cjs"
   },
   "devDependencies": {
     "playwright": "^1.62.1"
