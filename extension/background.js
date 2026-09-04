@@ -2423,6 +2423,7 @@ function normalizeEnv(value) { return String(value == null ? '' : value).trim().
 // already scoped to the ONE brandId the indexer/config request itself
 // named (see resolveSandboxBundleInfo's own single-brand restriction).
 function computeDetectionRows(tabId) {
+  var LAYER_LABEL_FOR_DETAIL = { mfe: 'MFE', iframe: 'iframe', nodejs: 'NodeJS' };
   var runtimeByFrame = runtimeMarkersByTab[tabId] || {};
   var networkByFrame = networkByTab[tabId] || {};
   var docByFrame = frameDocByTab[tabId] || {};
@@ -2435,6 +2436,7 @@ function computeDetectionRows(tabId) {
     var networkLayers = networkByFrame[frameId] || {};
     var doc = docByFrame[frameId];
     var hasAnyRuntimeMarker = Object.keys(runtimeLayers).length > 0;
+    var frameRows = [];
 
     if (!hasAnyRuntimeMarker) {
       // Network evidence with no runtime marker at all in this frame -
@@ -2490,15 +2492,54 @@ function computeDetectionRows(tabId) {
         status = 'partial';
       }
 
-      rows.push({
+      // Partial's own detail: which specific piece of evidence is still
+      // missing, so a user doesn't have to guess (or ask) why a row
+      // hasn't reached Confirmed - most commonly this self-resolves a
+      // few seconds after page load (the network side needs a moment to
+      // catch up with the runtime marker), but if it never resolves this
+      // pinpoints exactly which side/value is missing.
+      var partialReasons = [];
+      if (status === 'partial') {
+        if (!runtime) partialReasons.push('no runtime layer marker seen in this frame yet');
+        if (!net) partialReasons.push('no network confirmation seen for this layer yet');
+        if (runtime && net) {
+          if (!runtimeVersion) partialReasons.push('runtime marker has no version');
+          if (!networkVersion) partialReasons.push('network evidence has no version');
+          if (!runtimeEnv) partialReasons.push('runtime marker has no environment');
+          if (!networkEnv) partialReasons.push('network evidence has no environment');
+        }
+      }
+
+      frameRows.push({
         tabId: tabId, frameId: frameId, layer: layer, status: status,
         brand: brandKey, brandId: (runtime && runtime.brandId) || (net && (net.matchedBrandId || net.brandId)) || null,
         device: net && net.device || null,
         version: runtimeVersion || networkVersion || null,
         environment: (runtimeEnv || networkEnv || null),
-        detail: conflicts.join('; ') || null
+        detail: conflicts.join('; ') || partialReasons.join('; ') || null
       });
     });
+
+    // Two layers in the SAME frame that agree on brand+version+device+
+    // environment (both Confirmed) are not necessarily two independently
+    // swappable architectures - some brands run a genuinely hybrid
+    // runtime (e.g. an mFE app layered on top of the legacy OBGA/"Fabric"
+    // context, which the mFE app deliberately also populates for
+    // backward compatibility with older tooling). Flag this explicitly
+    // rather than silently implying two unrelated active integrations.
+    frameRows.forEach(function (row, i) {
+      if (row.status !== 'confirmed') return;
+      var sibling = frameRows.find(function (other, j) {
+        return j !== i && other.status === 'confirmed' && other.layer !== row.layer &&
+          other.brand === row.brand && other.version === row.version &&
+          other.environment === row.environment && other.device === row.device;
+      });
+      if (sibling) {
+        row.detail = 'Same brand+version+environment as the "' + LAYER_LABEL_FOR_DETAIL[sibling.layer] + '" row in this frame - likely one hybrid runtime exposing both markers, not two independent layers.';
+      }
+    });
+
+    Array.prototype.push.apply(rows, frameRows);
   });
 
   return rows;

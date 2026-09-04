@@ -182,13 +182,30 @@ brand page you're already logged into — no CLI, no headless automation.
     brand, version, and environment.
   - **Partially verified** — the layer is recognized (a runtime marker
     exists) but at least one value (version or environment) only has a
-    single reliable source.
+    single reliable source. The row's detail line spells out exactly
+    which piece of evidence is still missing (e.g. "no network
+    confirmation seen for this layer yet", "runtime marker has no
+    environment") instead of leaving a user to guess — most commonly
+    this self-resolves a few seconds after page load, once the network
+    side catches up with the runtime marker.
   - **Mismatch** — the runtime marker and network evidence for the same
     brand+layer disagree; the conflicting values are shown inline (e.g.
     `version: runtime=v8.2.3.4918-re0ade7b vs network=v8.1.15.4896-hc2cb4ed`).
   - **Unclassified SB build** — a network hit with no runtime marker at
     all in that frame; the brand is still shown if resolvable, but no
     layer is guessed.
+
+  Two Confirmed rows in the *same frame* are not always two independent
+  integrations: some brands genuinely run a hybrid runtime (e.g. an MFE
+  widget layered on top of the legacy Fabric/OBGA runtime, which still
+  populates its own `obgClientEnvironmentConfig` for backward
+  compatibility). When two layers in one frame are both Confirmed on the
+  exact same brand+version+environment+device, each row's detail line
+  calls out its sibling explicitly (e.g. `Same brand+version+environment
+  as the "iframe" row in this frame — likely one hybrid runtime exposing
+  both markers, not two independent layers.`) so this isn't mistaken for
+  a detection bug — both rows still stay separate, since each has its
+  own genuine, independent evidence.
 
   A generic host with no brand in its own hostname (e.g.
   `d-cf.qa.sbplayground1.net`) is resolved purely from whichever

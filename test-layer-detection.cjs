@@ -162,7 +162,51 @@ async function main() {
     assert.equal(excluded.alphaWithoutBle, false);
     console.log('PASS: bleSource=1 ALPHA/PROD backend requests are excluded from bundle-environment computation; QA and non-bleSource requests are not.');
 
-    console.log('ALL PASS: brand+layer detection engine (Confirmed/Mismatch/Unclassified, multi-row, bleSource exclusion).');
+    // Scenario 6: hybrid runtime - MFE and iframe markers BOTH present in
+    // the SAME frame and BOTH independently Confirmed on the same
+    // brand+version+environment+device. This is a real, observed Betsson
+    // QA shape (mFE layered on top of the legacy Fabric/OBGA runtime) -
+    // still two rows (each has its own genuine evidence), but each row's
+    // detail must call out that its sibling agrees, so a user does not
+    // mistake it for two unrelated/conflicting integrations.
+    await seed(
+      {
+        0: {
+          mfe: { brandId: '11111111-1111-1111-1111-111111111111', brandName: 'Firestorm', version: '8.3.0.4928-b1d00c18', environment: 'qa', ts: Date.now() },
+          iframe: { brandId: '11111111-1111-1111-1111-111111111111', brandName: 'Firestorm', version: '8.3.0.4928-b1d00c18', environment: 'qa', ts: Date.now() }
+        }
+      },
+      {
+        0: {
+          mfe: { brandId: '11111111-1111-1111-1111-111111111111', brand: 'firestorm', device: 'desktop', version: '8.3.0.4928-b1d00c18', hostEnv: 'qa', artifactEnv: 'qa', artifactEnvs: ['qa'], url: PAGE_URL, ts: Date.now() },
+          iframe: { brandId: '11111111-1111-1111-1111-111111111111', brand: 'firestorm', device: 'desktop', version: '8.3.0.4928-b1d00c18', headerVersion: '8.3.0.4928-b1d00c18', hostEnv: 'qa', url: PAGE_URL, ts: Date.now() }
+        }
+      },
+      {}
+    );
+    texts = await waitForRows((t) => t.length === 2 && /Confirmed/.test(t[0]) && /Confirmed/.test(t[1]), 10000);
+    assert.match(texts[0], /Firestorm.*MFE.*v8\.3\.0\.4928-b1d00c18.*QA.*Confirmed/s);
+    assert.match(texts[1], /Firestorm.*iframe.*v8\.3\.0\.4928-b1d00c18.*QA.*Confirmed/s);
+    const hybridDetails = await panel.locator('.lgt-build-detail').allInnerTexts();
+    assert.match(hybridDetails[0], /same brand\+version\+environment as the "iframe" row/i);
+    assert.match(hybridDetails[1], /same brand\+version\+environment as the "MFE" row/i);
+    console.log('PASS: MFE and iframe both Confirmed in the same frame with matching brand+version+environment are flagged as one hybrid runtime, not silently treated as two independent integrations.');
+
+    // Scenario 7: Partially verified - a runtime marker exists but there
+    // is no network confirmation for this layer at all yet. The row must
+    // self-explain why it has not reached Confirmed instead of leaving
+    // detail blank.
+    await seed(
+      { 0: { mfe: { brandId: '11111111-1111-1111-1111-111111111111', brandName: 'Firestorm', version: '8.2.3.4918-re0ade7b', environment: 'qa', ts: Date.now() } } },
+      {},
+      {}
+    );
+    texts = await waitForRows((t) => t.length === 1 && /Partially verified/.test(t[0]), 10000);
+    const partialDetail = await panel.locator('.lgt-build-detail').first().innerText();
+    assert.match(partialDetail, /no network confirmation seen for this layer yet/);
+    console.log('PASS: Partially verified rows include a specific reason (missing network confirmation) instead of a blank detail.');
+
+    console.log('ALL PASS: brand+layer detection engine (Confirmed/Mismatch/Unclassified, multi-row, bleSource exclusion, hybrid-layer flagging, partial-reason detail).');
   } finally {
     await context.close();
   }
