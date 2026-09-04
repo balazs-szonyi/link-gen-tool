@@ -220,3 +220,82 @@ tests run automatically; live brand tests are manual).
   inline warning explaining the two are different signals and that this
   is independent of any Bundle Override applied below (network-level
   redirection still works correctly regardless).
+
+- **The "missing step 0" question, investigated and resolved with a real
+  code fix (2026-09-05)**: a user raised a deeper concern than the
+  labeling issue above — if `alpha.betsson.com` natively falls back to
+  PROD (as proven twice already), does applying a **hybrid** Bundle
+  Override (`currentEnv=alpha` nominal, `targetEnv=test`) *directly* on
+  that native-PROD page actually behave as a real "ALPHA→TEST" override,
+  or does it silently become a "PROD→TEST" override instead, because the
+  conceptual "step 0" (first genuinely establishing real ALPHA content)
+  never happens? This was **not** a labeling question and was tested
+  live, end-to-end, with a throwaway Playwright script (per this
+  project's established one-off-diagnostic convention) rather than
+  reasoned about from source alone, per this user's standing requirement
+  for concrete evidence.
+
+  **First finding — a real, pre-existing bug, confirmed live**: applying
+  the hybrid override directly on the native-PROD `alpha.betsson.com`
+  page left **13 of 46** bundle script requests (all dynamically-hashed
+  `chunk-*.js`/`shell.*.js` async files) still being served **real PROD
+  content** (verified via direct `fetch()` + HTTP 200 + actual JS body),
+  while `main-*.js` and 33 other files correctly moved to TEST — a
+  genuinely mixed-version, broken build, silently, with no error. This
+  reproduced regardless of currentEnv accuracy (same leak occurs whether
+  the nominal source is 'alpha' or 'prod') and regardless of HTTP cache
+  state (re-tested with `Network.setCacheDisabled: true`, identical
+  result) — ruling out both "wrong assumed currentEnv" and "stale browser
+  cache" as the cause.
+
+  **Root cause (confirmed by fetching indexer.json for all 3 relevant
+  envs)**: `indexer.json`'s `js` array for this brand+device lists
+  **only the single top-level `main-HASH.js` entry, in every environment
+  (test, alpha, prod)** — it does not enumerate the additional
+  dynamically-hashed async `chunk-*.js`/`shell.*.js` files the real page
+  also `modulepreload`s (confirmed via request timing: all 13 leaked
+  files fired in the same ~1ms batch as the initial HTML parse, well
+  before any script/override could react — consistent with server-
+  rendered `<link rel=modulepreload>` tags baked into the initial
+  response). `buildBundleRedirectRules` only ever creates a redirect rule
+  for prefixes it can find in *some* environment's indexer.json (the
+  exact "main"/target-file rule, plus the existing "layer sibling"
+  no-op rule for prefixes like NordicBet's `shell` that appear in one
+  env's indexer but not the target's) — since `chunk`/`shell` never
+  appear in **any** environment's indexer for this brand, neither
+  mechanism ever knew these files existed. **This is a structural,
+  brand-data-source limitation of Bundle Override in general — it
+  affects same-layer overrides too, not just hybrid/cross-layer ones**,
+  and would occur identically even with a hypothetical real "step 0"
+  ALPHA→ALPHA override first, since ALPHA's own indexer.json has the
+  identical single-file limitation. The user's intuition that *something*
+  was incompletely swapped was correct; the specific "PROD-test instead
+  of ALPHA-test" framing was not quite the mechanism, but the underlying
+  worry (a mixed-version build silently forming) was accurate.
+
+  **Fix implemented in `buildBundleRedirectRules`/`startBundleOverrideRule`
+  (`background.js`)**: added one generic, per-device catch-all rule that
+  matches *any* remaining `.../<device>/files/<name>.js` request whose
+  path still points at a non-target environment's `/dist/<env>/` (using
+  the same source-environment set already computed for the config
+  redirect rules), and redirects it to the existing `/bundle-noop.js`
+  extension resource — the same safe fallback the "layer sibling"
+  mechanism already used for *known* extra prefixes. Explicit, known-good
+  redirects (the target's own `main`/named files) were bumped to
+  `priority: 2` so they always win a tie against this new, lowest-priority
+  (`priority: 1`) generic catch-all; the catch-all's own condition is
+  scoped to non-target `/dist/<env>/` paths so it can never match (or
+  block) a request already correctly pointed at the target's own CDN.
+
+  **Verified live, post-fix**: re-ran the same hybrid override on the
+  same native-PROD `alpha.betsson.com` page. All 12 previously-leaked
+  requests now return HTTP 307 (DNR-intercepted, confirmed via
+  `request.redirectedFrom()`/`response().status()`, not a naive
+  same-URL-before-redirect check) — `main-*.js` redirects to the correct
+  TEST file, and all 11 unlisted `chunk-*.js`/`shell.*.js` files redirect
+  to `/bundle-noop.js` instead of silently continuing to execute real
+  PROD code. Re-ran the existing NordicBet TEST→QA live regression
+  (`test-bundle-override-stale-cleanup.cjs`) to confirm no regression for
+  the normal, fully-enumerated case (NordicBet's own chunk-loading, once
+  `main` is redirected, already correctly points at the target CDN on its
+  own merit) — still ALL PASS.

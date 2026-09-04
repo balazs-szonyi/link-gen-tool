@@ -1571,6 +1571,12 @@ function buildBundleRedirectRules(indexerData, layerIndexerData, brandId, target
   try { indexerOrigin = new URL(BUNDLE_INDEXER_URLS[targetEnv]).origin; } catch (e) { /* leave empty */ }
   var rules = [];
   var idIdx = 0;
+  // Computed up front (not just for the config rules further below) because
+  // the generic per-device catch-all noop rule needs it too - see the
+  // "unlisted async chunk" comment inside the device loop for why.
+  var sourceEnvsForRedirect = allowCrossOriginConfig
+    ? Object.keys(BUNDLE_ENV_LAYERS).filter(function (environment) { return environment !== targetEnv; })
+    : bundleEnvironmentsInLayer(targetEnv).filter(function (environment) { return environment !== targetEnv; });
   ['desktop', 'mobile'].forEach(function (device) {
     var deviceEntry = entry[device];
     var files = (deviceEntry && deviceEntry.js) || [];
@@ -1591,7 +1597,10 @@ function buildBundleRedirectRules(indexerData, layerIndexerData, brandId, target
       // ruleIds is pre-sized to the exact needed count by the caller.
       rules.push({
         id: ruleIds[idIdx++],
-        priority: 1,
+        // Higher than the generic unlisted-chunk catch-all noop rule added
+        // below (which must never win a tie against an explicit, known-good
+        // target redirect for the same request).
+        priority: 2,
         action: { type: 'redirect', redirect: { url: targetUrl } },
         condition: {
           // Match both current naming conventions (`main-HASH.js` and
@@ -1624,7 +1633,7 @@ function buildBundleRedirectRules(indexerData, layerIndexerData, brandId, target
       if (targetPrefixes.indexOf(prefix) !== -1 || idIdx >= ruleIds.length) return;
       rules.push({
         id: ruleIds[idIdx++],
-        priority: 1,
+        priority: 2, // see the comment on the main-file redirect rule above
         action: { type: 'redirect', redirect: { extensionPath: '/bundle-noop.js' } },
         condition: {
           regexFilter: '^https?://[^/]+/.*' + brandId + '.*/' + device + '/files/' + prefix + '[.-][^/?]+\\.m?js([?].*)?$',
@@ -1633,6 +1642,38 @@ function buildBundleRedirectRules(indexerData, layerIndexerData, brandId, target
         }
       });
     });
+
+    // Both mechanisms above only neutralize entrypoint prefixes that show up
+    // SOMEWHERE in indexer.json (target or layer siblings). Confirmed live
+    // 2026-09 (Betsson desktop): indexer.json's "js" array for this brand
+    // lists only the single "main-HASH.js" entry in EVERY environment, yet
+    // the real page also modulepreloads a dozen additional
+    // "chunk-HASH.js"/"shell.HASH.js" files that appear in NO environment's
+    // indexer.json at all - those requests fire in the same instant as the
+    // initial HTML parse (before any override-driven script runs), are
+    // completely invisible to the two prefix lists above, and previously
+    // kept silently loading from whatever native environment the page
+    // actually served (observed: 13 of 46 script requests staying on
+    // /dist/prod/ while main + the rest of the redirected build correctly
+    // moved to /dist/test/ - a mixed-version build with no error, exactly
+    // the "broken build" scenario the two mechanisms above exist to avoid).
+    // Since indexer.json never lists these files, there is no known-good
+    // target URL to redirect them to; noop them instead of leaking the
+    // stale native copy. Scoped to `/dist/<non-target-env>/` so this can
+    // never match (or block) a request that's already correctly pointed at
+    // the target environment's own path.
+    if (idIdx < ruleIds.length && sourceEnvsForRedirect.length) {
+      rules.push({
+        id: ruleIds[idIdx++],
+        priority: 1, // lowest - any explicit rule above must win a tie
+        action: { type: 'redirect', redirect: { extensionPath: '/bundle-noop.js' } },
+        condition: {
+          regexFilter: '^https?://[^/]+/.*dist/(' + sourceEnvsForRedirect.join('|') + ')/.*' + brandId + '.*/' + device + '/files/[^/?]+\\.m?js([?].*)?$',
+          resourceTypes: ['script'],
+          tabIds: [tabId]
+        }
+      });
+    }
   });
 
   // The selected bundle can request its ClientConfig from the environment
@@ -1644,9 +1685,8 @@ function buildBundleRedirectRules(indexerData, layerIndexerData, brandId, target
   // any dependency on whether the page runtime captured fetch before the
   // MAIN-world adapter was installed.
   var regexCapture = String.fromCharCode(92);
-  var sourceConfigEnvs = allowCrossOriginConfig
-    ? Object.keys(BUNDLE_ENV_LAYERS).filter(function (environment) { return environment !== targetEnv; })
-    : bundleEnvironmentsInLayer(targetEnv).filter(function (environment) { return environment !== targetEnv; });
+  var sourceConfigEnvs = sourceEnvsForRedirect; // same set computed above,
+  // reused here for the config redirect rules below.
   var brandKey = null;
   Object.keys(BUNDLE_BRAND_GUIDS || {}).some(function (key) {
     if (BUNDLE_BRAND_GUIDS[key] !== brandId) return false;
@@ -1790,8 +1830,9 @@ function startBundleOverrideRule(tabId, targetEnv, brandId, currentEnv, pageOrig
     var layerIndexerData = layerResults.map(function (result) { return result.data; }).filter(function (data) { return !!data; });
     return new Promise(function (resolve, reject) {
       // Reserve room for both target redirects and same-layer source-only
-      // entrypoint neutralizers.
-      nextUniqueSessionRuleIds(BUNDLE_RULE_ID_START, SR_SPOOF_RULE_ID_START, 21, function (ruleIds) {
+      // entrypoint neutralizers, plus one generic unlisted-chunk catch-all
+      // noop rule per device (desktop, mobile) - see buildBundleRedirectRules.
+      nextUniqueSessionRuleIds(BUNDLE_RULE_ID_START, SR_SPOOF_RULE_ID_START, 23, function (ruleIds) {
         var crossLayer = !!currentEnv && BUNDLE_ENV_LAYERS[currentEnv] !== BUNDLE_ENV_LAYERS[targetEnv];
         var built = buildBundleRedirectRules(indexerData, layerIndexerData, brandId, targetEnv, tabId, ruleIds, crossLayer, currentEnv, pageOrigin);
         if (built.skippedNoBrand) { reject(new Error('Brand not found in ' + targetEnv + ' indexer.json')); return; }

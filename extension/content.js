@@ -3026,6 +3026,26 @@
     // Host label against the live per-tab detection engine so that
     // divergence is explained here instead of only showing up as a
     // confusing "runtime=PROD" deep in a Mismatch row's detail text.
+    //
+    // Crucially, "Backend" reuses the exact same (possibly wrong) Host
+    // value in hybrid mode (see backendEnv below) - hybrid mode never
+    // touches runtime API/backend requests at all, only the bundle's own
+    // .js/config.json files, so "Backend" is not something this
+    // extension enforces or verifies; it is only ever an assumption
+    // label equal to Host. If the page's real, currently-serving content
+    // is actually a different environment within the same layer (e.g.
+    // this browser genuinely got PROD content on an "alpha" URL, as
+    // verified live above), applying a "hybrid ALPHA-bundle+TEST-target"
+    // override on it does NOT retroactively make the page's true native
+    // content become ALPHA first - it only ever redirects the .js/config
+    // requests to TEST going forward. The functional result is a real
+    // "(whatever the page actually natively is)+TEST" combination, not
+    // literally "ALPHA+TEST", even though the Host/Backend labels (based
+    // on the URL, not reality) say ALPHA. lastDetectedRuntimeEnv below
+    // (kept in sync from the live per-tab detection engine, the same
+    // source computeDetectionRows itself uses) is what makes that gap
+    // visible instead of silently trusting the URL-based label.
+    var lastDetectedRuntimeEnv = null;
     var hostRealityNote = el('div', { class: 'lgt-hint', style: 'color:#b45309;display:none' }, ['']);
     var targetEnvBadge = el('div', { class: 'lgt-hint' }, ['']);
     function refreshTargetEnv(resetToPageEnvironment) {
@@ -3047,7 +3067,17 @@
           (crossLayer ? ' (experimental Cross-Layer Lab)' : (targetEnvSel.value === curEnvSel.value ? ' (pinned to this page environment)' : ' (same-layer override)')))
         : 'Unknown layer for this environment.';
       var backendEnv = modeSel.value === 'full-runtime' ? targetEnvSel.value : curEnvSel.value;
-      runtimeTruth.textContent = 'Host: ' + curEnvSel.value.toUpperCase() + '  |  Bundle: ' + (targetEnvSel.value || '?').toUpperCase() + '  |  Backend: ' + (backendEnv || '?').toUpperCase();
+      // Both Host and Backend are the SAME URL-derived assumption (see the
+      // comment above hostRealityNote/lastDetectedRuntimeEnv) - append the
+      // live-detected real environment inline, right in this primary
+      // diagnostic line, whenever it disagrees, instead of only in a
+      // note underneath that is easy to miss.
+      var realitySuffix = (lastDetectedRuntimeEnv && lastDetectedRuntimeEnv !== curEnvSel.value)
+        ? (' [really ' + lastDetectedRuntimeEnv.toUpperCase() + ' right now]')
+        : '';
+      runtimeTruth.textContent = 'Host: ' + curEnvSel.value.toUpperCase() + realitySuffix +
+        '  |  Bundle: ' + (targetEnvSel.value || '?').toUpperCase() +
+        '  |  Backend: ' + (backendEnv || '?').toUpperCase() + realitySuffix;
       deviceSel.parentElement && (deviceSel.parentElement.style.display = crossLayer ? '' : 'none');
       return targetEnvSel.value || null;
     }
@@ -3111,12 +3141,18 @@
         var diverging = res.rows.filter(function (row) {
           return row.runtimeEnvironment && row.runtimeEnvironment !== hostEnv;
         });
+        var newDetected = diverging.length ? diverging[0].runtimeEnvironment : null;
+        if (newDetected !== lastDetectedRuntimeEnv) {
+          lastDetectedRuntimeEnv = newDetected;
+          refreshTargetEnv(false); // updates the Host/Backend line's inline "[really X]" suffix
+        }
         if (diverging.length) {
           var seen = {};
           var envs = diverging.map(function (row) { return row.runtimeEnvironment.toUpperCase(); }).filter(function (e) { return seen[e] ? false : (seen[e] = true); });
-          hostRealityNote.textContent = '\u26A0 Host is labeled ' + hostEnv.toUpperCase() + ' from the URL only - the page\u2019s own runtime marker actually reports ' +
-            envs.join('/') + ' on this browser/network right now (e.g. no true ' + hostEnv.toUpperCase() + ' edge access from here). ' +
-            'This is independent of any Bundle Override applied below - Apply still redirects the network side to your chosen target correctly.';
+          hostRealityNote.textContent = '\u26A0 Host/Backend above are labeled ' + hostEnv.toUpperCase() + ' from the URL only - the page\u2019s own runtime marker actually reports ' +
+            envs.join('/') + ' on this browser/network right now (e.g. no true ' + hostEnv.toUpperCase() + ' edge access from here). Hybrid mode never touches backend/API requests, only the ' +
+            'bundle\u2019s .js/config.json files, so applying an override now produces a REAL "' + envs.join('/') + ' native content + your chosen target bundle" combination, ' +
+            'not literally "' + hostEnv.toUpperCase() + ' + target" - the network-level redirect itself is unaffected and still correctly targets what you pick below.';
           hostRealityNote.style.display = '';
         } else {
           hostRealityNote.style.display = 'none';

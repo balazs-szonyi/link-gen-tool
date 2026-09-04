@@ -615,6 +615,20 @@ selected bundle environment only during the tool script's synchronous startup
 calculation, then immediately restores the page's real startup context. This
 prevents PROD-host/TEST-bundle runs from being mislabeled as ALPHA.
 
+Bundle Override's redirect rules are built from `indexer.json`'s listed
+files for the target environment; a brand's real page can additionally
+`modulepreload` extra, dynamically-hashed async `chunk-*.js`/`shell.*.js`
+files that no environment's `indexer.json` enumerates at all (confirmed
+live on Betsson desktop). Since 1.22.15, any such unlisted file that's
+still pointed at a non-target environment is redirected to the extension's
+no-op stub instead of silently continuing to execute from whichever native
+environment originally served it — this closes a real gap where applying
+an override (same-layer or hybrid) directly on a page whose native content
+had already fallen back to a different environment than assumed could
+leave a handful of stale, non-target-env chunk files loaded alongside the
+correctly-redirected build. See `BRAND_LAYER_MATRIX.md`'s "missing step 0"
+section for the full live investigation and evidence.
+
 For the reverse BDE-bundle to BLE-backend direction, the tab-scoped adapter
 maps BDE's additional read-only `static-context` GET to BLE's supported
 `user-context` GET. The original context headers and identifiers are retained;
