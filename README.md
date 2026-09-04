@@ -224,15 +224,15 @@ brand page you're already logged into — no CLI, no headless automation.
   agreeing layer**, e.g.:
   - `Firestorm · MFE + Fabric: v8.3.0.4928-b1d00c18 / QA (desktop) — Confirmed`
 
-  with a detail line explaining why (`Hybrid runtime: MFE + Fabric
-  markers all present in this frame with matching brand+version+
-  environment — shown as one row instead of 2 duplicates.`). A brand
-  that only runs one layer (e.g. a plain Fabric/OBGA "B2B" integration
-  with no MFE widget at all) correctly still shows a single row for that
-  one layer — the absence of a second row is not a bug, it means the
-  page genuinely doesn't expose a second layer's runtime marker. MFE and
-  Fabric rows that disagree on version, environment, or device are
-  **not** merged and remain separate rows, exactly as before.
+  The merged row shows no extra detail text beyond the badge itself —
+  same as any other Confirmed row — since a matching hybrid runtime
+  needs no explanation to the user. A brand that only runs one layer
+  (e.g. a plain Fabric/OBGA "B2B" integration with no MFE widget at all)
+  correctly still shows a single row for that one layer — the absence of
+  a second row is not a bug, it means the page genuinely doesn't expose a
+  second layer's runtime marker. MFE and Fabric rows that disagree on
+  version, environment, or device are **not** merged and remain separate
+  rows, exactly as before.
 
   A generic host with no brand in its own hostname (e.g.
   `d-cf.qa.sbplayground1.net`) is resolved purely from whichever

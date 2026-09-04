@@ -187,9 +187,9 @@ async function main() {
     );
     texts = await waitForRows((t) => t.length === 1 && /Confirmed/.test(t[0]), 10000);
     assert.match(texts[0], /Firestorm.*MFE \+ Fabric.*v8\.3\.0\.4928-b1d00c18.*QA.*Confirmed/s);
-    const hybridDetail = await panel.locator('.lgt-build-detail').first().innerText();
-    assert.match(hybridDetail, /Hybrid runtime: MFE \+ Fabric markers all present.*matching brand\+version\+environment.*shown as one row instead of 2 duplicates/i);
-    console.log('PASS: MFE and the legacy Fabric/OBGA shell both Confirmed in the same frame with matching brand+version+environment are merged into a single hybrid row instead of two duplicate-looking rows, and the display label reads "Fabric" (not "iframe" - they are the same shell, not two separate layers).');
+    const hybridDetailCount = await panel.locator('.lgt-build-detail').count();
+    assert.strictEqual(hybridDetailCount, 0);
+    console.log('PASS: MFE and the legacy Fabric/OBGA shell both Confirmed in the same frame with matching brand+version+environment are merged into a single hybrid row (label reads "Fabric", not "iframe" - they are the same shell, not two separate layers), with no extra detail text since a merged Confirmed row needs no explanation beyond any other Confirmed row.');
 
     // Scenario 7: Partially verified - a runtime marker exists but there
     // is no network confirmation for this layer at all yet. The row must

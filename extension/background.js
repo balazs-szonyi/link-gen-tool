@@ -2423,14 +2423,6 @@ function normalizeEnv(value) { return String(value == null ? '' : value).trim().
 // already scoped to the ONE brandId the indexer/config request itself
 // named (see resolveSandboxBundleInfo's own single-brand restriction).
 function computeDetectionRows(tabId) {
-  // Display label only (see content.js's LAYER_LABELS for the full
-  // rationale) - internal layer key stays 'iframe' everywhere else, but
-  // the user-facing name is "Fabric": the legacy shell/wrapper runtime
-  // that exposes obgClientEnvironmentConfig, per the dev team's own
-  // terminology - not a literal DOM <iframe> check, and not a second
-  // layer that coexists alongside "Fabric" (confirmed: there is no such
-  // thing as "Fabric + iframe" as two separate layers).
-  var LAYER_LABEL_FOR_DETAIL = { mfe: 'MFE', iframe: 'Fabric', nodejs: 'NodeJS' };
   var runtimeByFrame = runtimeMarkersByTab[tabId] || {};
   var networkByFrame = networkByTab[tabId] || {};
   var docByFrame = frameDocByTab[tabId] || {};
@@ -2552,13 +2544,12 @@ function computeDetectionRows(tabId) {
         }
       });
       if (group.length === 1) { mergedFrameRows.push(row); return; }
-      var layerLabels = group.map(function (r) { return LAYER_LABEL_FOR_DETAIL[r.layer]; });
       mergedFrameRows.push({
         tabId: row.tabId, frameId: row.frameId, layer: null,
         layers: group.map(function (r) { return r.layer; }),
         status: 'confirmed', brand: row.brand, brandId: row.brandId,
         device: row.device, version: row.version, environment: row.environment,
-        detail: 'Hybrid runtime: ' + layerLabels.join(' + ') + ' markers all present in this frame with matching brand+version+environment - shown as one row instead of ' + group.length + ' duplicates.'
+        detail: null
       });
     });
 
