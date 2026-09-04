@@ -113,10 +113,21 @@
         lastSignature = signature;
         post(markers);
       }
-      return; // found at least once - stop the fast poll, a real bundle
-      // reload (hashed filenames) always re-runs this whole script fresh
-      // anyway, so there is no need to keep polling this same frame.
     }
+    // Keep polling for the FULL budget even after a first successful read
+    // - runtime contexts hydrate progressively within the same page load
+    // (e.g. appContext.environment/brandId can populate a tick or two
+    // after the object first appears with only a version, or a second
+    // layer - e.g. the legacy OBGA/Fabric marker in an MFE+Fabric hybrid
+    // page - can become available only after the MFE one already has).
+    // Stopping as soon as ANYTHING was found used to freeze the very
+    // first (sometimes incomplete) snapshot forever for the rest of the
+    // page's life, which is why a row could stay "Partially verified"
+    // indefinitely on some brands even though the real runtime object
+    // eventually had everything - confirmed by inspecting the live
+    // window.sbMfeStartupContext/obgClientEnvironmentConfig on a real
+    // brand page, which had complete brandId+version+environment on both
+    // markers all along.
     if (attempts < MAX_POLL_ATTEMPTS) setTimeout(tick, POLL_INTERVAL_MS);
   }
 

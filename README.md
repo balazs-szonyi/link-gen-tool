@@ -159,7 +159,14 @@ brand page you're already logged into — no CLI, no headless automation.
     `window.obgClientEnvironmentConfig.startupContext` for the
     iframe/OBGA layer, `window.nodeContext` for the NodeJS layer. Each
     marker supplies that layer's brandId/brandName, version, and (where
-    available) environment.
+    available) environment. Runtime contexts hydrate **progressively**
+    within a single page load (e.g. a marker can appear first with only
+    its version, gaining brandId/environment — or an entirely second
+    layer's marker — a tick or two later), so the reader keeps polling
+    for its full ~20s budget rather than freezing on the first snapshot
+    it happens to see; a `Partially verified` row should self-resolve on
+    its own once the runtime finishes hydrating, without needing a page
+    reload.
   - **Independent network confirmation** per layer/frame: the MFE
     layer's own dist-bundle request, the iframe/OBGA layer's config
     request (URL brand/facade/version-family plus the `x-sb-app-version`
