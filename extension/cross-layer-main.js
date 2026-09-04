@@ -1,9 +1,118 @@
 /* Link Gen Tool Cross-Layer runtime - MAIN world, document_start. */
 (function () {
   'use strict';
-  // Bet Void Mock: always installed on every document before the app can
-  // capture fetch/XMLHttpRequest. It passively records a lightweight summary
-  // of every real coupon-history
+
+  // Bonus Mock is installed on every document before the app can capture
+  // fetch/XMLHttpRequest. It remains a no-op until this tab+origin has an
+  // enabled sessionStorage config written by the content-script UI.
+  (function installBonusMockRuntime() {
+    var bonusMock = window.LgtBonusMock;
+    if (!bonusMock || window.__lgtBonusMockRuntimeInstalled) return;
+    window.__lgtBonusMockRuntimeInstalled = true;
+
+    function readConfig() {
+      var raw;
+      try { raw = sessionStorage.getItem(bonusMock.CONFIG_KEY); } catch (e) { return null; }
+      if (!raw) return null;
+      try {
+        var config = JSON.parse(raw);
+        return config && config.enabled && bonusMock.hasResponseShape(config.payload) ? config : null;
+      } catch (e) { return null; }
+    }
+
+    function recordMatch(url, config, replacement, responseFormat) {
+      try {
+        var previousRaw = sessionStorage.getItem(bonusMock.LAST_MATCH_KEY);
+        var previous = previousRaw ? JSON.parse(previousRaw) : null;
+        var widgetBonuses = replacement && replacement.data && Array.isArray(replacement.data.bonuses) ? replacement.data.bonuses : [];
+        var featureCounts = {};
+        widgetBonuses.forEach(function (bonus) { featureCounts[bonus.type] = (featureCounts[bonus.type] || 0) + 1; });
+        var marketQueries = replacement && replacement.skeleton && replacement.skeleton.marketDetailsQueries;
+        sessionStorage.setItem(bonusMock.LAST_MATCH_KEY, JSON.stringify({
+          url: String(url),
+          count: (previous && previous.count || 0) + 1,
+          bonusCount: config.bonusCount,
+          responseFormat: responseFormat,
+          replacedBonusCount: widgetBonuses.length || config.bonusCount,
+          featureCounts: featureCounts,
+          marketCount: Array.isArray(marketQueries) && marketQueries[0] ? marketQueries[0].split(',').length : 0,
+          matchedAt: Date.now()
+        }));
+      } catch (e) { /* status telemetry must never affect the response */ }
+    }
+
+    function responseWithMock(response, config, url) {
+      var contentType = response.headers.get('content-type') || '';
+      if (!/json/i.test(contentType)) return Promise.resolve(response);
+      return response.clone().json().then(function (original) {
+        var replacement;
+        var responseFormat;
+        if (bonusMock.hasResponseShape(original)) { replacement = config.payload; responseFormat = 'bss'; }
+        else if (bonusMock.hasWidgetResponseShape(original)) { replacement = bonusMock.toWidgetPayload(config.payload, original); responseFormat = 'widget'; }
+        else return response;
+        var headers = new Headers(response.headers);
+        headers.delete('content-length');
+        headers.delete('content-encoding');
+        headers.set('content-type', 'application/json');
+        recordMatch(url, config, replacement, responseFormat);
+        return new Response(JSON.stringify(replacement), {
+          status: response.status,
+          statusText: response.statusText,
+          headers: headers
+        });
+      }).catch(function () { return response; });
+    }
+
+    var nativeBonusFetch = window.fetch;
+    window.fetch = function (input, init) {
+      var url = typeof input === 'string' || input instanceof URL ? String(input) : input.url;
+      var method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
+      var config = readConfig();
+      return nativeBonusFetch.apply(this, arguments).then(function (response) {
+        if (!config || method !== 'GET' || !bonusMock.matchesEndpoint(url)) return response;
+        return responseWithMock(response, config, url);
+      });
+    };
+
+    var NativeBonusXHR = window.XMLHttpRequest;
+    function BonusMockXHR() {
+      var xhr = new NativeBonusXHR();
+      var requestUrl = '';
+      var requestMethod = 'GET';
+      var nativeOpen = xhr.open;
+      xhr.open = function (method, url) {
+        requestMethod = String(method || 'GET').toUpperCase();
+        requestUrl = String(url);
+        return nativeOpen.apply(xhr, arguments);
+      };
+      xhr.addEventListener('readystatechange', function () {
+        if (xhr.readyState !== 4 || requestMethod !== 'GET' || !bonusMock.matchesEndpoint(requestUrl)) return;
+        var config = readConfig();
+        if (!config) return;
+        try {
+          var contentType = xhr.getResponseHeader('content-type') || '';
+          if (!/json/i.test(contentType) || (xhr.responseType && xhr.responseType !== 'json' && xhr.responseType !== 'text')) return;
+          var original = xhr.responseType === 'json' ? xhr.response : JSON.parse(xhr.responseText);
+          var replacement;
+          var responseFormat;
+          if (bonusMock.hasResponseShape(original)) { replacement = config.payload; responseFormat = 'bss'; }
+          else if (bonusMock.hasWidgetResponseShape(original)) { replacement = bonusMock.toWidgetPayload(config.payload, original); responseFormat = 'widget'; }
+          else return;
+          var serialized = JSON.stringify(replacement);
+          Object.defineProperty(xhr, 'responseText', { configurable: true, get: function () { return serialized; } });
+          Object.defineProperty(xhr, 'response', { configurable: true, get: function () { return xhr.responseType === 'json' ? replacement : serialized; } });
+          recordMatch(requestUrl, config, replacement, responseFormat);
+        } catch (e) { /* retain the native response */ }
+      });
+      return xhr;
+    }
+    BonusMockXHR.prototype = NativeBonusXHR.prototype;
+    Object.keys(NativeBonusXHR).forEach(function (key) { try { BonusMockXHR[key] = NativeBonusXHR[key]; } catch (e) {} });
+    window.XMLHttpRequest = BonusMockXHR;
+  })();
+
+  // Bet Void Mock is installed the same way as Bonus Mock above: always
+  // passively records a lightweight summary of every real coupon-history
   // response it sees (so the content-script UI can list real, current
   // coupons+legs without the user pasting anything), and only rewrites a
   // response when a tab+origin-scoped sessionStorage config is both

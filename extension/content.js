@@ -34,6 +34,7 @@
   // panel title always matches it.
   var VERSION = 'v' + chrome.runtime.getManifest().version;
   var BUNDLE_DIAGNOSTICS_KEY = '__lgtBundleDiagnosticsV1';
+  var PAGE_STATE_VERIFY_RESUME_KEY = '__lgtVerifyPageStateAfterReloadV1';
 
   // Brand shells may normalize the address bar after bootstrap and remove
   // diagnostics parameters even though they were present on the actual
@@ -311,8 +312,11 @@
   // ---------------------------------------------------------------------
 
   var SR_SPOOF_SETTING_KEY = 'lgt-sr-spoof-enabled';
+  var ODDIN_FIX_SETTING_KEY = 'lgt-oddin-fix-enabled';
   var srSpoofSettingCache = true; // optimistic default until storage read resolves
+  var oddinFixSettingCache = true;
   var srSpoofChkRef = null; // set by buildModeA once the checkbox exists, so the
+  var oddinFixChkRef = null;
   // async storage read below (which may resolve AFTER buildPanel() already ran
   // synchronously at content-script load) can still correct the checkbox's
   // displayed state instead of leaving it stuck on the optimistic default.
@@ -320,6 +324,12 @@
     if (res && typeof res[SR_SPOOF_SETTING_KEY] === 'boolean') {
       srSpoofSettingCache = res[SR_SPOOF_SETTING_KEY];
       if (srSpoofChkRef) srSpoofChkRef.checked = srSpoofSettingCache;
+    }
+  });
+  chrome.storage.local.get([ODDIN_FIX_SETTING_KEY], function (res) {
+    if (res && typeof res[ODDIN_FIX_SETTING_KEY] === 'boolean') {
+      oddinFixSettingCache = res[ODDIN_FIX_SETTING_KEY];
+      if (oddinFixChkRef) oddinFixChkRef.checked = oddinFixSettingCache;
     }
   });
 
@@ -1742,8 +1752,8 @@
       'border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.4);z-index:2147483647;padding:14px;}',
       '#lgt-panel h3{margin:0 0 8px;font-size:15px;display:flex;justify-content:space-between;align-items:center}',
       '#lgt-panel .lgt-header-actions{display:flex;align-items:center;gap:10px;flex:none}',
-      '#lgt-panel .lgt-tabs{display:flex;gap:6px;margin-bottom:10px}',
-      '#lgt-panel .lgt-tab{flex:1;text-align:center;padding:6px;border-radius:6px;background:var(--lgt-tab-bg);cursor:pointer}',
+      '#lgt-panel .lgt-tabs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}',
+      '#lgt-panel .lgt-tab{flex:1 0 27%;text-align:center;padding:6px;border-radius:6px;background:var(--lgt-tab-bg);cursor:pointer}',
       '#lgt-panel .lgt-tab.active{background:var(--lgt-accent);color:var(--lgt-accent-fg);font-weight:600}',
       '#lgt-panel label{display:block;margin:8px 0 3px;color:var(--lgt-muted);font-size:11px;text-transform:uppercase}',
       '#lgt-panel select,#lgt-panel input{width:100%;box-sizing:border-box;padding:6px;border-radius:5px;border:1px solid var(--lgt-input-border);background:var(--lgt-input-bg);color:var(--lgt-fg)}',
@@ -1848,26 +1858,29 @@
     var tabC = el('div', { class: 'lgt-tab' }, ['Credentials']);
     var tabD = el('div', { class: 'lgt-tab' }, ['Bundle']);
     var tabE = el('div', { class: 'lgt-tab' }, ['BLE Data']);
+    var tabF = el('div', { class: 'lgt-tab' }, ['Bonus Mock']);
     var tabG = el('div', { class: 'lgt-tab' }, ['Bet Void']);
-    tabs.appendChild(tabA); tabs.appendChild(tabB); tabs.appendChild(tabC); tabs.appendChild(tabD); tabs.appendChild(tabE); tabs.appendChild(tabG);
+    tabs.appendChild(tabA); tabs.appendChild(tabB); tabs.appendChild(tabC); tabs.appendChild(tabD); tabs.appendChild(tabE); tabs.appendChild(tabF); tabs.appendChild(tabG);
 
     var bodyA = buildModeA();
     var bodyB = buildModeB();
     var bodyC = buildModeC();
     var bodyD = buildModeD();
     var bodyE = buildModeE();
+    var bodyF = buildModeF();
     var bodyG = buildModeG();
     bodyB.style.display = 'none';
     bodyC.style.display = 'none';
     bodyD.style.display = 'none';
     bodyE.style.display = 'none';
+    bodyF.style.display = 'none';
     bodyG.style.display = 'none';
     bodyB.__lgtGoToCredentials = function () { tabC.click(); };
     bodyA.__lgtGoToCredentials = function () { tabC.click(); };
 
     var pairs = [
       ['gen', tabA, bodyA], ['livelogin', tabB, bodyB], ['creds', tabC, bodyC],
-      ['bundle', tabD, bodyD], ['ble', tabE, bodyE], ['betvoid', tabG, bodyG]
+      ['bundle', tabD, bodyD], ['ble', tabE, bodyE], ['bonusmock', tabF, bodyF], ['betvoid', tabG, bodyG]
     ];
     pairs.forEach(function (pair) {
       pair[1].addEventListener('click', function () {
@@ -1879,9 +1892,9 @@
         // by this tool's own Stop/Reload buttons, or the tester's own F5)
         // reopens the same tab instead of silently falling back to
         // Generate - previously every reload lost the tester's place,
-        // which was especially confusing right after using Bet Void's
-        // Apply, since the next thing to do is reload and re-check that
-        // same tab.
+        // which was especially confusing right after using Bet Void/Bonus
+        // Mock's Apply, since the next thing to do is reload and re-check
+        // that same tab.
         try { sessionStorage.setItem(ACTIVE_TAB_KEY, pair[0]); } catch (e) {}
       });
     });
@@ -1897,6 +1910,7 @@
     content.appendChild(bodyC);
     content.appendChild(bodyD);
     content.appendChild(bodyE);
+    content.appendChild(bodyF);
     content.appendChild(bodyG);
 
     panel.appendChild(title);
@@ -2601,6 +2615,17 @@
     });
     var srSpoofWrap = el('label', { class: 'lgt-checkbox-row' }, [srSpoofChk, ' Sportradar Statistics fix (auto-applies on any matching page load/reload, no click needed; spoofs Origin/Referer + CORS so licensed widgets render)']);
     wrap.appendChild(srSpoofWrap);
+    var oddinFixChk = el('input', { type: 'checkbox' });
+    oddinFixChk.checked = oddinFixSettingCache;
+    oddinFixChkRef = oddinFixChk;
+    oddinFixChk.addEventListener('change', function () {
+      oddinFixSettingCache = oddinFixChk.checked;
+      var obj = {};
+      obj[ODDIN_FIX_SETTING_KEY] = oddinFixSettingCache;
+      chrome.storage.local.set(obj);
+    });
+    var oddinFixWrap = el('label', { class: 'lgt-checkbox-row' }, [oddinFixChk, ' Oddin Statistics fix (Firestorm TEST/QA only; retries ALPHA→PROD Referer once; no CORS changes)']);
+    wrap.appendChild(oddinFixWrap);
     wrap.appendChild(genBtnRow);
     wrap.appendChild(credResolveArea);
     wrap.appendChild(log);
@@ -3015,41 +3040,89 @@
     // heuristic needed. A short client-side timeout remains only as a
     // defensive fallback in case the service worker itself is ever slow
     // to respond.
-    verifyBtn.addEventListener('click', function () {
+    function renderEnablePageStatePrompt() {
+      verifyResult.style.display = '';
+      verifyResult.innerHTML = '';
+      verifyResult.appendChild(el('div', {}, [
+        'Page-state verification needs exposeObgState=true. Add it and reload this tab?'
+      ]));
+      var enableBtn = el('button', { class: 'secondary' }, ['Enable & reload']);
+      var cancelBtn = el('button', { class: 'secondary' }, ['Cancel']);
+      enableBtn.addEventListener('click', function () {
+        var nextUrl = new URL(location.href);
+        nextUrl.searchParams.set('exposeObgState', 'true');
+        try { sessionStorage.setItem(PAGE_STATE_VERIFY_RESUME_KEY, nextUrl.toString()); } catch (e) {}
+        enableBtn.disabled = true;
+        cancelBtn.disabled = true;
+        verifyResult.firstChild.textContent = 'Enabling page state and reloading\u2026';
+        location.href = nextUrl.toString();
+      });
+      cancelBtn.addEventListener('click', function () {
+        verifyResult.style.display = 'none';
+        verifyResult.innerHTML = '';
+      });
+      verifyResult.appendChild(el('div', { class: 'lgt-row', style: 'margin-top:6px' }, [enableBtn, cancelBtn]));
+    }
+
+    function runPageStateVerification() {
       if (location.search.indexOf('exposeObgState=true') === -1) {
-        verifyResult.style.display = '';
-        verifyResult.textContent = 'Add exposeObgState=true to the URL to enable this check (window.xSbState is not exposed otherwise).';
+        renderEnablePageStatePrompt();
         return;
       }
       verifyResult.style.display = '';
       verifyResult.textContent = 'Checking window.xSbState\u2026';
+      verifyBtn.disabled = true;
       var settled = false;
-      var timeoutId = setTimeout(function () {
+      var timeoutId = null;
+      function finish(text) {
         if (settled) return;
         settled = true;
-        verifyResult.textContent = 'No response from the background script after 5s \u2013 this should not normally happen; try reloading the extension.';
+        if (timeoutId) clearTimeout(timeoutId);
+        verifyBtn.disabled = false;
+        verifyResult.textContent = text;
+      }
+      timeoutId = setTimeout(function () {
+        finish('Could not verify page state: the extension did not respond within 5 seconds. Reload the Link Gen Tool on chrome://extensions, then try again.');
       }, 5000);
 
-      chrome.runtime.sendMessage({ type: 'lgt-verify-xsbstate' }, function (d) {
-        void chrome.runtime.lastError;
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeoutId);
-        if (!d || !d.ok) { verifyResult.textContent = 'xSbState check failed: ' + ((d && d.error) || 'no response'); return; }
-        if (!d.hasState) { verifyResult.textContent = 'window.xSbState is not present on this page.'; return; }
-        if (d.version || d.environment) {
-          var lines = ['xSbState: version=' + (d.version || '?') + ' environment=' + (d.environment || '?')];
-          if (lastObserved && lastObserved.version && d.version && String(d.version).indexOf(lastObserved.version) === -1 && lastObserved.version.indexOf(String(d.version)) === -1) {
-            lines.push('\u26a0 does not match the network-detected version (' + lastObserved.version + ')');
-          } else if (lastObserved && lastObserved.version && d.version) {
-            lines.push('\u2713 matches the network-detected version');
+      try {
+        chrome.runtime.sendMessage({ type: 'lgt-verify-xsbstate' }, function (d) {
+          var runtimeError = chrome.runtime.lastError;
+          if (runtimeError) {
+            finish('Could not verify page state: ' + runtimeError.message + '. Reload the Link Gen Tool on chrome://extensions, then try again.');
+            return;
           }
-          verifyResult.textContent = lines.join('\n');
-        } else {
-          verifyResult.textContent = 'xSbState present but no known version/environment field found. Top-level keys: ' + d.keys.join(', ');
-        }
-      });
-    });
+          if (!d || !d.ok) { finish('Page-state check failed: ' + ((d && d.error) || 'no response')); return; }
+          if (!d.hasState) {
+            finish('exposeObgState=true is enabled, but window.xSbState is not available yet. Wait for Sportsbook to finish loading, then try again.');
+            return;
+          }
+          if (d.version || d.environment) {
+            var lines = ['\u2713 Page state is exposed: version=' + (d.version || '?') + ' environment=' + (d.environment || '?')];
+            if (lastObserved && lastObserved.version && d.version && String(d.version).indexOf(lastObserved.version) === -1 && lastObserved.version.indexOf(String(d.version)) === -1) {
+              lines.push('\u26a0 It does not match the network-detected version (' + lastObserved.version + ').');
+            } else if (lastObserved && lastObserved.version && d.version) {
+              lines.push('\u2713 It matches the network-detected version.');
+            }
+            finish(lines.join('\n'));
+          } else {
+            finish('\u2713 Page state is exposed and responding. This app state does not publish version/environment fields, so the network-detected SB build shown above remains authoritative.');
+          }
+        });
+      } catch (err) {
+        finish('Could not verify page state: ' + friendlyErrorMessage(err) + '. Reload the Link Gen Tool on chrome://extensions, then try again.');
+      }
+    }
+
+    verifyBtn.addEventListener('click', runPageStateVerification);
+
+    try {
+      var resumeUrl = sessionStorage.getItem(PAGE_STATE_VERIFY_RESUME_KEY);
+      if (resumeUrl) {
+        sessionStorage.removeItem(PAGE_STATE_VERIFY_RESUME_KEY);
+        if (location.search.indexOf('exposeObgState=true') !== -1) setTimeout(runPageStateVerification, 0);
+      }
+    } catch (e) {}
 
     return wrap;
   }
@@ -3394,6 +3467,130 @@
       if (saved && saved.loggedIn) loggedInChk.checked = true;
     });
 
+    return wrap;
+  }
+
+  // ---------------------------------------------------------------------
+  // "Bonus Mock" tab - local, tab+origin-scoped response substitution.
+  // The processed full payload is stored in sessionStorage, where the
+  // document_start MAIN-world wrapper can read it without debugger/CDP.
+  // ---------------------------------------------------------------------
+
+  function buildModeF() {
+    var wrap = el('div', { 'data-lgt-bonus-mock': 'panel' });
+    var selectedPayload = null;
+    var selectedName = '';
+    var selectedSummary = null;
+    var featureOrder = ['PriceBoost', 'AccaBoost', 'BetInsurance', 'ProfitBoost', 'FreeBet', 'RiskFreeBet'];
+
+    var fileInput = el('input', { id: 'lgt-bonus-file', type: 'file', accept: '.json,application/json,text/json' });
+    var fixtureInfo = el('div', { class: 'lgt-result', 'data-lgt-bonus-info': 'true' }, ['No fixture selected.']);
+    var futureChk = el('input', { id: 'lgt-bonus-future', type: 'checkbox' });
+    futureChk.checked = true;
+    var futureLabel = el('label', { class: 'lgt-checkbox-row' }, [futureChk, 'Move all expiryDate values to 2050 (recommended)']);
+    var status = el('div', { class: 'lgt-log', 'data-lgt-bonus-status': 'inactive' }, ['Not active on this tab/origin.']);
+
+    function featureSummary(summary) {
+      return featureOrder.map(function (feature) { return feature + ' ' + (summary.featureCounts[feature] || 0); }).join(', ');
+    }
+
+    function setStatus(state, text) {
+      status.setAttribute('data-lgt-bonus-status', state);
+      status.textContent = text;
+    }
+
+    function readStoredConfig() {
+      try {
+        var raw = sessionStorage.getItem(LgtBonusMock.CONFIG_KEY);
+        if (!raw) return null;
+        var config = JSON.parse(raw);
+        return config && config.enabled && LgtBonusMock.hasResponseShape(config.payload) ? config : null;
+      } catch (e) { return null; }
+    }
+
+    function refreshStatus() {
+      var config = readStoredConfig();
+      if (!config) return;
+      var suffix = '';
+      try {
+        var matchRaw = sessionStorage.getItem(LgtBonusMock.LAST_MATCH_KEY);
+        var match = matchRaw && JSON.parse(matchRaw);
+        suffix = match && match.count ? ' Last matched response: #' + match.count + '.' : ' Waiting for a matching bonus response.';
+      } catch (e) { suffix = ' Waiting for a matching bonus response.'; }
+      setStatus('active', 'Active - ' + config.fileName + ', ' + config.bonusCount + ' bonuses (' + featureSummary(config) + ').' + suffix);
+    }
+
+    fileInput.addEventListener('change', function () {
+      var file = fileInput.files && fileInput.files[0];
+      selectedPayload = null;
+      selectedName = '';
+      selectedSummary = null;
+      if (!file) { fixtureInfo.textContent = 'No fixture selected.'; return; }
+      var reader = new FileReader();
+      reader.onload = function () {
+        try {
+          var parsed = JSON.parse(String(reader.result || ''));
+          var summary = LgtBonusMock.validateMock(parsed);
+          selectedPayload = parsed;
+          selectedName = file.name;
+          selectedSummary = summary;
+          fixtureInfo.textContent = file.name + ' - ' + summary.bonusCount + ' bonuses\n' + featureSummary(summary);
+          if (!readStoredConfig()) setStatus('ready', 'Ready to apply.');
+        } catch (err) {
+          fixtureInfo.textContent = file.name + ' - rejected';
+          setStatus('error', 'Invalid fixture: ' + friendlyErrorMessage(err));
+        }
+      };
+      reader.onerror = function () { setStatus('error', 'Could not read ' + file.name + '.'); };
+      reader.readAsText(file);
+    });
+
+    var applyBtn = el('button', { id: 'lgt-bonus-apply', onclick: function () {
+      if (!selectedPayload || !selectedSummary) {
+        setStatus('error', 'Select a valid JSON fixture before Apply.');
+        return;
+      }
+      try {
+        var expiryPolicy = futureChk.checked ? 'future' : 'preserve';
+        var prepared = LgtBonusMock.prepareMock(selectedPayload, expiryPolicy);
+        var config = {
+          enabled: true,
+          payload: prepared,
+          fileName: selectedName,
+          bonusCount: selectedSummary.bonusCount,
+          featureCounts: selectedSummary.featureCounts,
+          expiryPolicy: expiryPolicy,
+          appliedAt: Date.now()
+        };
+        sessionStorage.setItem(LgtBonusMock.CONFIG_KEY, JSON.stringify(config));
+        sessionStorage.removeItem(LgtBonusMock.LAST_MATCH_KEY);
+        setStatus('active', 'Active - ' + selectedName + ', ' + selectedSummary.bonusCount + ' bonuses (' + featureSummary(selectedSummary) + '). Waiting for a matching bonus response.');
+      } catch (err) {
+        setStatus('error', 'Apply failed: ' + friendlyErrorMessage(err));
+      }
+    } }, ['Apply']);
+
+    var stopBtn = el('button', { id: 'lgt-bonus-stop', class: 'secondary', onclick: function () {
+      try {
+        sessionStorage.removeItem(LgtBonusMock.CONFIG_KEY);
+        sessionStorage.removeItem(LgtBonusMock.LAST_MATCH_KEY);
+      } catch (e) { /* reload still removes the active read path */ }
+      setStatus('inactive', 'Stopped. Reloading to restore native fetch/XHR responses...');
+      location.reload();
+    } }, ['Stop']);
+
+    wrap.appendChild(el('label', {}, ['Bonus fixture JSON']));
+    wrap.appendChild(fileInput);
+    wrap.appendChild(fixtureInfo);
+    wrap.appendChild(futureLabel);
+    wrap.appendChild(el('div', { class: 'lgt-row' }, [applyBtn, stopBtn]));
+    wrap.appendChild(status);
+    wrap.appendChild(el('div', { class: 'lgt-hint', style: 'margin-top:8px' }, [
+      'Replaces BSS bonus responses and converts the fixture to the sportsbook BonusWidget format used by globalbonuses/bonuses GET fetch/XHR endpoints on this tab and origin. Other endpoints and non-matching JSON schemas pass through unchanged. This is a local browser override; it never creates or assigns a real bonus.'
+    ]));
+
+    pollWhileExtensionValid(refreshStatus, 1000);
+    refreshStatus();
     return wrap;
   }
 

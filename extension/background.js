@@ -23,6 +23,9 @@
  */
 'use strict';
 
+importScripts('oddin-fix.js');
+var oddinFix = LgtOddinFix.install(chrome);
+
 var CAPTURE_PREFIX = 'lgtCapture:';
 
 function captureKeyFor(origin) {
@@ -1953,6 +1956,14 @@ var BUNDLE_OBSERVE_RE = /\/dist\/([a-z]+)\/xp\/widgets\/sportsbook\/([0-9a-fA-F-
 // `/assets/`.
 var BUNDLE_OBSERVE_SANDBOX_RE = /\/assets\/(main|chunk|polyfills|runtime|vendor)-[A-Za-z0-9]+\.m?js(\?|$)/i;
 
+// A standalone sandbox's startup config request supplies the metadata its
+// `/assets/*.js` URLs omit: brand id, facade id, and version family. The
+// facade id maps to one device entry in the same environment's indexer,
+// which lets us resolve the exact deployed SB version without guessing
+// from shared chunk hashes. This also works on the generic
+// d-cf.<env>.sbplayground1.net host, where the hostname carries no brand.
+var BUNDLE_OBSERVE_SANDBOX_CONFIG_RE = /\/dist\/([a-z]+)\/config\/([0-9a-fA-F-]{36})\/([0-9a-fA-F-]{36})\/([^/]+)\/config\.json(?:\?|$)/i;
+
 // Same label-scan approach as detectBrandAndEnvFromPlaygroundHost() above,
 // but not restricted to known playground suffixes - the bundle CDN host
 // can be a brand-owned domain (e.g. d-cf.btsplayground.net) that isn't in
@@ -1964,6 +1975,12 @@ function envLabelFromHostname(hostname) {
     if (hostname.indexOf('.' + e + '.') !== -1 || hostname.indexOf(e + '.') === 0) env = e;
   });
   return env;
+}
+
+function genericSandboxInfoFromHostname(hostname) {
+  hostname = (hostname || '').toLowerCase();
+  if (!/^(?:d|m)-cf(?:\.(?:test|qa|alpha))?\.sbplayground1\.net$/.test(hostname)) return null;
+  return { brand: null, environment: envLabelFromHostname(hostname) };
 }
 
 // Resolve the environment of a dist-shape bundle from the artifact version
@@ -2026,6 +2043,34 @@ var BUNDLE_BRAND_GUIDS = {
   spino: 'da121f62-42fa-461f-b57f-bc1cba78af19',
   triobet: '36e4a5ae-37b5-435a-85fc-e7e1f537e131'
 };
+
+function bundleBrandKeyFromGuid(brandId) {
+  var keys = Object.keys(BUNDLE_BRAND_GUIDS);
+  for (var i = 0; i < keys.length; i += 1) {
+    if (BUNDLE_BRAND_GUIDS[keys[i]] === brandId) return keys[i];
+  }
+  return null;
+}
+
+function resolveSandboxConfigInfo(env, brandId, facadeId, versionHint) {
+  return fetchBundleIndexer(env).then(function (indexerData) {
+    var entry = indexerData && indexerData[brandId];
+    if (!entry) return null;
+    var matches = ['desktop', 'mobile'].map(function (device) {
+      var deviceEntry = entry[device];
+      if (!deviceEntry || !deviceEntry.resourcesByFacade || !deviceEntry.resourcesByFacade[facadeId]) return null;
+      var version = String(deviceEntry.version || '');
+      if (versionHint && version.indexOf(String(versionHint)) !== 0) return null;
+      return { device: device, version: version };
+    }).filter(function (match) { return !!match; });
+    if (!matches.length) return null;
+    var versions = matches.map(function (match) { return match.version; }).filter(function (version, index, all) {
+      return version && all.indexOf(version) === index;
+    });
+    if (versions.length !== 1) return null;
+    return { version: versions[0], device: matches.length === 1 ? matches[0].device : null, brandId: brandId };
+  });
+}
 
 // Reverse-lookup (2026-08-10, revised after live testing): sandbox-shape
 // URLs carry no version/device, but the SAME environment's indexer.json
@@ -2160,6 +2205,42 @@ if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
       return;
     }
 
+    var configMatch = BUNDLE_OBSERVE_SANDBOX_CONFIG_RE.exec(details.url);
+    if (configMatch) {
+      var configTabId = details.tabId;
+      var configUrl = details.url;
+      var configBrandId = configMatch[2].toLowerCase();
+      var configFacadeId = configMatch[3].toLowerCase();
+      var configVersionHint = configMatch[4];
+      var configHostEnv = envLabelFromHostname(hostname);
+      bundleObservedByTab[configTabId] = {
+        shape: 'sandbox',
+        buildFolder: configMatch[1].toLowerCase(),
+        brandId: configBrandId,
+        brand: bundleBrandKeyFromGuid(configBrandId),
+        version: configVersionHint,
+        device: null,
+        filePrefix: 'config',
+        host: hostname,
+        hostEnv: configHostEnv,
+        url: configUrl,
+        ts: Date.now()
+      };
+      resolveSandboxConfigInfo(configHostEnv, configBrandId, configFacadeId, configVersionHint).then(function (found) {
+        if (!found) return;
+        var current = bundleObservedByTab[configTabId];
+        if (!current || current.shape !== 'sandbox') return;
+        current.version = found.version;
+        current.device = found.device;
+        current.brandId = found.brandId;
+        current.matchedBrandId = found.brandId;
+        current.brand = current.brand || bundleBrandKeyFromGuid(found.brandId);
+      }).catch(function (err) {
+        console.warn('[link-gen-tool] sandbox config/indexer version lookup failed:', err);
+      });
+      return;
+    }
+
     // Sandbox shape (see BUNDLE_OBSERVE_SANDBOX_RE comment above): no
     // version/brandId/device in the URL at all, so the ONLY way to avoid
     // false positives on completely unrelated websites (which may very
@@ -2169,7 +2250,7 @@ if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
     // isn't, silently ignore the request - it's not one of ours.
     var sm = BUNDLE_OBSERVE_SANDBOX_RE.exec(details.url);
     if (!sm) return;
-    var known = detectBrandAndEnvFromPlaygroundHost(hostname);
+    var known = detectBrandAndEnvFromPlaygroundHost(hostname) || genericSandboxInfoFromHostname(hostname);
     if (!known) return;
     // Carry forward a previously-resolved version/device across this same
     // tab's later requests (e.g. a page load fires a dozen chunk
@@ -2184,11 +2265,13 @@ if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
     var priorSandbox = bundleObservedByTab[details.tabId];
     var carriedVersion = (priorSandbox && priorSandbox.shape === 'sandbox') ? priorSandbox.version : null;
     var carriedDevice = (priorSandbox && priorSandbox.shape === 'sandbox') ? priorSandbox.device : null;
+    var carriedBrand = (priorSandbox && priorSandbox.shape === 'sandbox') ? priorSandbox.brand : null;
+    var carriedBrandId = (priorSandbox && priorSandbox.shape === 'sandbox') ? (priorSandbox.matchedBrandId || priorSandbox.brandId) : null;
     bundleObservedByTab[details.tabId] = {
       shape: 'sandbox',
       buildFolder: null,
-      brandId: null,
-      brand: known.brand,
+      brandId: carriedBrandId,
+      brand: known.brand || carriedBrand,
       // version/device are simply not encoded in this URL shape at all -
       // carried forward from a prior request's successful enrichment (see
       // above), or null until/unless one resolves.
@@ -2213,7 +2296,9 @@ if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
     // resolves.
     var enrichTabId = details.tabId;
     var enrichFilename = details.url.split('/').pop().split('?')[0].split('#')[0];
-    resolveSandboxBundleInfo(known.environment, enrichFilename, known.brand).then(function (found) {
+    var lookupBrand = known.brand || carriedBrand;
+    if (!lookupBrand) return;
+    resolveSandboxBundleInfo(known.environment, enrichFilename, lookupBrand).then(function (found) {
       if (!found) return;
       // Guard: only patch if this tab is still showing a sandbox-shape
       // observation at all - a real navigation (onBeforeNavigate below)
@@ -2234,7 +2319,7 @@ if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
     }).catch(function (err) {
       console.warn('[link-gen-tool] sandbox bundle indexer reverse-lookup failed:', err);
     });
-  }, { urls: ['*://*/dist/*/xp/widgets/sportsbook/*', '*://*/assets/*'], types: ['script'] });
+  }, { urls: ['*://*/dist/*/xp/widgets/sportsbook/*', '*://*/dist/*/config/*', '*://*/assets/*'], types: ['script', 'xmlhttprequest'] });
 }
 
 // Clear a tab's observation on a genuine top-level navigation to a

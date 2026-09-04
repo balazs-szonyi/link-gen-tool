@@ -12,6 +12,15 @@ brand page you're already logged into — no CLI, no headless automation.
   state / BLE-source, get a desktop + mobile link. Client-side port of
   `generate-link.ps1` — calls `internal.{env}.sbplayground1.net/api/*`
   directly (those endpoints have open CORS).
+- **Oddin Statistics fix** (Chrome extension only, enabled by default):
+  allows the known Firestorm Oddin statistics iframe to render on the generic
+  `d-cf`/`m-cf` TEST and QA `sbplayground1.net` hosts. It changes only the
+  `Referer` of the exact `disir.oddin.gg` sub-frame carrying Firestorm's known
+  Oddin `brandToken`, first to the allowed ALPHA playground and, on a 403,
+  once to PROD before reloading only that iframe. PROD and ALPHA playgrounds,
+  other Oddin tokens/providers, API/CDN traffic, `Origin`, and CORS responses
+  are untouched. This is a separate, Firestorm-only fix from the broader
+  Sportradar Statistics Origin/Referer + CORS option next to it.
 - **Live Login** tab: passively sniffs `sb/fe-api/*` requests for
   `x-sb-static-context-id` / `x-sb-user-context-id` headers while you browse
   a brand site normally, already logged in via your own real session. This
@@ -112,6 +121,23 @@ brand page you're already logged into — no CLI, no headless automation.
   infrastructure) → BLE Data tab: Apply (for fresh, live events instead
   of QA's own stale/synthetic BDE catalogue) → reload once, both
   overrides are active together.
+- **Bonus Mock** tab (Chrome extension only): selects and validates a full
+  sportsbook bonus-response JSON fixture, shows its filename, bonus count,
+  and feature distribution, then locally replaces matching GET fetch/XHR
+  BSS responses or converts the fixture to the `BonusWidget` response used by
+  `/widgets/globalbonuses/v1` and `/widgets/bonuses/v1`. **Apply** is
+  scoped by `sessionStorage` to the current tab and origin; unrelated
+  endpoints and non-matching schemas pass through untouched. By default it
+  moves only bonus `expiryDate` values to
+  `2050-12-31T23:59:59.000Z`; clear the checkbox to preserve fixture dates.
+  **Stop** deletes the mock and reloads the page so native responses resume.
+  The implementation uses the existing `document_start` MAIN-world
+  fetch/XHR layer and does not hold a `chrome.debugger` connection, so it
+  adds no persistent Chrome debugging infobar. The companion Codex
+  `sportsbook-bonus-override` skill carries the canonical MAPP-11252
+  40-bonus fixture plus a Playwright adapter for automated tests. This is
+  response substitution only: it never creates, activates, assigns, or
+  wagers with a real bonus.
 - **Detected build strip** (Chrome extension only, always visible above
   the tabs): shows the environment/version actually serving the current
   tab's sportsbook bundle, read from the real network request the
@@ -454,6 +480,18 @@ submitted automatically.
 
 Run the offline contract/safety suite with `npm test`; the parameterized live
 normal-Chrome smoke remains in `cross-layer-lab/test-live-cross-layer.cjs`.
+Run the Oddin extension smoke with a current Firestorm TEST/QA direct-event
+link whose Statistics tab is available:
+
+```powershell
+node test-oddin-extension-smoke.cjs "https://d-cf.test.sbplayground1.net/<stc>/<ctx>/<event-route>?bleSource=1"
+```
+
+If that live event ended before the run, `LGT_ODDIN_PROBE_URL` may point to a
+previously verified full `disir.oddin.gg` match URL. The smoke then attaches
+that real provider URL as a sub-frame from the Firestorm page; no provider
+response is mocked. It asserts the exact DNR scope, first-request ALPHA
+`Referer`, HTTP 200, rendered iframe content, and absence of a fallback loop.
 
 The extension structurally avoids the capture-timing-race and navigation-
 lifecycle issues above (`chrome.webRequest` + `chrome.storage.local`), and
