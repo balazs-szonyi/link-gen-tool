@@ -1,7 +1,7 @@
 {
   "name": "link-gen-tool",
   "private": true,
-  "version": "1.22.6",
+  "version": "1.22.7",
   "scripts": {
     "test": "node --test cross-layer-lab/test/*.test.cjs",
     "test:bonus": "node --test ../.agents/skills/sportsbook-bonus-override/scripts/bonus-override.test.cjs && node test-sportsbook-bonus-override.cjs && node test-bonus-mock-extension.cjs",
