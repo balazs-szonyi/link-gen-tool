@@ -191,3 +191,32 @@ tests run automatically; live brand tests are manual).
   and the override-explained Confirmed case must show the identical
   network-confirmed headline value).
 
+  **Bundle tab "Host" label vs. runtime marker — a separate, related
+  confusion (2026-09-05)**: after the fix above, a user pointed at a
+  fresh screenshot (Host=ALPHA via URL, Target=TEST, Mode=hybrid) where
+  the detection header correctly showed the network-confirmed headline
+  (`v8.3.0.4951-m392227a / TEST`), yet still asked why "PROD" appears at
+  all — because the Bundle tab's own `Host: ALPHA` label (in
+  `content.js`'s `buildModeD`) is set purely from a URL/hostname
+  heuristic (`detectBrandAndEnv`, matching the domain name), and never
+  cross-checks itself against the page's own runtime marker. Re-verified
+  fresh, live, with no override active at all: a plain, unauthenticated
+  visit to `alpha.betsson.com/en/sportsbook/live/tennis` from this
+  machine/network (no VPN/whitelist) is genuinely, currently served its
+  PROD fallback build — all 34 bundle/config requests came from
+  `www.alpha.betsson.com/dist/prod/...`, and `sbMfeStartupContext`
+  reported `8.1.16.4855-rb8bfa90 / prod`. So `Host: ALPHA` (a nominal,
+  URL-only label) and the detection header's `runtime=PROD` (the page's
+  own, real, live self-report) are BOTH correct simultaneously — they
+  just answer different questions ("what domain is this?" vs. "what did
+  the page actually load and report?"), and nothing before this fix made
+  that distinction visible in the UI itself.
+
+  **Fix**: `computeDetectionRows` now also exposes the raw, unmerged
+  `runtimeEnvironment`/`networkEnvironment` per row (previously only the
+  merged headline `environment` was sent to the UI). The Bundle tab's
+  existing 3s status poll now also fetches `lgt-detection-rows` and, if
+  any row's `runtimeEnvironment` differs from the `Host` label, shows an
+  inline warning explaining the two are different signals and that this
+  is independent of any Bundle Override applied below (network-level
+  redirection still works correctly regardless).

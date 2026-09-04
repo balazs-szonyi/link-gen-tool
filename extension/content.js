@@ -3012,6 +3012,21 @@
     ]);
     var deviceSel = el('select', {}, [el('option', { value: 'desktop' }, ['desktop']), el('option', { value: 'mobile' }, ['mobile'])]);
     var runtimeTruth = el('div', { class: 'lgt-result' }, ['Host: ?  |  Bundle: ?  |  Backend: ?']);
+    // "Host: <env>" above is a URL/hostname heuristic only (see
+    // detectBrandAndEnv - it never re-verifies against the page's own
+    // runtime marker). On a real brand domain reachable without true
+    // environment-specific network access (e.g. no VPN/whitelist for a
+    // true ALPHA edge), the domain can nominally be e.g. "alpha.betsson.com"
+    // while the page's OWN runtime marker (and every network request it
+    // makes) genuinely, correctly reports a fallback build (verified live,
+    // 2026-09-04: a fresh, un-overridden alpha.betsson.com visit from a
+    // non-VPN'd session served 34/34 requests from /dist/prod/... with a
+    // runtime marker reading "prod", not "alpha" - a real platform
+    // characteristic, not a detection bug). This note cross-checks the
+    // Host label against the live per-tab detection engine so that
+    // divergence is explained here instead of only showing up as a
+    // confusing "runtime=PROD" deep in a Mismatch row's detail text.
+    var hostRealityNote = el('div', { class: 'lgt-hint', style: 'color:#b45309;display:none' }, ['']);
     var targetEnvBadge = el('div', { class: 'lgt-hint' }, ['']);
     function refreshTargetEnv(resetToPageEnvironment) {
       var crossLayer = modeSel.value !== 'standard';
@@ -3088,6 +3103,24 @@
         status.textContent = res.active
           ? ('Active' + (res.targetEnv ? ' -> ' + res.targetEnv.toUpperCase() : '') + ' (' + res.ruleCount + ' rule(s)) - ' + res.matched.length + ' request(s) redirected so far.')
           : 'Not active on this tab.';
+      });
+      chrome.runtime.sendMessage({ type: 'lgt-detection-rows' }, function (res) {
+        void chrome.runtime.lastError;
+        if (!res || !res.ok || !res.rows) return;
+        var hostEnv = curEnvSel.value;
+        var diverging = res.rows.filter(function (row) {
+          return row.runtimeEnvironment && row.runtimeEnvironment !== hostEnv;
+        });
+        if (diverging.length) {
+          var seen = {};
+          var envs = diverging.map(function (row) { return row.runtimeEnvironment.toUpperCase(); }).filter(function (e) { return seen[e] ? false : (seen[e] = true); });
+          hostRealityNote.textContent = '\u26A0 Host is labeled ' + hostEnv.toUpperCase() + ' from the URL only - the page\u2019s own runtime marker actually reports ' +
+            envs.join('/') + ' on this browser/network right now (e.g. no true ' + hostEnv.toUpperCase() + ' edge access from here). ' +
+            'This is independent of any Bundle Override applied below - Apply still redirects the network side to your chosen target correctly.';
+          hostRealityNote.style.display = '';
+        } else {
+          hostRealityNote.style.display = 'none';
+        }
       });
     }
     pollWhileExtensionValid(refreshStatus, 3000);
@@ -3172,6 +3205,7 @@
     wrap.appendChild(el('label', {}, ['Mode']));
     wrap.appendChild(modeSel);
     wrap.appendChild(runtimeTruth);
+    wrap.appendChild(hostRealityNote);
     wrap.appendChild(el('label', { style: 'display:none' }, ['Device', deviceSel]));
     wrap.appendChild(sandboxWarning);
     wrap.appendChild(el('div', { style: 'display:flex;gap:6px;margin-top:6px' }, [applyBtn, disableBtn]));

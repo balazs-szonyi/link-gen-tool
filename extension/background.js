@@ -2597,6 +2597,18 @@ function computeDetectionRows(tabId) {
         device: net && net.device || null,
         version: (networkVersion || runtimeVersion) || null,
         environment: (networkEnv || runtimeEnv) || null,
+        // Raw, unmerged sides - kept alongside the headline fields above
+        // (not shown in the header itself) so other UI (the Bundle tab's
+        // "Host: <env>" label, which is a URL/hostname heuristic, not a
+        // measurement) can cross-check itself against what the page's
+        // OWN runtime marker actually reports, e.g. to warn the user
+        // when a domain nominally named e.g. "alpha.betsson.com" is, on
+        // this specific browser/network, actually silently served its
+        // PROD fallback build (a real, verified platform characteristic
+        // for sessions without true ALPHA edge access - independent of
+        // any Bundle Override).
+        runtimeEnvironment: runtimeEnv || null,
+        networkEnvironment: networkEnv || null,
         detail: conflicts.join('; ') || partialReasons.join('; ') || bundleOverrideNote || null
       });
     });
