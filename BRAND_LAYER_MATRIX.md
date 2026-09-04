@@ -109,6 +109,35 @@ tests run automatically; live brand tests are manual).
     `xSbIsMfeOverrideApplied` compatibility flag (which our Bundle
     Override already sets for that tool's benefit — `computeDetectionRows`
     simply did not consult that same fact about itself until this fix).
+
+    **Concrete live proof (2026-09-04, this exact question was asked and
+    verified, not assumed)**: applied a REAL Bundle Override (`lgt-bundle-start`,
+    `targetEnv=alpha`, same-layer) on a live `alpha.betsson.com` tab and
+    compared network + runtime marker before/after, via a one-off
+    Playwright script (not part of the automated suite — this was a
+    targeted diagnostic, not a regression guard):
+    - **Before** (native, no override): 34 bundle/config requests, ALL to
+      `/dist/prod/...` (`www.alpha.betsson.com`), runtime marker
+      `8.1.16.4855-rb8bfa90 / prod`. Confirms this non-VPN browser session
+      genuinely cannot reach real ALPHA content on its own — the site
+      itself silently falls back to PROD for both runtime and network.
+    - **After** applying Bundle Override (`targetEnv=alpha`): 34 of 47
+      bundle/config requests were redirected to genuine ALPHA dist paths
+      (indexer-listed ALPHA CDN host / `/dist/alpha/...`), **all 34
+      succeeded with HTTP 200 — zero failures**, and the page rendered
+      461KB of real DOM content (not blank/broken). This is unambiguous
+      proof the override genuinely works at the network level — it is
+      not silently failing or only partially redirecting.
+    - **Yet the runtime marker read back byte-for-byte identical to the
+      pre-override value**: `8.1.16.4855-rb8bfa90 / prod`, unchanged in
+      every field. Since the JS files really did get swapped for genuine,
+      successfully-loaded ALPHA bundle code, and the marker still didn't
+      move, this rules out "our override is subtly broken" as an
+      explanation — the pinned value structurally cannot come from
+      whichever bundle happens to execute; it is set from a page-level
+      startup blob that predates and is independent of which script tag's
+      redirect target actually resolves.
+
   - **The page reached ALPHA/TEST content some other way** (a real
     VPN'd/whitelisted session, or an upstream environment-level routing
     decision — i.e. *not* via this extension's own Bundle Override):
