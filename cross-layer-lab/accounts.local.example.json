@@ -1,0 +1,6 @@
+{
+  "accounts": [
+    { "brand": "betsson", "accountId": "TEST-CUSTOMER-ID" },
+    { "brand": "nordicbet", "accountId": "TEST-CUSTOMER-ID" }
+  ]
+}

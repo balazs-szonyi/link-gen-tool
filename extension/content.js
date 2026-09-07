@@ -1804,16 +1804,20 @@
       '#lgt-panel .lgt-cred-badge{display:block;font-size:10px;margin-top:4px;padding:1px 6px;border-radius:8px;white-space:nowrap;width:fit-content}',
       '#lgt-panel .lgt-cred-badge.has{background:#1e7e34;color:#fff}',
       '#lgt-panel .lgt-cred-badge.none{background:#a02020;color:#fff}',
-      // "Detected build" strip - always visible above the tabs, on every
-      // tab (unlike the Bundle tab's own controls). See buildDetectedBuildStrip().
+      // Automatic per brand/layer detection header - always visible above
+      // the tabs, on every tab (unlike the Bundle tab's own controls).
+      // See buildDetectionHeader().
       '#lgt-panel .lgt-build-strip{background:var(--lgt-tab-bg);border-radius:6px;padding:6px 8px;margin-bottom:10px;font-size:11px}',
-      '#lgt-panel .lgt-build-row{display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap}',
+      '#lgt-panel .lgt-build-row{display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;padding:2px 0}',
+      '#lgt-panel .lgt-build-row + .lgt-build-row{border-top:1px solid var(--lgt-border,rgba(255,255,255,.08));margin-top:2px;padding-top:4px}',
       '#lgt-panel .lgt-build-badge{padding:1px 6px;border-radius:8px;font-weight:700;white-space:nowrap;font-size:10px}',
-      '#lgt-panel .lgt-build-badge.match{background:#1e7e34;color:#fff}',
-      '#lgt-panel .lgt-build-badge.mismatch{background:#c77900;color:#fff}',
+      '#lgt-panel .lgt-build-badge.confirmed{background:#1e7e34;color:#fff}',
+      '#lgt-panel .lgt-build-badge.partial{background:#c77900;color:#fff}',
+      '#lgt-panel .lgt-build-badge.mismatch{background:#a02020;color:#fff}',
+      '#lgt-panel .lgt-build-badge.unclassified{background:#555;color:#fff}',
       '#lgt-panel .lgt-build-strip button{width:auto;margin:0;padding:3px 8px;font-size:10px;flex:none}',
       '#lgt-panel .lgt-build-strip .lgt-build-actions{display:flex;gap:6px;flex:none}',
-      '#lgt-panel .lgt-build-verify{margin-top:4px;font-size:10px;color:var(--lgt-muted);white-space:pre-wrap}'
+      '#lgt-panel .lgt-build-detail{margin-top:2px;font-size:10px;color:var(--lgt-muted);white-space:pre-wrap;width:100%}'
     ].join('');
     document.head.appendChild(style);
 
@@ -1858,7 +1862,8 @@
     var tabD = el('div', { class: 'lgt-tab' }, ['Bundle']);
     var tabE = el('div', { class: 'lgt-tab' }, ['BLE Data']);
     var tabF = el('div', { class: 'lgt-tab' }, ['Bonus Mock']);
-    tabs.appendChild(tabA); tabs.appendChild(tabB); tabs.appendChild(tabC); tabs.appendChild(tabD); tabs.appendChild(tabE); tabs.appendChild(tabF);
+    var tabG = el('div', { class: 'lgt-tab' }, ['Bet Void']);
+    tabs.appendChild(tabA); tabs.appendChild(tabB); tabs.appendChild(tabC); tabs.appendChild(tabD); tabs.appendChild(tabE); tabs.appendChild(tabF); tabs.appendChild(tabG);
 
     var bodyA = buildModeA();
     var bodyB = buildModeB();
@@ -1866,17 +1871,19 @@
     var bodyD = buildModeD();
     var bodyE = buildModeE();
     var bodyF = buildModeF();
+    var bodyG = buildModeG();
     bodyB.style.display = 'none';
     bodyC.style.display = 'none';
     bodyD.style.display = 'none';
     bodyE.style.display = 'none';
     bodyF.style.display = 'none';
+    bodyG.style.display = 'none';
     bodyB.__lgtGoToCredentials = function () { tabC.click(); };
     bodyA.__lgtGoToCredentials = function () { tabC.click(); };
 
     var pairs = [
-      ['generate', tabA, bodyA], ['live-login', tabB, bodyB], ['credentials', tabC, bodyC],
-      ['bundle', tabD, bodyD], ['ble-data', tabE, bodyE], ['bonus-mock', tabF, bodyF]
+      ['gen', tabA, bodyA], ['livelogin', tabB, bodyB], ['creds', tabC, bodyC],
+      ['bundle', tabD, bodyD], ['ble', tabE, bodyE], ['bonusmock', tabF, bodyF], ['betvoid', tabG, bodyG]
     ];
     pairs.forEach(function (pair) {
       pair[1].addEventListener('click', function () {
@@ -1884,6 +1891,13 @@
           p[1].classList.toggle('active', p === pair);
           p[2].style.display = p === pair ? '' : 'none';
         });
+        // Remembers which tab was open so a page reload (whether triggered
+        // by this tool's own Stop/Reload buttons, or the tester's own F5)
+        // reopens the same tab instead of silently falling back to
+        // Generate - previously every reload lost the tester's place,
+        // which was especially confusing right after using Bet Void/Bonus
+        // Mock's Apply, since the next thing to do is reload and re-check
+        // that same tab.
         try { sessionStorage.setItem(ACTIVE_TAB_KEY, pair[0]); } catch (e) {}
       });
     });
@@ -1892,7 +1906,7 @@
     // bodies with a single CSS rule (see ".lgt-collapsed .lgt-content"
     // above) instead of having to touch each of them individually.
     var content = el('div', { class: 'lgt-content' });
-    content.appendChild(buildDetectedBuildStrip());
+    content.appendChild(buildDetectionHeader());
     content.appendChild(tabs);
     content.appendChild(bodyA);
     content.appendChild(bodyB);
@@ -1900,6 +1914,7 @@
     content.appendChild(bodyD);
     content.appendChild(bodyE);
     content.appendChild(bodyF);
+    content.appendChild(bodyG);
 
     panel.appendChild(title);
     panel.appendChild(content);
@@ -2902,167 +2917,73 @@
     });
   }
 
-  // "Detected build" strip - always visible above the tabs, regardless of
-  // which tab is active. Answers "what environment/version is THIS page's
-  // sportsbook bundle actually loaded from?" from the one source that
-  // cannot be wrong: the real network request the browser already made
-  // (see background.js's bundleObservedByTab / lgt-bundle-observed). This
-  // is deliberately independent of the Bundle tab above - it works
-  // whether or not an override was ever applied, and is meant to replace
-  // relying on the separate "Sportsbook Tool" bookmarklet's own "SB
-  // Version" field or manually checking the DevTools Network tab.
-  function buildDetectedBuildStrip() {
-    var wrap = el('div', { class: 'lgt-build-strip' });
-    var row = el('div', { class: 'lgt-build-row' });
-    var label = el('span', {}, ['Detecting sportsbook bundle\u2026']);
-    var badge = el('span', { class: 'lgt-build-badge', style: 'display:none' }, ['']);
-    var verifyBtn = el('button', { class: 'secondary', title: 'Double-check against window.xSbState (requires exposeObgState=true)' }, ['Verify with page state']);
-    var actions = el('div', { class: 'lgt-build-actions' }, [verifyBtn]);
-    row.appendChild(label);
-    row.appendChild(badge);
-    row.appendChild(actions);
-    var verifyResult = el('div', { class: 'lgt-build-verify', style: 'display:none' }, ['']);
-    wrap.appendChild(row);
-    wrap.appendChild(verifyResult);
+  // Automatic per brand/layer detection header - always visible above the
+  // tabs, regardless of which tab is active. Answers "what brand/layer is
+  // running on THIS page, and what version/environment is it actually
+  // loaded from?" purely from evidence background.js already collected
+  // (runtime layer markers relayed by layer-detect.js/layer-relay.js, plus
+  // the independent network observations - bundle/config requests, the
+  // x-sb-app-version header, and frame navigation hostnames). One row per
+  // detected brand+layer(+device) combination; MFE/iframe/NodeJS on the
+  // same page, or the same layer in two frames, always get their own row
+  // (see background.js's computeDetectionRows). There is no manual
+  // verification step any more - window.xSbState is never used as a
+  // version/environment source (only the runtime layer markers above and
+  // the independent network evidence are), so nothing needs a user to
+  // click a button to "confirm" it.
+  var STATUS_LABELS = { confirmed: 'Confirmed', partial: 'Partially verified', mismatch: 'Mismatch', unclassified: 'Unclassified' };
+  // Layer -> user-facing label. Internally we key everything on 'iframe'
+  // (network/runtime store keys, classification logic, tests) because
+  // that is the identifier the original spec used for whatever exposes
+  // `obgClientEnvironmentConfig` - but that marker is NOT a check for a
+  // literal DOM <iframe> element, only a JS global read. The actual dev
+  // team's own name for this legacy shell/wrapper runtime is "Fabric"
+  // (confirmed directly by a developer, and matching the third-party
+  // Sportsbook Tool extension's own "(Fabric + mFE)" label) - and per
+  // that same confirmation, "Fabric" and "iframe" are NOT two different
+  // things that can coexist as separate layers; they are the same shell,
+  // so the user-facing text says "Fabric" to avoid implying a second,
+  // independent embed that doesn't exist.
+  var LAYER_LABELS = { mfe: 'MFE', iframe: 'Fabric', nodejs: 'NodeJS' };
 
-    var lastObserved = null;
+  function buildDetectionHeader() {
+    var wrap = el('div', { class: 'lgt-build-strip' });
+    var emptyLabel = el('span', {}, ['Detecting sportsbook runtime layers\u2026']);
+    wrap.appendChild(emptyLabel);
+
+    function brandLabel(row) {
+      if (row.brand) return row.brand.charAt(0).toUpperCase() + row.brand.slice(1);
+      return row.brandId ? row.brandId : 'Unknown brand';
+    }
+
+    function render(rows) {
+      wrap.innerHTML = '';
+      if (!rows || !rows.length) {
+        wrap.appendChild(emptyLabel);
+        return;
+      }
+      rows.forEach(function (row) {
+        var buildText = (row.version ? 'v' + row.version : 'version unknown') + ' / ' + (row.environment ? row.environment.toUpperCase() : 'ENV unknown') + (row.device ? ' (' + row.device + ')' : '');
+        var layerLabel = row.layers && row.layers.length
+          ? row.layers.map(function (l) { return LAYER_LABELS[l]; }).join(' + ')
+          : (row.layer ? LAYER_LABELS[row.layer] : 'Unclassified SB build');
+        var titlePrefix = brandLabel(row) + ' \u00b7 ' + layerLabel;
+        var label = el('span', {}, [titlePrefix + ': ' + buildText]);
+        var badge = el('span', { class: 'lgt-build-badge ' + row.status }, [STATUS_LABELS[row.status] || row.status]);
+        var line = el('div', { class: 'lgt-build-row' }, [label, badge]);
+        wrap.appendChild(line);
+        if (row.detail) wrap.appendChild(el('div', { class: 'lgt-build-detail' }, [row.detail]));
+      });
+    }
 
     function refresh() {
-      chrome.runtime.sendMessage({ type: 'lgt-bundle-observed' }, function (res) {
+      chrome.runtime.sendMessage({ type: 'lgt-detection-rows' }, function (res) {
         void chrome.runtime.lastError;
         if (!res || !res.ok) return;
-        var o = res.observed;
-        lastObserved = o;
-        if (!o) {
-          label.textContent = 'No sportsbook bundle detected on this tab yet.';
-          badge.style.display = 'none';
-          return;
-        }
-        var pageEnv = (detectBrandAndEnv().environment || 'prod');
-        // Use hostEnv (which HOST actually served this file), not the
-        // internal /dist/<label>/ path segment - confirmed live
-        // 2026-08-10 that a brand's own TEST site can serve its bundle
-        // from a path literally labeled "qa" with no override applied
-        // (TEST/QA share one underlying BLE-layer build artifact
-        // folder), so the path label alone is not a trustworthy
-        // "which environment" answer. The request's own hostname is:
-        // on a native load it's the same host as the page itself
-        // (hostEnv === pageEnv), on an active override it's a
-        // different env's CDN host entirely.
-        var artifactEnvs = Array.isArray(o.artifactEnvs) ? o.artifactEnvs : [];
-        var effectiveEnv = o.shape === 'dist' ? o.artifactEnv : o.hostEnv;
-        var mismatch = effectiveEnv ? effectiveEnv !== pageEnv :
-          (o.shape === 'dist' && artifactEnvs.length ? artifactEnvs.indexOf(pageEnv) === -1 : false);
-        // Sandbox-shape links (the tool's own standalone "Generate" tab
-        // output) carry no version/device in the bundle URL at all - see
-        // BUNDLE_OBSERVE_SANDBOX_RE in background.js. Show what we DO
-        // know (env) rather than a misleading "vundefined (undefined)".
-        if (o.shape === 'sandbox') {
-          // 2026-08-10: the URL itself never carries version/device for
-          // this shape, but background.js may have asynchronously
-          // resolved the version (and, when unambiguous, the device) via
-          // an indexer.json reverse-lookup against the observed chunk
-          // filenames (the sandbox page's OWN main-*.js is a different
-          // build artifact than the widget's federated entry point, so
-          // it rarely matches - the shared chunk-*.js files are what
-          // actually resolve, confirmed live 2026-08-10). A brand's
-          // desktop/mobile versions are the same build in the
-          // overwhelming majority of cases even when the specific device
-          // can't be pinned down (a shared chunk matches both) - so show
-          // the version alone when device is unresolved, rather than
-          // discarding a real, useful answer. Only fall back to the
-          // honest "not encoded in URL" message when nothing resolved at
-          // all.
-          // Show the actual detected brand (e.g. "nordicbet") instead of
-          // the generic literal word "sandbox" - background.js already
-          // resolves this from the sandbox link's own hostname (see
-          // detectBrandAndEnvFromPlaygroundHost) and always includes it
-          // on the observation object for this shape; "sandbox" remains
-          // only as a defensive fallback in the unlikely case it's ever
-          // missing.
-          var sandboxLabel = o.brand || 'sandbox';
-          if (o.version) {
-            label.textContent = 'SB build: v' + o.version + (o.device ? ' (' + o.device + ')' : '') + ' [' + sandboxLabel + ', ' + o.hostEnv.toUpperCase() + ']' + (mismatch ? ' \u2013 overridden from ' + pageEnv.toUpperCase() : '');
-          } else {
-            label.textContent = 'SB build: ' + o.hostEnv.toUpperCase() + ' (' + sandboxLabel + ' sandbox link \u2013 version/device not encoded in URL)' + (mismatch ? ' \u2013 overridden from ' + pageEnv.toUpperCase() : '');
-          }
-        } else {
-          var environmentDetail;
-          if (o.artifactEnv) {
-            environmentDetail = o.artifactEnv.toUpperCase() + ' artifact via ' + o.hostEnv.toUpperCase() + ' host';
-          } else if (artifactEnvs.length > 1) {
-            environmentDetail = 'shared by ' + artifactEnvs.map(function (env) { return env.toUpperCase(); }).join('/') + ' via ' + o.hostEnv.toUpperCase() + ' host';
-          } else if (o.artifactResolutionPending) {
-            environmentDetail = 'resolving artifact environment; request host ' + o.hostEnv.toUpperCase();
-          } else {
-            environmentDetail = 'artifact environment unknown; request host ' + o.hostEnv.toUpperCase();
-          }
-          label.textContent = 'SB build: v' + o.version + ' (' + o.device + ') [' + environmentDetail + ']' + (mismatch ? ' \u2013 page is ' + pageEnv.toUpperCase() : '');
-        }
-        var badgeEnv = effectiveEnv || (artifactEnvs.length > 1 ? 'shared' : (o.shape === 'dist' ? 'unknown' : o.hostEnv));
-        badge.textContent = badgeEnv.toUpperCase();
-        badge.className = 'lgt-build-badge ' + (mismatch || badgeEnv === 'unknown' ? 'mismatch' : 'match');
-        badge.style.display = '';
-        badge.title = o.url;
+        render(res.rows);
       });
     }
     pollWhileExtensionValid(refresh, 3000);
-
-    // Secondary, on-demand confirmation via window.xSbState - only
-    // meaningful on a link carrying exposeObgState=true.
-    //
-    // REWRITTEN 2026-08-10: the previous implementation injected a plain
-    // <script> tag to read window.xSbState from the page's own (MAIN
-    // world) context, since a content script's isolated world cannot
-    // read the page's own JS variables directly - but that technique IS
-    // a DOM script element, so it's subject to the page's own script-src
-    // CSP. Confirmed live on a real sandbox link (strict CSP, no
-    // 'unsafe-inline') that this silently blocked the injected script
-    // every time, which is why the button always ended up showing the
-    // "No response after 5s" timeout message - NOT a rare edge case, but
-    // the normal outcome on any CSP-hardened page. Now delegates to
-    // background.js's chrome.scripting.executeScript({world:'MAIN'})
-    // (see its lgt-verify-xsbstate handler), which runs in the page's
-    // real JS context WITHOUT being subject to page CSP at all - no more
-    // <script> tag, postMessage roundtrip, or securitypolicyviolation
-    // heuristic needed. A short client-side timeout remains only as a
-    // defensive fallback in case the service worker itself is ever slow
-    // to respond.
-    verifyBtn.addEventListener('click', function () {
-      if (location.search.indexOf('exposeObgState=true') === -1) {
-        verifyResult.style.display = '';
-        verifyResult.textContent = 'Add exposeObgState=true to the URL to enable this check (window.xSbState is not exposed otherwise).';
-        return;
-      }
-      verifyResult.style.display = '';
-      verifyResult.textContent = 'Checking window.xSbState\u2026';
-      var settled = false;
-      var timeoutId = setTimeout(function () {
-        if (settled) return;
-        settled = true;
-        verifyResult.textContent = 'No response from the background script after 5s \u2013 this should not normally happen; try reloading the extension.';
-      }, 5000);
-
-      chrome.runtime.sendMessage({ type: 'lgt-verify-xsbstate' }, function (d) {
-        void chrome.runtime.lastError;
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeoutId);
-        if (!d || !d.ok) { verifyResult.textContent = 'xSbState check failed: ' + ((d && d.error) || 'no response'); return; }
-        if (!d.hasState) { verifyResult.textContent = 'window.xSbState is not present on this page.'; return; }
-        if (d.version || d.environment) {
-          var lines = ['xSbState: version=' + (d.version || '?') + ' environment=' + (d.environment || '?')];
-          if (lastObserved && lastObserved.version && d.version && String(d.version).indexOf(lastObserved.version) === -1 && lastObserved.version.indexOf(String(d.version)) === -1) {
-            lines.push('\u26a0 does not match the network-detected version (' + lastObserved.version + ')');
-          } else if (lastObserved && lastObserved.version && d.version) {
-            lines.push('\u2713 matches the network-detected version');
-          }
-          verifyResult.textContent = lines.join('\n');
-        } else {
-          verifyResult.textContent = 'xSbState present but no known version/environment field found. Top-level keys: ' + d.keys.join(', ');
-        }
-      });
-    });
 
     return wrap;
   }
@@ -3091,6 +3012,41 @@
     ]);
     var deviceSel = el('select', {}, [el('option', { value: 'desktop' }, ['desktop']), el('option', { value: 'mobile' }, ['mobile'])]);
     var runtimeTruth = el('div', { class: 'lgt-result' }, ['Host: ?  |  Bundle: ?  |  Backend: ?']);
+    // "Host: <env>" above is a URL/hostname heuristic only (see
+    // detectBrandAndEnv - it never re-verifies against the page's own
+    // runtime marker). On a real brand domain reachable without true
+    // environment-specific network access (e.g. no VPN/whitelist for a
+    // true ALPHA edge), the domain can nominally be e.g. "alpha.betsson.com"
+    // while the page's OWN runtime marker (and every network request it
+    // makes) genuinely, correctly reports a fallback build (verified live,
+    // 2026-09-04: a fresh, un-overridden alpha.betsson.com visit from a
+    // non-VPN'd session served 34/34 requests from /dist/prod/... with a
+    // runtime marker reading "prod", not "alpha" - a real platform
+    // characteristic, not a detection bug). This note cross-checks the
+    // Host label against the live per-tab detection engine so that
+    // divergence is explained here instead of only showing up as a
+    // confusing "runtime=PROD" deep in a Mismatch row's detail text.
+    //
+    // Crucially, "Backend" reuses the exact same (possibly wrong) Host
+    // value in hybrid mode (see backendEnv below) - hybrid mode never
+    // touches runtime API/backend requests at all, only the bundle's own
+    // .js/config.json files, so "Backend" is not something this
+    // extension enforces or verifies; it is only ever an assumption
+    // label equal to Host. If the page's real, currently-serving content
+    // is actually a different environment within the same layer (e.g.
+    // this browser genuinely got PROD content on an "alpha" URL, as
+    // verified live above), applying a "hybrid ALPHA-bundle+TEST-target"
+    // override on it does NOT retroactively make the page's true native
+    // content become ALPHA first - it only ever redirects the .js/config
+    // requests to TEST going forward. The functional result is a real
+    // "(whatever the page actually natively is)+TEST" combination, not
+    // literally "ALPHA+TEST", even though the Host/Backend labels (based
+    // on the URL, not reality) say ALPHA. lastDetectedRuntimeEnv below
+    // (kept in sync from the live per-tab detection engine, the same
+    // source computeDetectionRows itself uses) is what makes that gap
+    // visible instead of silently trusting the URL-based label.
+    var lastDetectedRuntimeEnv = null;
+    var hostRealityNote = el('div', { class: 'lgt-hint', style: 'color:#b45309;display:none' }, ['']);
     var targetEnvBadge = el('div', { class: 'lgt-hint' }, ['']);
     function refreshTargetEnv(resetToPageEnvironment) {
       var crossLayer = modeSel.value !== 'standard';
@@ -3111,7 +3067,17 @@
           (crossLayer ? ' (experimental Cross-Layer Lab)' : (targetEnvSel.value === curEnvSel.value ? ' (pinned to this page environment)' : ' (same-layer override)')))
         : 'Unknown layer for this environment.';
       var backendEnv = modeSel.value === 'full-runtime' ? targetEnvSel.value : curEnvSel.value;
-      runtimeTruth.textContent = 'Host: ' + curEnvSel.value.toUpperCase() + '  |  Bundle: ' + (targetEnvSel.value || '?').toUpperCase() + '  |  Backend: ' + (backendEnv || '?').toUpperCase();
+      // Both Host and Backend are the SAME URL-derived assumption (see the
+      // comment above hostRealityNote/lastDetectedRuntimeEnv) - append the
+      // live-detected real environment inline, right in this primary
+      // diagnostic line, whenever it disagrees, instead of only in a
+      // note underneath that is easy to miss.
+      var realitySuffix = (lastDetectedRuntimeEnv && lastDetectedRuntimeEnv !== curEnvSel.value)
+        ? (' [really ' + lastDetectedRuntimeEnv.toUpperCase() + ' right now]')
+        : '';
+      runtimeTruth.textContent = 'Host: ' + curEnvSel.value.toUpperCase() + realitySuffix +
+        '  |  Bundle: ' + (targetEnvSel.value || '?').toUpperCase() +
+        '  |  Backend: ' + (backendEnv || '?').toUpperCase() + realitySuffix;
       deviceSel.parentElement && (deviceSel.parentElement.style.display = crossLayer ? '' : 'none');
       return targetEnvSel.value || null;
     }
@@ -3142,17 +3108,55 @@
     var applyDisabledBySandboxGuard = !!detected.isSandboxHost;
     if (applyDisabledBySandboxGuard) sandboxWarning.style.display = '';
 
+    // refreshStatus() below polls every 3s and used to unconditionally
+    // force targetEnvSel back to whatever override is CURRENTLY active,
+    // even if the user had just picked a different, not-yet-applied value
+    // in the dropdown - the very next poll tick (well within a normal
+    // human's "pick a value, then look for the Apply button" pause) would
+    // silently snap it back, making the dropdown look like it "refused" to
+    // change (2026-09-04 bug report). Track whether the user has touched
+    // any of the controls that feed targetEnvSel since the last time it
+    // was known to match reality, and only let the poll resync it while
+    // that is NOT the case - a page reload after Apply (see startBundle
+    // above) rebuilds this whole tab from scratch anyway, so no separate
+    // "clear on success" step is needed for the Apply path.
+    var targetEnvUserDirty = false;
+
     function refreshStatus() {
       chrome.runtime.sendMessage({ type: 'lgt-bundle-status' }, function (res) {
         void chrome.runtime.lastError;
         if (!res || !res.ok) return;
-        if (res.active && res.targetEnv && ENV_LABELS.indexOf(res.targetEnv) !== -1) {
+        if (!targetEnvUserDirty && res.active && res.targetEnv && ENV_LABELS.indexOf(res.targetEnv) !== -1) {
           targetEnvSel.value = res.targetEnv;
           refreshTargetEnv(false);
         }
         status.textContent = res.active
           ? ('Active' + (res.targetEnv ? ' -> ' + res.targetEnv.toUpperCase() : '') + ' (' + res.ruleCount + ' rule(s)) - ' + res.matched.length + ' request(s) redirected so far.')
           : 'Not active on this tab.';
+      });
+      chrome.runtime.sendMessage({ type: 'lgt-detection-rows' }, function (res) {
+        void chrome.runtime.lastError;
+        if (!res || !res.ok || !res.rows) return;
+        var hostEnv = curEnvSel.value;
+        var diverging = res.rows.filter(function (row) {
+          return row.runtimeEnvironment && row.runtimeEnvironment !== hostEnv;
+        });
+        var newDetected = diverging.length ? diverging[0].runtimeEnvironment : null;
+        if (newDetected !== lastDetectedRuntimeEnv) {
+          lastDetectedRuntimeEnv = newDetected;
+          refreshTargetEnv(false); // updates the Host/Backend line's inline "[really X]" suffix
+        }
+        if (diverging.length) {
+          var seen = {};
+          var envs = diverging.map(function (row) { return row.runtimeEnvironment.toUpperCase(); }).filter(function (e) { return seen[e] ? false : (seen[e] = true); });
+          hostRealityNote.textContent = '\u26A0 Host/Backend above are labeled ' + hostEnv.toUpperCase() + ' from the URL only - the page\u2019s own runtime marker actually reports ' +
+            envs.join('/') + ' on this browser/network right now (e.g. no true ' + hostEnv.toUpperCase() + ' edge access from here). Hybrid mode never touches backend/API requests, only the ' +
+            'bundle\u2019s .js/config.json files, so applying an override now produces a REAL "' + envs.join('/') + ' native content + your chosen target bundle" combination, ' +
+            'not literally "' + hostEnv.toUpperCase() + ' + target" - the network-level redirect itself is unaffected and still correctly targets what you pick below.';
+          hostRealityNote.style.display = '';
+        } else {
+          hostRealityNote.style.display = 'none';
+        }
       });
     }
     pollWhileExtensionValid(refreshStatus, 3000);
@@ -3210,6 +3214,7 @@
           void chrome.runtime.lastError;
           status.textContent = 'Not active on this tab.';
         });
+        targetEnvUserDirty = false;
         try { sessionStorage.removeItem('__lgtCrossLayerRuntimeV1'); } catch (e) {}
         try { sessionStorage.removeItem(BUNDLE_DIAGNOSTICS_KEY); } catch (e) {}
       }
@@ -3219,10 +3224,10 @@
     // Environment is intentionally never persisted - see the restore
     // comment below for why (it must always reflect the live page, not a
     // remembered value from a different tab/environment).
-    curEnvSel.addEventListener('change', function () { refreshTargetEnv(true); });
-    targetEnvSel.addEventListener('change', function () { refreshTargetEnv(false); });
-    modeSel.addEventListener('change', function () { saveBundleState({ mode: modeSel.value }); refreshTargetEnv(true); });
-    deviceSel.addEventListener('change', function () { saveBundleState({ device: deviceSel.value }); refreshTargetEnv(false); });
+    curEnvSel.addEventListener('change', function () { targetEnvUserDirty = true; refreshTargetEnv(true); });
+    targetEnvSel.addEventListener('change', function () { targetEnvUserDirty = true; refreshTargetEnv(false); });
+    modeSel.addEventListener('change', function () { saveBundleState({ mode: modeSel.value }); targetEnvUserDirty = true; refreshTargetEnv(true); });
+    deviceSel.addEventListener('change', function () { saveBundleState({ device: deviceSel.value }); targetEnvUserDirty = true; refreshTargetEnv(false); });
 
     wrap.appendChild(el('label', {}, ['Brand']));
     wrap.appendChild(brandSel);
@@ -3236,6 +3241,7 @@
     wrap.appendChild(el('label', {}, ['Mode']));
     wrap.appendChild(modeSel);
     wrap.appendChild(runtimeTruth);
+    wrap.appendChild(hostRealityNote);
     wrap.appendChild(el('label', { style: 'display:none' }, ['Device', deviceSel]));
     wrap.appendChild(sandboxWarning);
     wrap.appendChild(el('div', { style: 'display:flex;gap:6px;margin-top:6px' }, [applyBtn, disableBtn]));
@@ -3257,7 +3263,20 @@
 
     chrome.storage.local.get([BUNDLE_STATE_KEY], function (res) {
       var saved = res && res[BUNDLE_STATE_KEY];
-      // Only restore the remembered BRAND (a genuine cross-page preference).
+      // Only restore the remembered BRAND, and only when THIS page's own
+      // hostname didn't confidently resolve one (e.g. a generic sandbox
+      // host) - a genuine cross-page preference in that case only. When
+      // detectBrandAndEnv() DID recognize the live hostname (e.g.
+      // betsson.gr), that must always win: restoring a brand saved from a
+      // different real brand domain (e.g. a leftover "betsson" from an
+      // earlier betsson.com tab) silently points every redirect rule below
+      // at the WRONG brand GUID for this page. The JS-level env rewrite in
+      // cross-layer-main.js still "succeeds" (it doesn't check brandId), so
+      // the config request lands on the right target-env host, but the
+      // brandId-scoped modifyHeaders CORS-allow rule never matches it,
+      // and the browser then blocks the response as a same-origin policy
+      // violation - reported 2026-09-07 as a config fetch CORS failure on
+      // betsson.gr while the panel silently showed brand "betsson".
       // The environment must NEVER be restored from a previous page's saved
       // value - it means "what THIS tab is actually on", so it has to keep
       // reflecting detectBrandAndEnv()'s live, host-based result for the
@@ -3266,7 +3285,7 @@
       // leftover "test" from an earlier tab, which made Apply compute QA as
       // the "other" target - i.e. redirect QA to QA, a silent no-op that
       // looked identical whether Apply/Disable was clicked.
-      if (saved && saved.brand && BRANDS[saved.brand]) brandSel.value = saved.brand;
+      if (!detected.brand && saved && saved.brand && BRANDS[saved.brand]) brandSel.value = saved.brand;
       if (saved && ['standard', 'hybrid'].indexOf(saved.mode) !== -1) modeSel.value = saved.mode;
       if (saved && ['desktop', 'mobile'].indexOf(saved.device) !== -1) deviceSel.value = saved.device;
       refreshTargetEnv(true);
@@ -3402,7 +3421,12 @@
 
     chrome.storage.local.get([BLE_DATA_STATE_KEY], function (res) {
       var saved = res && res[BLE_DATA_STATE_KEY];
-      if (saved && saved.brand && BRANDS[saved.brand]) brandSel.value = saved.brand;
+      // Same rationale as the Bundle Override tab above: only fall back to
+      // the remembered brand when THIS page's hostname didn't resolve one.
+      // BLE Data redirects THIS tab's own /api/sb/v1/* calls to the saved
+      // brand's ALPHA host, so restoring a stale brand from a different
+      // real brand domain would silently target the wrong brand.
+      if (!detected.brand && saved && saved.brand && BRANDS[saved.brand]) brandSel.value = saved.brand;
       if (saved && saved.device) deviceSel.value = saved.device;
       if (saved && saved.loggedIn) loggedInChk.checked = true;
     });
@@ -3534,6 +3558,163 @@
     return wrap;
   }
 
+  // ---------------------------------------------------------------------
+  // "Bet Void" tab - local, tab+origin-scoped coupon-history response
+  // override that marks one or more legs of a REAL, already-placed coupon
+  // as Void while deliberately leaving that coupon's boostedOdds/
+  // bonusBetType fields untouched, reproducing the stale-Price-Boost-
+  // after-void frontend bug. Narrow-scope by design: it only ever targets
+  // exactly the coupon+legs the tester explicitly picks from a real,
+  // just-observed coupon-history response (see bet-void-mock.js
+  // LAST_SEEN_KEY) - it cannot invent or reassign a bonus.
+  // ---------------------------------------------------------------------
+
+  function buildModeG() {
+    var wrap = el('div', { 'data-lgt-bet-void': 'panel' });
+    var coupons = [];
+    var selectedCoupon = null;
+
+    var seenInfo = el('div', { class: 'lgt-result', 'data-lgt-bet-void-seen': 'true' }, ['No coupon-history response observed yet on this tab. Open Bet History (Open or Settled) once, then click Detect.']);
+    var couponSelect = el('select', { id: 'lgt-bet-void-coupon' }, [el('option', { value: '' }, ['-- detect coupons first --'])]);
+    var legsBox = el('div', { class: 'lgt-result', 'data-lgt-bet-void-legs': 'true' }, ['No coupon selected.']);
+    var oddsInput = el('input', { id: 'lgt-bet-void-odds', type: 'number', step: '0.01', min: '1', placeholder: 'e.g. 4.15 (leave blank to keep odds as-is)' });
+    var voidCouponChk = el('input', { id: 'lgt-bet-void-status', type: 'checkbox' });
+    voidCouponChk.checked = true;
+    var voidCouponLabel = el('label', { class: 'lgt-checkbox-row' }, [voidCouponChk, 'Also mark the whole coupon status as Void (matches the real reproduced bug)']);
+    var status = el('div', { class: 'lgt-log', 'data-lgt-bet-void-status': 'inactive' }, ['Not active on this tab/origin.']);
+
+    function readSeen() {
+      try {
+        var raw = sessionStorage.getItem(LgtBetVoidMock.LAST_SEEN_KEY);
+        return raw ? JSON.parse(raw) : null;
+      } catch (e) { return null; }
+    }
+
+    function readStoredConfig() {
+      try {
+        var raw = sessionStorage.getItem(LgtBetVoidMock.CONFIG_KEY);
+        if (!raw) return null;
+        var config = JSON.parse(raw);
+        return config && config.enabled && config.couponId ? config : null;
+      } catch (e) { return null; }
+    }
+
+    function couponLabel(c) {
+      return c.id + ' - ' + (c.eventNames[0] || c.type) + ' [' + c.status + ']' + (c.bonusBetType && c.bonusBetType !== 'Unset' ? ' (' + c.bonusBetType + ')' : '');
+    }
+
+    function renderLegs() {
+      legsBox.textContent = '';
+      if (!selectedCoupon) { legsBox.appendChild(document.createTextNode('No coupon selected.')); return; }
+      var header = document.createTextNode(
+        selectedCoupon.id + ' - stake ' + selectedCoupon.stake + ', totalOdds ' + selectedCoupon.totalOdds +
+        ', boostedOdds ' + selectedCoupon.boostedOdds + ', bonusBetType ' + selectedCoupon.bonusBetType + '\n'
+      );
+      legsBox.appendChild(header);
+      if (!selectedCoupon.legs.length) { legsBox.appendChild(document.createTextNode('No legs found on this coupon.')); return; }
+      selectedCoupon.legs.forEach(function (leg) {
+        var chk = el('input', { type: 'checkbox', 'data-lgt-bet-void-leg-index': String(leg.legIndex) });
+        var row = el('label', { class: 'lgt-checkbox-row' }, [chk, leg.label + ' (currently: ' + leg.currentStatus + ')']);
+        legsBox.appendChild(row);
+      });
+    }
+
+    function setStatus(state, text) {
+      status.setAttribute('data-lgt-bet-void-status', state);
+      status.textContent = text;
+    }
+
+    function refreshStatus() {
+      var config = readStoredConfig();
+      if (!config) return;
+      var suffix = '';
+      try {
+        var matchRaw = sessionStorage.getItem(LgtBetVoidMock.LAST_MATCH_KEY);
+        var match = matchRaw && JSON.parse(matchRaw);
+        suffix = match && match.count ? ' Last matched response: #' + match.count + ' (' + match.appliedLegCount + ' leg(s) voided).' : ' Waiting for a coupon-history response containing this coupon.';
+      } catch (e) { suffix = ' Waiting for a coupon-history response containing this coupon.'; }
+      setStatus('active', 'Active - coupon ' + config.couponId + ', ' + config.legIndices.length + ' leg(s) targeted.' + suffix);
+    }
+
+    var detectBtn = el('button', { id: 'lgt-bet-void-detect', class: 'secondary', onclick: function () {
+      var seen = readSeen();
+      if (!seen || !seen.coupons || !seen.coupons.length) {
+        seenInfo.textContent = 'No coupon-history response observed yet on this tab. Open Bet History (Open or Settled) once, then click Detect.';
+        return;
+      }
+      coupons = seen.coupons;
+      seenInfo.textContent = coupons.length + ' coupon(s) captured from ' + seen.url + ' (' + new Date(seen.capturedAt).toLocaleTimeString() + ').';
+      couponSelect.textContent = '';
+      couponSelect.appendChild(el('option', { value: '' }, ['-- choose a coupon --']));
+      coupons.forEach(function (c, index) {
+        couponSelect.appendChild(el('option', { value: String(index) }, [couponLabel(c)]));
+      });
+      selectedCoupon = null;
+      renderLegs();
+    } } , ['Detect coupons']);
+
+    couponSelect.addEventListener('change', function () {
+      var index = couponSelect.value;
+      selectedCoupon = index !== '' ? coupons[Number(index)] : null;
+      renderLegs();
+    });
+
+    var applyBtn = el('button', { id: 'lgt-bet-void-apply', onclick: function () {
+      if (!selectedCoupon) { setStatus('error', 'Select a coupon before Apply.'); return; }
+      var legIndices = Array.prototype.slice.call(legsBox.querySelectorAll('[data-lgt-bet-void-leg-index]'))
+        .filter(function (chk) { return chk.checked; })
+        .map(function (chk) { return Number(chk.getAttribute('data-lgt-bet-void-leg-index')); });
+      if (!legIndices.length) { setStatus('error', 'Select at least one leg to void.'); return; }
+      var oddsValue = oddsInput.value.trim();
+      var correctedOdds = oddsValue === '' ? undefined : Number(oddsValue);
+      if (correctedOdds !== undefined && (!isFinite(correctedOdds) || correctedOdds < 1)) {
+        setStatus('error', 'Corrected total odds must be a number >= 1, or left blank.');
+        return;
+      }
+      var config = {
+        enabled: true,
+        couponId: selectedCoupon.id,
+        legIndices: legIndices,
+        voidCouponStatus: voidCouponChk.checked,
+        correctedOdds: correctedOdds,
+        appliedAt: Date.now()
+      };
+      try {
+        sessionStorage.setItem(LgtBetVoidMock.CONFIG_KEY, JSON.stringify(config));
+        sessionStorage.removeItem(LgtBetVoidMock.LAST_MATCH_KEY);
+        setStatus('active', 'Active - coupon ' + config.couponId + ', ' + legIndices.length + ' leg(s) targeted. Reload or re-open Bet History to see it applied.');
+      } catch (err) {
+        setStatus('error', 'Apply failed: ' + friendlyErrorMessage(err));
+      }
+    } }, ['Apply']);
+
+    var stopBtn = el('button', { id: 'lgt-bet-void-stop', class: 'secondary', onclick: function () {
+      try {
+        sessionStorage.removeItem(LgtBetVoidMock.CONFIG_KEY);
+        sessionStorage.removeItem(LgtBetVoidMock.LAST_MATCH_KEY);
+      } catch (e) { /* reload still removes the active read path */ }
+      setStatus('inactive', 'Stopped. Reloading to restore native coupon-history responses...');
+      location.reload();
+    } }, ['Stop']);
+
+    wrap.appendChild(el('div', { class: 'lgt-row' }, [detectBtn]));
+    wrap.appendChild(seenInfo);
+    wrap.appendChild(el('label', {}, ['Target coupon']));
+    wrap.appendChild(couponSelect);
+    wrap.appendChild(legsBox);
+    wrap.appendChild(voidCouponLabel);
+    wrap.appendChild(el('label', {}, ['Corrected total odds (optional - what the backend actually recalculated to)']));
+    wrap.appendChild(oddsInput);
+    wrap.appendChild(el('div', { class: 'lgt-row' }, [applyBtn, stopBtn]));
+    wrap.appendChild(status);
+    wrap.appendChild(el('div', { class: 'lgt-hint', style: 'margin-top:8px' }, [
+      'Local browser-side override only - it does not modify the backend/settlement state, and never creates or voids a real coupon. It marks the selected leg(s) of the chosen REAL coupon as Void in the coupon-history GET response on this tab/origin, optionally recalculates totalOdds/payout, and deliberately leaves boostedOdds/bonusBetType unchanged - reproducing the stale Price Boost badge bug seen after a real trading-side void. IMPORTANT: after Apply, do NOT do a full browser reload (F5) while on a coupon-detail deep link (a URL containing couponDetail=...) - this QA app has a known race that can falsely redirect you to a logged-out home page. Instead, go back to the plain Bet History list (no couponDetail param) and switch between the Open/Settled tabs there, or re-open the coupon detail from that list - either triggers a fresh in-app request without a full page reload.'
+    ]));
+
+    pollWhileExtensionValid(refreshStatus, 1000);
+    refreshStatus();
+    return wrap;
+  }
   // ---------------------------------------------------------------------
   // Bootstrap
   // ---------------------------------------------------------------------
