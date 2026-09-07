@@ -299,3 +299,58 @@ tests run automatically; live brand tests are manual).
   the normal, fully-enumerated case (NordicBet's own chunk-loading, once
   `main` is redirected, already correctly points at the target CDN on its
   own merit) — still ALL PASS.
+
+- **Stale saved BRAND silently pointed a hybrid override at the wrong
+  brand's GUID, breaking config CORS (2026-09-07)**: a user's own live
+  test on `www.betsson.gr` (hybrid PROD-host/TEST-bundle) hit a config
+  fetch CORS failure in the page console (`Access-Control-Allow-Origin`
+  missing on `www.test.betsson.gr/dist/test/config/<guid>/.../config.json`,
+  reported by `cross-layer-main.js`'s `window.fetch` override). This was
+  first suspected to be a gap in the existing CORS-allowlisting
+  `modifyHeaders` DNR rule in `buildBundleRedirectRules`
+  (`background.js`), which already exists specifically to grant this
+  cross-origin config fetch an `Access-Control-Allow-Origin` header when
+  in hybrid/cross-layer mode.
+
+  **Root cause (confirmed by source inspection, not this DNR rule)**: the
+  Bundle Override panel's own `BRAND` dropdown (`content.js`, `buildModeD`)
+  had silently restored a **stale brand saved from an earlier tab on a
+  different real brand domain** (`betsson` / `betsson.com`, GUID
+  `6a6d80b9-...`) instead of the correct, live-hostname-detected brand for
+  this page (`betssongr` / `betsson.gr`, GUID `4bf6590d-...`) — the
+  restore code unconditionally applied `saved.brand` whenever a valid one
+  existed in storage, with no check against what `detectBrandAndEnv()`
+  already correctly resolved for the current page. The DNR CORS-allow
+  rule (and every other brand-scoped redirect rule) is built with
+  `regexFilter` containing the **selected** brand's GUID — since the
+  panel showed `betsson`'s GUID while the live page's own config requests
+  actually carried `betssongr`'s GUID, none of those rules ever matched
+  this page's real config request, so no `Access-Control-Allow-Origin`
+  header was ever added and Chrome correctly (from its own perspective)
+  blocked the response. The same unconditional-restore pattern existed
+  in the BLE Data tab (`buildModeE`) too, with the same live-tab-breaking
+  consequence for its own brand-scoped `/api/sb/v1/*` redirect rules.
+
+  This is the same class of bug already fixed for the **environment**
+  dropdown on 2026-08-10 (documented in `content.js`'s own comment at the
+  restore site) — a value that must reflect *this specific page*, not
+  whatever was last used elsewhere, was being persisted and restored
+  regardless. The original 2026-08-10 fix comment explicitly reasoned
+  the BRAND field was "a genuine cross-page preference" safe to restore
+  unconditionally; that reasoning holds only when the user stays on the
+  *same* real brand domain across tabs/reloads, and breaks the moment a
+  panel is opened on a genuinely different brand's real domain.
+
+  **Fix**: both `buildModeD` and `buildModeE` in `content.js` now only
+  fall back to the saved brand when `detectBrandAndEnv()` did **not**
+  confidently resolve one from the live hostname (e.g. a generic sandbox
+  host with no brand-domain match) — a live, confident hostname-based
+  detection always wins over a stale cross-page preference.
+
+  **Verified live**: a throwaway Playwright script pre-seeded
+  `chrome.storage.local` with a saved `betsson` brand for both the Bundle
+  and BLE Data panel states, then loaded the real `https://www.betsson.gr/`
+  page. Pre-fix (via `git stash` A/B), both panels showed `betsson` (the
+  bug, reproduced exactly). Post-fix, both correctly showed `betssongr`.
+  Full regression suite (`test:layer-detection`, `npm test`, `test:bonus`,
+  `test:bet-void`) re-run clean after the fix, no regressions.

@@ -3263,7 +3263,20 @@
 
     chrome.storage.local.get([BUNDLE_STATE_KEY], function (res) {
       var saved = res && res[BUNDLE_STATE_KEY];
-      // Only restore the remembered BRAND (a genuine cross-page preference).
+      // Only restore the remembered BRAND, and only when THIS page's own
+      // hostname didn't confidently resolve one (e.g. a generic sandbox
+      // host) - a genuine cross-page preference in that case only. When
+      // detectBrandAndEnv() DID recognize the live hostname (e.g.
+      // betsson.gr), that must always win: restoring a brand saved from a
+      // different real brand domain (e.g. a leftover "betsson" from an
+      // earlier betsson.com tab) silently points every redirect rule below
+      // at the WRONG brand GUID for this page. The JS-level env rewrite in
+      // cross-layer-main.js still "succeeds" (it doesn't check brandId), so
+      // the config request lands on the right target-env host, but the
+      // brandId-scoped modifyHeaders CORS-allow rule never matches it,
+      // and the browser then blocks the response as a same-origin policy
+      // violation - reported 2026-09-07 as a config fetch CORS failure on
+      // betsson.gr while the panel silently showed brand "betsson".
       // The environment must NEVER be restored from a previous page's saved
       // value - it means "what THIS tab is actually on", so it has to keep
       // reflecting detectBrandAndEnv()'s live, host-based result for the
@@ -3272,7 +3285,7 @@
       // leftover "test" from an earlier tab, which made Apply compute QA as
       // the "other" target - i.e. redirect QA to QA, a silent no-op that
       // looked identical whether Apply/Disable was clicked.
-      if (saved && saved.brand && BRANDS[saved.brand]) brandSel.value = saved.brand;
+      if (!detected.brand && saved && saved.brand && BRANDS[saved.brand]) brandSel.value = saved.brand;
       if (saved && ['standard', 'hybrid'].indexOf(saved.mode) !== -1) modeSel.value = saved.mode;
       if (saved && ['desktop', 'mobile'].indexOf(saved.device) !== -1) deviceSel.value = saved.device;
       refreshTargetEnv(true);
@@ -3408,7 +3421,12 @@
 
     chrome.storage.local.get([BLE_DATA_STATE_KEY], function (res) {
       var saved = res && res[BLE_DATA_STATE_KEY];
-      if (saved && saved.brand && BRANDS[saved.brand]) brandSel.value = saved.brand;
+      // Same rationale as the Bundle Override tab above: only fall back to
+      // the remembered brand when THIS page's hostname didn't resolve one.
+      // BLE Data redirects THIS tab's own /api/sb/v1/* calls to the saved
+      // brand's ALPHA host, so restoring a stale brand from a different
+      // real brand domain would silently target the wrong brand.
+      if (!detected.brand && saved && saved.brand && BRANDS[saved.brand]) brandSel.value = saved.brand;
       if (saved && saved.device) deviceSel.value = saved.device;
       if (saved && saved.loggedIn) loggedInChk.checked = true;
     });
