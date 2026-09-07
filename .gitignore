@@ -3,3 +3,8 @@ node_modules/
 debug-*.mjs
 *.png
 *.log
+# Cross-Layer Lab local-only state and secrets
+cross-layer-lab/accounts.local.json
+cross-layer-lab/.chrome-profile/
+cross-layer-lab/.chrome-profile-e2e/
+cross-layer-lab/logs/

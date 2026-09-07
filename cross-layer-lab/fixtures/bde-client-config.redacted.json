@@ -1,0 +1,8 @@
+{
+  "contractVersion": "2026-08-14",
+  "apiUrl": "https://api.betsson.com/api/sb/v1",
+  "authEndpoint": "https://auth.betsson.com/session",
+  "walletUrl": "https://wallet.betsson.com/balance",
+  "realtimeEndpoint": "https://realtime.betsson.com/signalr",
+  "nonEndpointText": "redacted-fixture"
+}

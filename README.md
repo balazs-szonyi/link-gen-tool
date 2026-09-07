@@ -138,53 +138,158 @@ brand page you're already logged into — no CLI, no headless automation.
   40-bonus fixture plus a Playwright adapter for automated tests. This is
   response substitution only: it never creates, activates, assigns, or
   wagers with a real bonus.
-- **Detected build strip** (Chrome extension only, always visible above
-  the tabs): shows the environment/version actually serving the current
-  tab's sportsbook bundle, read from the real network request the
-  browser already made for it — not from any UI dropdown or the separate
-  "Sportsbook Tool" bookmarklet's own "SB Version" field, both of which
-  can silently show a stale/wrong value. Flags with an orange badge when
-  the served environment differs from the page's own (i.e. a Bundle
-  override is active). An optional, on-demand **"Verify with page
-  state"** button cross-checks against `window.xSbState` (only useful on
-  a link with `exposeObgState=true`) for anyone who wants a second,
-  independent confirmation. It reads the page's real, live JS context via
-  `chrome.scripting.executeScript({world: 'MAIN'})` from the background
-  service worker — the officially-documented way to run code in a page's
-  actual context without being subject to that page's own
-  Content-Security-Policy (many sandbox pages ship a strict `script-src`
-  with no `unsafe-inline`, which silently blocked an earlier,
-  DOM-script-injection-based implementation of this check). Resolves
-  within a few seconds either way (never hangs indefinitely).
-  For dist-shape widget URLs the strip resolves the artifact environment by
-  comparing the observed brand/device/version against both indexers in the
-  page's environment layer. It deliberately keeps the page environment,
-  request-host environment, and artifact environment separate: an ALPHA
-  hostname can proxy a `/dist/prod/...` artifact and must then be reported as
-  a PROD build on an ALPHA page. If the same build is deployed to both
-  environments it is labeled as shared rather than guessed. On a standalone
-  sandbox link
-  (the tool's own "Generate" tab output, opened directly) the bundle is
-  served as a plain `/assets/main-<hash>.js`/`/assets/chunk-<hash>.js`
-  with no version or device segment in the URL at all — the strip still
-  recovers the real version via a reverse lookup against that
-  environment's `indexer.json` (the same files the Bundle Override feature
-  already fetches/caches): it checks whether any of the observed
-  filenames match a brand's listed entry-point or facade chunk files, and
-  if so reports that build's version and the actual detected **brand
-  name** — e.g. `SB build: v8.1.5.4616-rc7c7784 [nordicbet, QA]` — instead
-  of the generic word "sandbox", since the brand is already unambiguous
-  from the link's own hostname.
-  The lookup is scoped to the one brand detected from the
-  sandbox link's own hostname, since many chunk files are shared
-  byte-for-byte across several/most brands (common vendor/framework code)
-  — without that scoping the version would be ambiguous and unresolved.
-  Device (desktop/mobile) is only reported when the match happens to be
-  unambiguous on that axis too, which is uncommon since desktop/mobile
-  builds usually share the exact same chunks; when nothing resolves yet
-  (or the environment's indexer.json has no matching entry) the strip
-  falls back to the plain "<brand> sandbox link — version/device not
-  encoded in URL" label instead of guessing.
+- **Automatic brand/layer detection header** (Chrome extension only, always
+  visible above the tabs): shows one row per **brand + runtime layer +
+  device** combination actually detected on the current tab, across every
+  frame, not a single tab-wide guess. A brand's page may run an MFE
+  widget, a Fabric/OBGA embed, and a NodeJS integration at once, or the
+  same layer in two different frames (e.g. desktop MFE plus a mobile
+  Fabric/OBGA test harness) — each gets its own row, e.g.:
+  - `Firestorm · MFE: v8.2.3.4918-re0ade7b / QA (desktop) — Confirmed`
+  - `Betsson · Fabric: v8.1.15.4896-hc2cb4ed / QA (mobile) — Confirmed`
+  - `NordicBet · NodeJS: v8.2.1.4910-h96b2913 / QA — Partially verified`
+
+  > **Naming note**: the layer's display label is **"Fabric"**, not
+  > "iframe" — even though internally (storage keys, code, tests) it is
+  > still identified as `iframe` because that's the term the original
+  > spec used for whatever exposes `obgClientEnvironmentConfig`. That
+  > marker was never a check for a literal DOM `<iframe>` element, only
+  > a JS global read, and "Fabric" is the real dev-team name for this
+  > legacy shell/wrapper runtime (matching the third-party Sportsbook
+  > Tool extension's own `(Fabric + mFE)` label). A developer has
+  > confirmed there is no such thing as "Fabric + iframe" as two
+  > separate, coexisting layers — they are the same shell, so showing
+  > "iframe" as if it were a distinct layer name was a legacy misnomer.
+
+  There is no manual verification step any more — the previous **"Verify
+  with page state"** button (which read `window.xSbState`) has been
+  removed entirely; `xSbState` is never used as a version or environment
+  source. Detection is fully automatic and layered:
+  - **Runtime layer markers**, read via a `document_idle` MAIN-world
+    content script running in every frame: `window.sbMfeStartupContext` /
+    `sbXpSportsbookAppVersion` for the MFE layer,
+    `window.obgClientEnvironmentConfig.startupContext` for the
+    Fabric/OBGA layer, `window.nodeContext` for the NodeJS layer. Each
+    marker supplies that layer's brandId/brandName, version, and (where
+    available) environment. Runtime contexts hydrate **progressively**
+    within a single page load (e.g. a marker can appear first with only
+    its version, gaining brandId/environment — or an entirely second
+    layer's marker — a tick or two later), so the reader keeps polling
+    for its full ~20s budget rather than freezing on the first snapshot
+    it happens to see; a `Partially verified` row should self-resolve on
+    its own once the runtime finishes hydrating, without needing a page
+    reload.
+  - **Independent network confirmation** per layer/frame: the MFE
+    layer's own dist-bundle request, the Fabric/OBGA layer's config
+    request (URL brand/facade/version-family plus the `x-sb-app-version`
+    response header — used only as a version source, never as an
+    environment source, since the API host serving it can differ from
+    the artifact's own environment), and the NodeJS layer's frame
+    navigation hostname. Brand resolution always follows the same
+    priority chain — runtime marker brand → config-URL brand → MFE
+    bundle-URL brand → hostname mapping as a last resort only — and every
+    network match is scoped to the one brandId+device it actually named,
+    so a chunk hash or version shared across brands can never produce a
+    cross-brand match.
+  - `bleSource=1` requests to an ALPHA/PROD backend are excluded
+    entirely from the bundle-environment computation (they exist only to
+    let a QA/TEST-bundle page reach a shared ALPHA/PROD backend, and do
+    not reflect the bundle's own environment).
+
+  Each row is classified independently:
+  - **Confirmed** — the runtime marker and the network evidence agree on
+    brand, version, and environment.
+  - **Partially verified** — the layer is recognized (a runtime marker
+    exists) but at least one value (version or environment) only has a
+    single reliable source. The row's detail line spells out exactly
+    which piece of evidence is still missing (e.g. "no network
+    confirmation seen for this layer yet", "runtime marker has no
+    environment") instead of leaving a user to guess — most commonly
+    this self-resolves a few seconds after page load, once the network
+    side catches up with the runtime marker.
+  - **Mismatch** — the runtime marker and network evidence for the same
+    brand+layer disagree; the conflicting values are shown inline (e.g.
+    `version: runtime=v8.2.3.4918-re0ade7b vs network=v8.1.15.4896-hc2cb4ed`).
+  - **Unclassified SB build** — a network hit with no runtime marker at
+    all in that frame; the brand is still shown if resolvable, but no
+    layer is guessed.
+
+  **Headline version/environment selection is the same rule in every
+  status**: whenever network evidence exists for a row, its
+  version/environment is what's shown as the headline value — in a
+  Confirmed row this is moot (both sides already agree), but in a
+  Mismatch row it means the headline shows the *network-confirmed*
+  value, not the raw runtime marker, with the runtime marker's
+  conflicting value spelled out in the detail line instead
+  (`version: runtime=... vs network=...`). This used to differ by
+  status — an override-explained Confirmed row substituted the
+  network value while an otherwise-identical, unexplained Mismatch
+  row displayed the raw runtime value — which made the exact same
+  underlying fact (a brand's runtime marker is pinned to its layer's
+  base build no matter what actually loads; see below) look
+  inconsistent, as if the tool sometimes "detected" the overridden
+  environment in the runtime and sometimes didn't. The rule is now a
+  single, status-independent selection: prefer network evidence,
+  fall back to the runtime marker only when no network evidence
+  exists at all (the Partially verified case). The Confirmed/Mismatch
+  status is what tells you whether that headline value is trusted or
+  flagged as an unresolved conflict — not which value gets shown.
+
+  **Bundle Override exception**: applying this extension's own Bundle
+  Override (the Bundle tab's Apply button, targeting ALPHA or TEST)
+  redirects a brand's JS bundle and `config.json` request, but not the
+  page's own top-level document — so on brands whose runtime marker
+  (`sbMfeStartupContext`/`obgClientEnvironmentConfig.startupContext`)
+  gets its version/environment from a server-rendered startup context
+  baked into that document at load time, the runtime marker keeps
+  reporting the layer's *base* environment (PROD for the alpha/prod
+  layer, QA for the qa/test layer) even after a successful override,
+  while the network evidence correctly reflects the override target.
+  This is the exact same limitation already documented for the
+  third-party Sportsbook Tool extension, which works around it by
+  reading a compatibility flag (`xSbIsMfeOverrideApplied`) that an
+  active override publishes — a flag this extension's own Bundle
+  Override already sets for that tool's benefit. The detection header
+  now recognizes this same, fully-deterministic pattern for itself: when
+  an active Bundle Override on the current tab explains a runtime-vs-network
+  version/environment split, the row's *status* is upgraded to
+  **Confirmed** (the headline already showed the network-side values
+  either way, per the rule above) with a detail note explaining the
+  pinned-runtime-vs-live-network split, instead of a confusing Mismatch.
+  If the same split occurs *without* this extension's own Bundle
+  Override active (e.g. a real VPN/whitelisted session that reaches
+  ALPHA/TEST content some other way), the status correctly remains a
+  Mismatch, since there's no known reason to explain it away — but even
+  then, the headline still shows the network-confirmed value, not a
+  raw pinned-PROD runtime value, so the same override-vs-no-override
+  runtime split is never displayed two different ways depending on
+  whether it happens to be explained.
+
+  Two or more layers in the *same frame* that all reach Confirmed on the
+  exact same brand+version+environment+device are not shown as separate
+  duplicate-looking rows — some brands genuinely run a hybrid runtime
+  (e.g. an MFE widget layered on top of the legacy Fabric/OBGA runtime,
+  which still populates its own `obgClientEnvironmentConfig` for
+  backward compatibility), and since every value is identical, two rows
+  would just be noise. These are merged into **one row listing every
+  agreeing layer**, e.g.:
+  - `Firestorm · MFE + Fabric: v8.3.0.4928-b1d00c18 / QA (desktop) — Confirmed`
+
+  The merged row shows no extra detail text beyond the badge itself —
+  same as any other Confirmed row — since a matching hybrid runtime
+  needs no explanation to the user. A brand that only runs one layer
+  (e.g. a plain Fabric/OBGA "B2B" integration with no MFE widget at all)
+  correctly still shows a single row for that one layer — the absence of
+  a second row is not a bug, it means the page genuinely doesn't expose a
+  second layer's runtime marker. MFE and Fabric rows that disagree on
+  version, environment, or device are **not** merged and remain separate
+  rows, exactly as before.
+
+  A generic host with no brand in its own hostname (e.g.
+  `d-cf.qa.sbplayground1.net`) is resolved purely from whichever
+  brandId the frame's own config/network request actually carried —
+  never guessed from the hostname.
+
 
 ## Install (bookmarklet)
 
@@ -241,6 +346,51 @@ node serve.js
 Serves `link-gen-tool.js` on `http://localhost:8844`. Use a bookmarklet
 pointing at `http://localhost:8844/link-gen-tool.js` while iterating, then
 switch back to the GitHub Pages URL once changes are pushed.
+
+## Manual live smoke test / regression (brand/layer detection)
+
+The automated suite (`npm test`, `npm run test:bonus`, `npm run
+test:bet-void`, `npm run test:layer-detection`) only exercises the
+detection engine's classification logic against mocked/offline fixtures
+— it deliberately never talks to a real brand or QA-sandbox host. Before
+shipping a change to the detection engine
+(`background.js`'s `computeDetectionRows`/`runtimeMarkersByTab`/
+`networkByTab`, or `layer-detect.js`/`layer-relay.js`), also run this
+manual pass:
+
+1. Load the built extension (`extension/`, or the OneDrive-synced copy)
+   in Chrome and open the panel on a real or QA brand page.
+2. Confirm the automatic header populates within a few seconds with **no**
+   manual button click — one row per brand+layer+device combination
+   actually present on that page.
+3. Cross-check against `BRAND_LAYER_MATRIX.md` for that brand — if the
+   matrix already has a row for it, the newly observed layer/version/
+   environment/status should match; if it doesn't yet, add a new row (see
+   that file for the procedure).
+4. Specifically verify, using whichever brands/pages are available to
+   you:
+   - Two brands with different indexer versions each resolve to their
+     OWN brandId (never a value from the other brand or environment).
+   - A page with MFE and Fabric layers active in *different* frames, or
+     agreeing on different versions, shows independent rows for each; if
+     both layers are Confirmed in the *same* frame on the exact same
+     brand+version+environment+device, they are merged into one row
+     listing both layers instead (see the hybrid-runtime note above) —
+     that merge is expected, not a bug.
+   - Desktop and mobile are reported as separate rows/devices, never
+     merged into one.
+   - A QA-bundle page whose request happens to carry `bleSource=1` to an
+     ALPHA/PROD backend still reports as QA (the ALPHA/PROD backend
+     request itself is excluded from the environment computation).
+   - Forcing a brand/version/environment mismatch (e.g. via the Bundle
+     Override tab) produces a **Mismatch** row with the conflicting
+     values shown inline, not a false Confirmed.
+   - A generic host with no brand in its own hostname (e.g.
+     `d-cf.qa.sbplayground1.net`) still resolves the correct brand, taken
+     from that frame's own config request.
+
+This list intentionally has no fixed URL — see `BRAND_LAYER_MATRIX.md`
+for how to pick a brand/page and record the result.
 
 ## Why not a shared cross-origin vault?
 
@@ -465,6 +615,20 @@ selected bundle environment only during the tool script's synchronous startup
 calculation, then immediately restores the page's real startup context. This
 prevents PROD-host/TEST-bundle runs from being mislabeled as ALPHA.
 
+Bundle Override's redirect rules are built from `indexer.json`'s listed
+files for the target environment; a brand's real page can additionally
+`modulepreload` extra, dynamically-hashed async `chunk-*.js`/`shell.*.js`
+files that no environment's `indexer.json` enumerates at all (confirmed
+live on Betsson desktop). Since 1.22.15, any such unlisted file that's
+still pointed at a non-target environment is redirected to the extension's
+no-op stub instead of silently continuing to execute from whichever native
+environment originally served it — this closes a real gap where applying
+an override (same-layer or hybrid) directly on a page whose native content
+had already fallen back to a different environment than assumed could
+leave a handful of stale, non-target-env chunk files loaded alongside the
+correctly-redirected build. See `BRAND_LAYER_MATRIX.md`'s "missing step 0"
+section for the full live investigation and evidence.
+
 For the reverse BDE-bundle to BLE-backend direction, the tab-scoped adapter
 maps BDE's additional read-only `static-context` GET to BLE's supported
 `user-context` GET. The original context headers and identifiers are retained;
@@ -552,48 +716,36 @@ is largely unchanged:
   against how the page actually renders can subtly break things, since
   desktop/mobile BLE contexts are genuinely different backend
   registrations (same reasoning as the Live Login tab's device split).
-- **Detected build strip**: only populates once the tab has actually
-  requested a sportsbook bundle file — a lobby-only or non-sportsbook
-  page will keep showing "No sportsbook bundle detected on this tab
-  yet.", which is expected, not a bug. On a **standalone sandbox link**
-  (the tool's own "Generate" tab output, no version/brandId/device in the
-  bundle URL) the strip attempts a reverse lookup against that
-  environment's `indexer.json` to recover the real version anyway (see
-  above); this only works for chunks that indexer.json actually lists for
-  the detected brand, so a version can briefly stay unresolved right
-  after page load, or (rarely) never resolve at all if no observed
-  filename happens to match — in that case it falls back to showing just
-  the environment, labeled as a sandbox link, since version/device
-  genuinely aren't available from the URL shape itself. This detection is
-  also restricted to known playground CDN hostnames to avoid false
-  positives on unrelated websites that happen to serve a similarly-named
-  `/assets/main-*.js` file. The "Verify with page state"
-  button requires `exposeObgState=true` on the URL; without it, clicking
-  the button just explains why it can't check. Since 1.14.0 it reads
-  `window.xSbState` via `chrome.scripting.executeScript({world: 'MAIN'})`
-  from the background service worker, which bypasses the page's own
-  Content-Security-Policy entirely (the documented Chrome-correct way to
-  run code in a page's real JS context) — an earlier
-  DOM-`<script>`-injection-based implementation silently failed forever
-  ("No response after 5s") on any page whose CSP lacked `unsafe-inline`,
-  which in practice was every sandbox page tested. The exact
-  version/environment field names inside `window.xSbState` aren't
-  officially documented, so that secondary check falls back to listing
-  the object's top-level keys if none of its best-effort field guesses
-  match — the primary, always-on network-based reading doesn't depend on
-  this at all.
-- **Detected build strip / Bundle tab background polling**: both poll
-  `background.js` on a 3s timer for as long as the panel is open. If the
-  extension itself gets reloaded/updated (e.g. a dev `chrome://extensions`
-  reload, or a background auto-update) while a tab with the panel open is
-  left running, `chrome.runtime` becomes a stale reference and any call
-  into it throws a synchronous, uncatchable-via-callback "Extension
-  context invalidated" error. Fixed in 1.11.1 (`pollWhileExtensionValid`
-  in `content.js`): both pollers now detect this (via `chrome.runtime.id`
-  going `undefined`, plus a try/catch belt-and-braces around the call
-  itself) and silently stop polling instead of re-throwing the same error
-  every 3 seconds forever. If you ever see this error logged repeatedly
-  in `chrome://extensions` → "Errors", just reload the affected tab(s) —
-  it only means the extension was reloaded while they were open, it is
-  not a sign of a data/functionality problem.
+- **Automatic brand/layer detection header**: each row only appears once
+  that frame has actually produced runtime-marker and/or network
+  evidence — a lobby-only or non-sportsbook tab simply shows no rows
+  ("Detecting sportsbook runtime layers…"), which is expected, not a bug.
+  Runtime markers are read by a `document_idle`, `all_frames:true`
+  MAIN-world content script (`layer-detect.js`) that polls for up to ~20s
+  after each frame loads, then stops — this keeps it cheap on the
+  `<all_urls>` pages it necessarily also runs on (an isolated-world relay,
+  `layer-relay.js`, forwards whatever it finds to the background service
+  worker via `chrome.runtime.sendMessage`; content scripts cannot call
+  extension APIs directly from the MAIN world). Network evidence is
+  collected per tab+frame+layer in `background.js` from the existing
+  `onBeforeRequest`/`onHeadersReceived`/`webNavigation` listeners, and is
+  cleared per-frame on that frame's own next navigation (a top-level
+  navigation clears the whole tab, since all of its subframes are about
+  to be torn down anyway). Since 1.22.6 there is no manual verification
+  step: the previous **"Verify with page state"** button and its
+  `window.xSbState` read via `chrome.scripting.executeScript({world:
+  'MAIN'})` have been removed entirely — `xSbState` is explicitly never
+  used as a version/environment source by the new engine, matching the
+  behavior above.
+- **Automatic brand/layer detection header background polling**: polls
+  `background.js` on a 3s timer for as long as the panel is open, using
+  the same `pollWhileExtensionValid` (`content.js`, since 1.11.1) belt-
+  and-braces handling for a stale `chrome.runtime` reference after an
+  extension reload/update (e.g. a dev `chrome://extensions` reload, or a
+  background auto-update) as the Bundle tab's own poller — both silently
+  stop polling instead of throwing an uncatchable "Extension context
+  invalidated" error every 3 seconds forever. If you ever see this error
+  logged repeatedly in `chrome://extensions` → "Errors", just reload the
+  affected tab(s) — it only means the extension was reloaded while they
+  were open, it is not a sign of a data/functionality problem.
 
