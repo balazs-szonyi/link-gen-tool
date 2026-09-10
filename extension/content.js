@@ -130,6 +130,14 @@
     betssonco: 'betsson.co'
   };
 
+  var BRAND_LOCAL_KEYS = {
+    betssonco: 'betsson'
+  };
+
+  var BRAND_CONTEXT_PREFIXES = {
+    betssonco: 'Betsson.co'
+  };
+
   var BRAND_DOMAINS = {
     arcticbet: 'arcticbet.com',
     betfirst: 'betfirst.be',
@@ -564,9 +572,23 @@
   }
 
   function buildLinksFromContext(resp, opts) {
+    var contexts = ((resp.data || {}).context || {});
+
+    function contextFor(device) {
+      var prefix = BRAND_CONTEXT_PREFIXES[opts.brand];
+      if (prefix) {
+        var wanted = (prefix + ' ' + device).toLowerCase();
+        var namedKey = Object.keys(contexts).filter(function (key) {
+          return key.toLowerCase() === wanted;
+        })[0];
+        if (namedKey) return contexts[namedKey];
+      }
+      return contexts[device] || {};
+    }
+
     function buildFor(device) {
       var userNode = ((resp.data || {}).user || {})[device] || {};
-      var ctxNode = ((resp.data || {}).context || {})[device] || {};
+      var ctxNode = contextFor(device);
       var base = (userNode.iFrameSetup || {}).overrideIFrameBaseUrlWith;
       if (!base) base = (ctxNode.iFrameHelper || {}).baseUri;
       var stc = (ctxNode.customerContext || {}).staticContextId;
@@ -580,7 +602,39 @@
       return base + '/' + stc + '/' + ctx + '/?exposeObgState=true&exposeObgRt=true&sealStore=false';
     }
 
-    return { desktop: buildFor('desktop'), mobile: buildFor('mobile') };
+    return {
+      desktop: buildFor('desktop'),
+      mobile: buildFor('mobile'),
+      localLinks: buildLocalLinksFromContext(resp, opts)
+    };
+  }
+
+  function buildLocalLinksFromContext(resp, opts) {
+    var contexts = ((resp.data || {}).context || {});
+    var prefix = BRAND_CONTEXT_PREFIXES[opts.brand];
+    var keys = Object.keys(contexts).filter(function (key) {
+      var normalized = key.toLowerCase();
+      if (normalized === 'desktop' || normalized === 'mobile') return false;
+      return !prefix || normalized.indexOf(prefix.toLowerCase()) === 0;
+    });
+    var localBrand = BRAND_LOCAL_KEYS[opts.brand] || opts.brand;
+    return keys.map(function (key) {
+      var node = contexts[key] || {};
+      if (node.responseCode !== 100) {
+        return { id: key, error: (node.responseNotes || []).join(' - ') || 'Context unavailable' };
+      }
+      var customer = node.customerContext || {};
+      var stc = customer.staticContextId;
+      var ctx = customer.userContextId;
+      if (!stc || !ctx) return { id: key, error: 'Context identifiers unavailable' };
+      var port = key.toLowerCase().indexOf('desktop') !== -1 ? '4200' : '8085';
+      var origin = 'http://' + opts.environment + '.' + localBrand + '.local:' + port;
+      return {
+        id: key,
+        local: origin + '/' + stc + '/' + ctx,
+        localMfe: origin + '?staticContext=' + encodeURIComponent(stc) + '&userContext=' + encodeURIComponent(ctx)
+      };
+    });
   }
 
   function spliceContext(baseLink, stc, ctx) {
@@ -1726,30 +1780,164 @@
   // freely afterwards, and clamps to the viewport so it can't be dragged
   // fully off-screen (which would make it unreachable again).
   function makeDraggable(panel, handle) {
-    var dragging = false, offsetX = 0, offsetY = 0;
+    var pointerId = null, offsetX = 0, offsetY = 0;
     handle.style.cursor = 'move';
-    handle.addEventListener('mousedown', function (e) {
+    // Prevent the browser's mobile/touch emulation from turning a header
+    // drag into page scrolling. Pointer Events cover mouse, pen and touch
+    // through the same path and pointer capture keeps the drag alive when
+    // the finger leaves the title bar.
+    handle.style.touchAction = 'none';
+    handle.style.userSelect = 'none';
+    handle.addEventListener('pointerdown', function (e) {
       // Don't start a drag when the click is on the header's own action
       // buttons (minimize/close) - those need their normal click behavior.
       if (e.target.closest && e.target.closest('.lgt-header-actions')) return;
-      dragging = true;
+      if (e.button !== undefined && e.button !== 0) return;
+      pointerId = e.pointerId;
       var rect = panel.getBoundingClientRect();
       panel.style.left = rect.left + 'px';
       panel.style.top = rect.top + 'px';
       panel.style.right = 'auto';
       panel.style.bottom = 'auto';
+      panel.dataset.lgtMoved = '1';
       offsetX = e.clientX - rect.left;
       offsetY = e.clientY - rect.top;
+      try { handle.setPointerCapture(pointerId); } catch (ignored) {}
       e.preventDefault();
     });
-    document.addEventListener('mousemove', function (e) {
-      if (!dragging) return;
+    handle.addEventListener('pointermove', function (e) {
+      if (pointerId === null || e.pointerId !== pointerId) return;
       var x = Math.max(0, Math.min(window.innerWidth - panel.offsetWidth, e.clientX - offsetX));
       var y = Math.max(0, Math.min(window.innerHeight - panel.offsetHeight, e.clientY - offsetY));
       panel.style.left = x + 'px';
       panel.style.top = y + 'px';
+      e.preventDefault();
     });
-    document.addEventListener('mouseup', function () { dragging = false; });
+    function stopDragging(e) {
+      if (pointerId === null || (e.pointerId !== undefined && e.pointerId !== pointerId)) return;
+      try { handle.releasePointerCapture(pointerId); } catch (ignored) {}
+      pointerId = null;
+    }
+    handle.addEventListener('pointerup', stopDragging);
+    handle.addEventListener('pointercancel', stopDragging);
+    handle.addEventListener('lostpointercapture', function () { pointerId = null; });
+  }
+
+  var LOCAL_LINKS_MIN_VIEWPORT = 780;
+
+  function buildLocalLinksPanel(mainPanel) {
+    var panel = el('div', { id: 'lgt-local-links-panel', style: 'display:none' });
+    var content = el('div', { class: 'lgt-local-content' });
+    var results = el('div', { class: 'lgt-local-results' }, [
+      el('div', { class: 'lgt-local-empty' }, ['Generate a link to load local developer URLs.'])
+    ]);
+    content.appendChild(results);
+    var onClose = null;
+    var onUnsupported = null;
+    var minBtn = el('span', {
+      class: 'lgt-min', title: 'Minimize', onclick: function () {
+        panel.classList.toggle('lgt-collapsed');
+      }
+    }, ['_']);
+    var closeBtn = el('span', {
+      class: 'lgt-close', title: 'Close', onclick: function () {
+        panel.style.display = 'none';
+        if (onClose) onClose();
+      }
+    }, ['x']);
+    var actions = el('div', { class: 'lgt-header-actions' }, [minBtn, closeBtn]);
+    var title = el('h3', {}, [el('span', {}, ['Local Links']), actions]);
+    panel.appendChild(title);
+    panel.appendChild(content);
+    makeDraggable(panel, title);
+    panel.addEventListener('pointerdown', function () {
+      panel.style.zIndex = '2147483647';
+      mainPanel.style.zIndex = '2147483646';
+    });
+    mainPanel.addEventListener('pointerdown', function () {
+      mainPanel.style.zIndex = '2147483647';
+      panel.style.zIndex = '2147483646';
+    });
+    (document.body || document.documentElement).appendChild(panel);
+
+    function renderLink(label, url) {
+      var block = el('div', { class: 'lgt-local-link' });
+      block.appendChild(el('div', { class: 'lgt-local-label' }, [label]));
+      block.appendChild(el('div', { class: 'lgt-local-url' }, [url]));
+      var buttons = el('div', { class: 'lgt-row' });
+      buttons.appendChild(el('button', {
+        class: 'secondary', onclick: function () { navigator.clipboard.writeText(url); }
+      }, ['Copy']));
+      buttons.appendChild(el('button', {
+        class: 'secondary', onclick: function () { window.open(url, '_blank'); }
+      }, ['Open']));
+      block.appendChild(buttons);
+      return block;
+    }
+
+    function render(entries, brand, environment) {
+      results.innerHTML = '';
+      results.appendChild(el('div', { class: 'lgt-local-meta' }, [
+        (BRAND_LABELS[brand] || brand) + ' / ' + environment
+      ]));
+      if (!entries || !entries.length) {
+        results.appendChild(el('div', { class: 'lgt-local-empty' }, ['No local contexts are available for this selection.']));
+        return;
+      }
+      entries.forEach(function (entry) {
+        var group = el('div', { class: 'lgt-local-group' });
+        group.appendChild(el('div', { class: 'lgt-local-context' }, [entry.id]));
+        if (entry.error) {
+          group.appendChild(el('div', { class: 'lgt-local-error' }, [entry.error]));
+        } else {
+          group.appendChild(renderLink('Local', entry.local));
+          group.appendChild(renderLink('Local MFE', entry.localMfe));
+        }
+        results.appendChild(group);
+      });
+    }
+
+    function dockToMain() {
+      var mainRect = mainPanel.getBoundingClientRect();
+      var gap = 12;
+      panel.style.right = 'auto';
+      panel.style.bottom = 'auto';
+      panel.style.left = Math.max(8, mainRect.left - panel.offsetWidth - gap) + 'px';
+      panel.style.top = Math.max(0, Math.min(window.innerHeight - panel.offsetHeight, mainRect.top)) + 'px';
+    }
+
+    function show() {
+      if (window.innerWidth < LOCAL_LINKS_MIN_VIEWPORT) {
+        panel.style.display = 'none';
+        if (onUnsupported) onUnsupported();
+        return false;
+      }
+      panel.style.display = '';
+      if (panel.dataset.lgtMoved !== '1') dockToMain();
+      return true;
+    }
+
+    function onResize() {
+      if (panel.style.display !== 'none' && window.innerWidth < LOCAL_LINKS_MIN_VIEWPORT) {
+        panel.style.display = 'none';
+        if (onUnsupported) onUnsupported();
+      }
+    }
+    window.addEventListener('resize', onResize);
+
+    return {
+      panel: panel,
+      render: render,
+      show: show,
+      hide: function () { panel.style.display = 'none'; },
+      setTheme: function (mode) { panel.classList.toggle('lgt-theme-light', mode === 'light'); },
+      setOnClose: function (cb) { onClose = cb; },
+      setOnUnsupported: function (cb) { onUnsupported = cb; },
+      destroy: function () {
+        window.removeEventListener('resize', onResize);
+        if (panel.parentNode) panel.parentNode.removeChild(panel);
+      }
+    };
   }
 
   var PANEL_OPEN_KEY = 'lgt-panel-open';
@@ -1765,10 +1953,10 @@
       // Colors are CSS custom properties so the dark/light toggle below
       // can just switch a class on #lgt-panel instead of needing two
       // separate copies of every rule.
-      '#lgt-panel{--lgt-bg:#101320;--lgt-fg:#f6f7fb;--lgt-tab-bg:#1c2233;--lgt-accent:#ff6600;',
+      '#lgt-panel,#lgt-local-links-panel{--lgt-bg:#101320;--lgt-fg:#f6f7fb;--lgt-tab-bg:#1c2233;--lgt-accent:#ff6600;',
       '--lgt-accent-fg:#101320;--lgt-muted:#9aa3b8;--lgt-input-bg:#1c2233;--lgt-input-border:#2b3350;',
       '--lgt-secondary-bg:#2b3350;}',
-      '#lgt-panel.lgt-theme-light{--lgt-bg:#f4f5f9;--lgt-fg:#1b1f2b;--lgt-tab-bg:#e4e7f0;--lgt-accent:#ff6600;',
+      '#lgt-panel.lgt-theme-light,#lgt-local-links-panel.lgt-theme-light{--lgt-bg:#f4f5f9;--lgt-fg:#1b1f2b;--lgt-tab-bg:#e4e7f0;--lgt-accent:#ff6600;',
       '--lgt-accent-fg:#ffffff;--lgt-muted:#5a6178;--lgt-input-bg:#ffffff;--lgt-input-border:#c7cce0;',
       '--lgt-secondary-bg:#dde1ee;}',
       '#lgt-panel{position:fixed;top:20px;right:20px;width:360px;max-height:88vh;overflow:auto;',
@@ -1842,11 +2030,30 @@
       '#lgt-panel .lgt-build-badge.unclassified{background:#555;color:#fff}',
       '#lgt-panel .lgt-build-strip button{width:auto;margin:0;padding:3px 8px;font-size:10px;flex:none}',
       '#lgt-panel .lgt-build-strip .lgt-build-actions{display:flex;gap:6px;flex:none}',
-      '#lgt-panel .lgt-build-detail{margin-top:2px;font-size:10px;color:var(--lgt-muted);white-space:pre-wrap;width:100%}'
+      '#lgt-panel .lgt-build-detail{margin-top:2px;font-size:10px;color:var(--lgt-muted);white-space:pre-wrap;width:100%}',
+      '#lgt-local-links-panel{position:fixed;width:360px;max-height:88vh;overflow:auto;background:var(--lgt-bg);color:var(--lgt-fg);',
+      'font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;border-radius:10px;',
+      'box-shadow:0 8px 30px rgba(0,0,0,.4);z-index:2147483646;padding:14px;box-sizing:border-box}',
+      '#lgt-local-links-panel h3{margin:0 0 8px;font-size:15px;display:flex;justify-content:space-between;align-items:center}',
+      '#lgt-local-links-panel .lgt-header-actions{display:flex;align-items:center;gap:10px;flex:none}',
+      '#lgt-local-links-panel .lgt-close,#lgt-local-links-panel .lgt-min{cursor:pointer;color:var(--lgt-muted)}',
+      '#lgt-local-links-panel .lgt-min{font-weight:700}',
+      '#lgt-local-links-panel.lgt-collapsed .lgt-local-content{display:none}',
+      '#lgt-local-links-panel.lgt-collapsed h3{margin-bottom:0}',
+      '#lgt-local-links-panel .lgt-local-meta{font-size:11px;color:var(--lgt-muted);margin-bottom:8px}',
+      '#lgt-local-links-panel .lgt-local-group{background:var(--lgt-tab-bg);border-radius:6px;padding:8px;margin-top:8px}',
+      '#lgt-local-links-panel .lgt-local-context{font-weight:700;margin-bottom:5px}',
+      '#lgt-local-links-panel .lgt-local-label{font-size:10px;color:var(--lgt-muted);margin-top:6px;text-transform:uppercase}',
+      '#lgt-local-links-panel .lgt-local-url{font-size:11px;word-break:break-all}',
+      '#lgt-local-links-panel .lgt-local-empty,#lgt-local-links-panel .lgt-local-error{font-size:11px;color:var(--lgt-muted)}',
+      '#lgt-local-links-panel .lgt-row{display:flex;gap:8px}',
+      '#lgt-local-links-panel button{flex:1;margin-top:6px;padding:6px;border:none;border-radius:6px;',
+      'background:var(--lgt-secondary-bg);color:var(--lgt-fg);font-weight:600;cursor:pointer}'
     ].join('');
     document.head.appendChild(style);
 
     var panel = el('div', { id: 'lgt-panel', style: 'display:none' });
+    var localLinksPanel = buildLocalLinksPanel(panel);
     var titleText = el('span', {}, ['Link Gen Tool ', el('span', { style: 'opacity:.5;font-weight:400;font-size:10px' }, [VERSION])]);
     var themeBtn = el('span', {
       class: 'lgt-theme-toggle', title: 'Toggle dark/light mode',
@@ -1860,6 +2067,7 @@
     }, ['\u25D1']);
     function applyTheme(mode) {
       panel.classList.toggle('lgt-theme-light', mode === 'light');
+      localLinksPanel.setTheme(mode);
       themeBtn.textContent = mode === 'light' ? '\u25D0' : '\u25D1';
     }
     chrome.storage.local.get([THEME_KEY], function (res) {
@@ -1890,7 +2098,7 @@
     var tabG = el('div', { class: 'lgt-tab' }, ['Bet Void']);
     tabs.appendChild(tabA); tabs.appendChild(tabB); tabs.appendChild(tabC); tabs.appendChild(tabD); tabs.appendChild(tabE); tabs.appendChild(tabF); tabs.appendChild(tabG);
 
-    var bodyA = buildModeA();
+    var bodyA = buildModeA(localLinksPanel);
     var bodyB = buildModeB();
     var bodyC = buildModeC();
     var bodyD = buildModeD();
@@ -1947,6 +2155,7 @@
     panel.__lgtSwitchToLiveLogin = function () { tabB.click(); };
     panel.__lgtSwitchToCredentials = function () { tabC.click(); };
     panel.__lgtAutoLoginBtn = bodyB.__lgtAutoLoginBtn;
+    panel.__lgtLocalLinksPanel = localLinksPanel;
     panel.__lgtShow = function () {
       panel.style.display = '';
       try { sessionStorage.setItem(PANEL_OPEN_KEY, '1'); } catch (e) {}
@@ -1997,7 +2206,7 @@
     });
   }
 
-  function buildModeA() {
+  function buildModeA(localLinksPanel) {
     var wrap = el('div', {});
     var brandSel = el('select', {}, brandOptions());
     var envSel = el('select', {}, ENV_LABELS.map(function (e) { return el('option', { value: e }, [e]); }));
@@ -2005,6 +2214,8 @@
     var bleChk = el('input', { type: 'checkbox' });
     var forceFreshChk = el('input', { type: 'checkbox' });
     var forceVisibleChk = el('input', { type: 'checkbox' });
+    var localLinksChk = el('input', { type: 'checkbox' });
+    var localLinksHint = el('div', { class: 'lgt-log', style: 'display:none' });
     var result = el('div', { class: 'lgt-result', style: 'display:none' });
     var log = el('div', { class: 'lgt-log' });
     // Items 2/3/12: inline area used only while resolving which saved
@@ -2012,6 +2223,24 @@
     // whenever nothing needs the user's input (single/no-choice cases
     // resolve silently without ever showing this).
     var credResolveArea = el('div', { class: 'lgt-cred-resolve', style: 'display:none' });
+
+    function showLocalLinksUnsupported() {
+      localLinksChk.checked = false;
+      localLinksHint.style.display = '';
+      localLinksHint.textContent = 'Local Links: only in desktop viewport.';
+    }
+    localLinksPanel.setOnUnsupported(showLocalLinksUnsupported);
+    localLinksPanel.setOnClose(function () {
+      localLinksChk.checked = false;
+    });
+    localLinksChk.addEventListener('change', function () {
+      localLinksHint.style.display = 'none';
+      if (localLinksChk.checked) {
+        if (!localLinksPanel.show()) showLocalLinksUnsupported();
+      } else {
+        localLinksPanel.hide();
+      }
+    });
 
     // 2026-08-07: three fixed, persistent row containers inside `result`
     // (instead of wiping+rebuilding `result.innerHTML` on every click) so
@@ -2189,6 +2418,8 @@
           setRowContainer(desktopRowContainer, 'Desktop', links.desktop, brand, environment);
           setRowContainer(mobileRowContainer, 'Mobile', links.mobile, brand, environment);
           setRowContainer(brandRowContainer, 'Brand page', realBrandOrigin(brand, environment), brand, environment);
+          localLinksPanel.render(links.localLinks, brand, environment);
+          if (localLinksChk.checked) localLinksPanel.show();
           setBtnBusy(false);
         }
 
@@ -2230,6 +2461,8 @@
               setRowContainer(mobileRowContainer, 'Mobile (live-login' + suffix + ')', m, brand, environment);
             }
             setRowContainer(brandRowContainer, 'Brand page', realBrandOrigin(brand, environment), brand, environment);
+            localLinksPanel.render(links.localLinks, brand, environment);
+            if (localLinksChk.checked) localLinksPanel.show();
             if (bleSourceWanted) {
               log.textContent += ' (BLE source applied: logged in for real on prod - prod always serves live BLE events - rendered on the ' + environment + ' frontend with bleSource=1.)';
             }
@@ -2626,6 +2859,8 @@
       (function () { var d = el('div', {}); d.appendChild(el('label', {}, ['Login state'])); d.appendChild(loginSel); d.appendChild(credBadge); return d; })()
     ]));
     wrap.appendChild(customerWrap);
+    wrap.appendChild(el('label', { class: 'lgt-checkbox-row' }, [localLinksChk, ' Local links']));
+    wrap.appendChild(localLinksHint);
     var bleWrap = el('label', { class: 'lgt-checkbox-row' }, [bleChk, ' BLE source (fresh live events on test/qa)']);
     wrap.appendChild(bleWrap);
     var forceFreshWrap = el('label', { class: 'lgt-checkbox-row' }, [forceFreshChk, ' Force fresh live-login (skip 30-min cache; logged-in only, when no test customer exists)']);
@@ -4015,6 +4250,7 @@
 
   window.__lgtExtInstance = {
     destroy: function () {
+      if (panelEl && panelEl.__lgtLocalLinksPanel) panelEl.__lgtLocalLinksPanel.destroy();
       if (panelEl && panelEl.parentNode) panelEl.parentNode.removeChild(panelEl);
       var oldStyle = document.getElementById('lgt-panel-style');
       if (oldStyle && oldStyle.parentNode) oldStyle.parentNode.removeChild(oldStyle);

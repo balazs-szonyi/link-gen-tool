@@ -14,7 +14,12 @@ brand page you're already logged into — no CLI, no headless automation.
   directly (those endpoints have open CORS). `betsson.co` is exposed as a
   separate market alias: it shares Betsson's brand GUID but automatically
   sends the Colombia segment ID, avoiding the generic MGA/RestOfWorld
-  context returned when no segment is supplied.
+  context returned when no segment is supplied. Enable **Local links** to
+  open a separate panel docked to the left of the main tool with every named
+  local developer URL and Local MFE URL returned for the selected brand.
+  That panel can be minimized, closed, or dragged independently. It is
+  desktop-only; narrower/mobile viewports show `only in desktop viewport`
+  instead of opening a second panel.
 - **Oddin Statistics fix** (Chrome extension only, enabled by default):
   allows the known Firestorm Oddin statistics iframe to render on the generic
   `d-cf`/`m-cf` TEST and QA `sbplayground1.net` hosts. It changes only the
@@ -594,6 +599,11 @@ running.
   brand's domain manually.
 
 ## Known limitations (Chrome extension)
+
+The main panel and the Local Links panel use Pointer Events with pointer
+capture, so both mouse and emulated/mobile touch pointers can drag them by
+their title bars. This replaces the previous mouse-only drag handling, which
+could not grab the tool while Chrome was emulating a touch viewport.
 
 ### Experimental Cross-Layer runtime (v1.20.6)
 

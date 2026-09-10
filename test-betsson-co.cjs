@@ -78,10 +78,16 @@ async function testExtension() {
     const requestUrl = new URL(request.url());
     assert.strictEqual(requestUrl.searchParams.get('brand'), '6a6d80b9-16ac-4387-a413-244d93a74deb');
     assert.strictEqual(requestUrl.searchParams.get('segmentId'), COLOMBIA_SEGMENT_ID);
+    const responseBody = await (await request.response()).json();
+    const namedDesktop = responseBody.data.context['Betsson.co Desktop'].customerContext;
+    const namedMobile = responseBody.data.context['Betsson.co Mobile'].customerContext;
 
     const result = panel.locator('.lgt-result').first();
     await result.getByText(/d-cf\.test\.btsplayground\.net/i).first().waitFor({ timeout: 60000 });
-    assert.match((await result.textContent()) || '', /d-cf\.test\.btsplayground\.net/i);
+    const resultText = (await result.textContent()) || '';
+    assert.match(resultText, /d-cf\.test\.btsplayground\.net/i);
+    assert(resultText.includes('/' + namedDesktop.staticContextId + '/' + namedDesktop.userContextId + '/'));
+    assert(resultText.includes('/' + namedMobile.staticContextId + '/' + namedMobile.userContextId + '/'));
 
     await page.goto('https://www.test.betsson.com/', { waitUntil: 'domcontentloaded', timeout: 60000 });
     await page.waitForTimeout(1000);
@@ -125,9 +131,17 @@ async function testBookmarklet() {
     }, { timeout: 60000 });
 
     await panel.getByRole('button', { name: 'Generate', exact: true }).click();
-    const requestUrl = new URL((await contextRequest).url());
+    const request = await contextRequest;
+    const requestUrl = new URL(request.url());
     assert.strictEqual(requestUrl.searchParams.get('segmentId'), COLOMBIA_SEGMENT_ID);
-    await panel.locator('.lgt-result').getByText(/d-cf\.test\.btsplayground\.net/i).first().waitFor({ timeout: 60000 });
+    const responseBody = await (await request.response()).json();
+    const namedDesktop = responseBody.data.context['Betsson.co Desktop'].customerContext;
+    const namedMobile = responseBody.data.context['Betsson.co Mobile'].customerContext;
+    const result = panel.locator('.lgt-result').first();
+    await result.getByText(/d-cf\.test\.btsplayground\.net/i).first().waitFor({ timeout: 60000 });
+    const resultText = (await result.textContent()) || '';
+    assert(resultText.includes('/' + namedDesktop.staticContextId + '/' + namedDesktop.userContextId + '/'));
+    assert(resultText.includes('/' + namedMobile.staticContextId + '/' + namedMobile.userContextId + '/'));
 
     await page.goto('https://www.test.betsson.com/', { waitUntil: 'domcontentloaded', timeout: 60000 });
     await page.addScriptTag({ path: BOOKMARKLET_PATH });
