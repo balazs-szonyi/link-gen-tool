@@ -385,6 +385,49 @@ function setupMobileEmulation(tabId, url) {
   });
 }
 
+// Tracks, per job (background/login/passive-capture) tab id, which tab &
+// window originally started it - i.e. the tab hosting the Generate panel
+// itself. Needed so lgt-close-tab can reliably jump focus back to THAT
+// tab once the job finishes, instead of relying on Chrome's own "which
+// tab becomes active when this one closes" heuristic - confirmed
+// 2026-09-10 that heuristic is not the origin tab whenever the origin
+// tab isn't also the most-recently-opened one (e.g. the user had several
+// tabs open and the Generate tab wasn't the last one focused before the
+// job's tab was created) - Chrome then reactivates whatever tab it thinks
+// is next in its own MRU/index order, not the actual opener. Persisted in
+// chrome.storage.local (not a plain in-memory map) for the same reason
+// captured header state is - an MV3 service worker can be
+// terminated/restarted mid-flight, which would otherwise silently drop
+// the mapping.
+var JOB_ORIGIN_MAP_KEY = 'lgt-job-origin-map';
+
+function rememberJobOrigin(jobTabId, originTabId, originWindowId, cb) {
+  if (jobTabId == null || originTabId == null) { if (cb) cb(); return; }
+  chrome.storage.local.get([JOB_ORIGIN_MAP_KEY], function (res) {
+    var map = (res && res[JOB_ORIGIN_MAP_KEY]) || {};
+    map[jobTabId] = { tabId: originTabId, windowId: originWindowId };
+    var obj = {};
+    obj[JOB_ORIGIN_MAP_KEY] = map;
+    chrome.storage.local.set(obj, function () { if (cb) cb(); });
+  });
+}
+
+// Reads back and removes (one-shot) the origin entry for a job tab.
+function takeJobOrigin(jobTabId, cb) {
+  chrome.storage.local.get([JOB_ORIGIN_MAP_KEY], function (res) {
+    var map = (res && res[JOB_ORIGIN_MAP_KEY]) || {};
+    var entry = map[jobTabId] || null;
+    if (entry) {
+      delete map[jobTabId];
+      var obj = {};
+      obj[JOB_ORIGIN_MAP_KEY] = map;
+      chrome.storage.local.set(obj, function () { cb(entry); });
+    } else {
+      cb(null);
+    }
+  });
+}
+
 // active:false keeps the tab out of the user's way for its whole (short)
 // lifetime; it closes itself via lgt-close-tab once its job settles
 // (success or failure alike - there's no reason to leave an inactive tab
@@ -395,13 +438,26 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   // navigating to the real url; anything else (or omitted) is the
   // existing desktop-shaped behavior, unchanged.
   var wantMobile = msg.device === 'mobile';
+  // Captured here (not later) because `sender` is only meaningful for
+  // THIS message - it identifies the tab that is CURRENTLY sending
+  // lgt-open-tab, i.e. the Generate panel's own tab, before any new job
+  // tab exists to confuse the two.
+  var originTabId = sender.tab && sender.tab.id != null ? sender.tab.id : null;
+  var originWindowId = sender.tab && sender.tab.windowId != null ? sender.tab.windowId : null;
 
   function afterTabCreated(tabId) {
     if (tabId == null) { sendResponse({ ok: false, error: 'tab not created' }); return; }
-    if (!wantMobile) { sendResponse({ ok: true, tabId: tabId }); return; }
+    function respond(response) {
+      if (response.ok) {
+        rememberJobOrigin(tabId, originTabId, originWindowId, function () { sendResponse(response); });
+      } else {
+        sendResponse(response);
+      }
+    }
+    if (!wantMobile) { respond({ ok: true, tabId: tabId }); return; }
     setupMobileEmulation(tabId, msg.url).then(
-      function () { sendResponse({ ok: true, tabId: tabId }); },
-      function (err) { sendResponse({ ok: false, error: 'mobile emulation setup failed: ' + String(err && err.message || err) }); }
+      function () { respond({ ok: true, tabId: tabId }); },
+      function (err) { respond({ ok: false, error: 'mobile emulation setup failed: ' + String(err && err.message || err) }); }
     );
   }
 
@@ -487,9 +543,35 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
 chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   if (!msg || msg.type !== 'lgt-close-tab') return false;
   if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
-  chrome.tabs.remove(sender.tab.id, function () {
-    void chrome.runtime.lastError; // ignore - tab may already be gone
-    sendResponse({ ok: true });
+  var jobTabId = sender.tab.id;
+  // Look up (and forget) the origin tab BEFORE removing the job tab - a
+  // successful capture should hand focus straight back to wherever the
+  // Generate panel actually is, not leave it to whatever tab Chrome's own
+  // "next active tab after this one closes" heuristic happens to pick
+  // (confirmed 2026-09-10: that heuristic is not the origin tab once the
+  // origin tab isn't also the most-recently-focused one beforehand).
+  takeJobOrigin(jobTabId, function (origin) {
+    chrome.tabs.remove(jobTabId, function () {
+      void chrome.runtime.lastError; // ignore - tab may already be gone
+      if (!origin || origin.tabId == null) { sendResponse({ ok: true }); return; }
+      chrome.tabs.update(origin.tabId, { active: true }, function () {
+        void chrome.runtime.lastError; // ignore - e.g. origin tab was itself closed meanwhile
+        if (origin.windowId == null) { sendResponse({ ok: true }); return; }
+        // Only force state to 'normal' if the origin window is actually
+        // minimized - unlike the job tab's window (which the silent path
+        // always creates minimized), the origin window is the user's own
+        // regular window and may legitimately be maximized; unconditionally
+        // setting state:'normal' here would incorrectly un-maximize it.
+        chrome.windows.get(origin.windowId, function (win) {
+          var updateProps = { focused: true };
+          if (!chrome.runtime.lastError && win && win.state === 'minimized') updateProps.state = 'normal';
+          chrome.windows.update(origin.windowId, updateProps, function () {
+            void chrome.runtime.lastError;
+            sendResponse({ ok: true });
+          });
+        });
+      });
+    });
   });
   return true;
 });
@@ -710,6 +792,13 @@ chrome.tabs.onRemoved.addListener(function (tabId) {
   delete runtimeMarkersByTab[tabId];
   delete networkByTab[tabId];
   delete frameDocByTab[tabId];
+  // Safety net for the job-origin map (see lgt-open-tab/lgt-close-tab
+  // above): a job whose tab is closed by the USER (manually, e.g. a failed
+  // login left visible via lgt-focus-tab) rather than via lgt-close-tab
+  // never gets its own map entry cleaned up otherwise - it would just sit
+  // there forever as harmless but unbounded storage growth across many
+  // sessions.
+  takeJobOrigin(tabId, function () {});
 });
 chrome.tabs.onUpdated.addListener(function (tabId, changeInfo) {
   if (changeInfo.status === 'loading' && embedRuleIdByTab[tabId]) stopEmbedRule(tabId);
