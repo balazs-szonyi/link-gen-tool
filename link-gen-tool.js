@@ -37,7 +37,7 @@
   // bookmarklet on a page that already has a panel now always tears down
   // the old instance and rebuilds from the freshly-fetched script, instead
   // of just toggling stale, already-executed code back into view).
-  var VERSION = 'v15-2026-09-10';
+  var VERSION = 'v16-2026-09-10';
   console.log('[link-gen-tool] loaded ' + VERSION);
 
   // document.currentScript is only reliable synchronously during this
@@ -103,6 +103,16 @@
 
   var BRAND_LABELS = {
     betssonco: 'betsson.co'
+  };
+
+  // A market alias can share the parent brand's local developer hostname
+  // while selecting a named device context from the user-context response.
+  var BRAND_LOCAL_KEYS = {
+    betssonco: 'betsson'
+  };
+
+  var BRAND_CONTEXT_PREFIXES = {
+    betssonco: 'Betsson.co'
   };
 
   // brand key -> real customer-facing domain, used for hostname auto-detection
@@ -348,9 +358,23 @@
   }
 
   function buildLinksFromContext(resp, opts) {
+    var contexts = ((resp.data || {}).context || {});
+
+    function contextFor(device) {
+      var prefix = BRAND_CONTEXT_PREFIXES[opts.brand];
+      if (prefix) {
+        var wanted = (prefix + ' ' + device).toLowerCase();
+        var namedKey = Object.keys(contexts).filter(function (key) {
+          return key.toLowerCase() === wanted;
+        })[0];
+        if (namedKey) return contexts[namedKey];
+      }
+      return contexts[device] || {};
+    }
+
     function buildFor(device) {
       var userNode = ((resp.data || {}).user || {})[device] || {};
-      var ctxNode = ((resp.data || {}).context || {})[device] || {};
+      var ctxNode = contextFor(device);
       var base = (userNode.iFrameSetup || {}).overrideIFrameBaseUrlWith;
       if (!base) base = (ctxNode.iFrameHelper || {}).baseUri;
       var stc = (ctxNode.customerContext || {}).staticContextId;
@@ -364,7 +388,39 @@
       return base + '/' + stc + '/' + ctx + '/?exposeObgState=true&exposeObgRt=true&sealStore=false';
     }
 
-    return { desktop: buildFor('desktop'), mobile: buildFor('mobile') };
+    return {
+      desktop: buildFor('desktop'),
+      mobile: buildFor('mobile'),
+      localLinks: buildLocalLinksFromContext(resp, opts)
+    };
+  }
+
+  function buildLocalLinksFromContext(resp, opts) {
+    var contexts = ((resp.data || {}).context || {});
+    var prefix = BRAND_CONTEXT_PREFIXES[opts.brand];
+    var keys = Object.keys(contexts).filter(function (key) {
+      var normalized = key.toLowerCase();
+      if (normalized === 'desktop' || normalized === 'mobile') return false;
+      return !prefix || normalized.indexOf(prefix.toLowerCase()) === 0;
+    });
+    var localBrand = BRAND_LOCAL_KEYS[opts.brand] || opts.brand;
+    return keys.map(function (key) {
+      var node = contexts[key] || {};
+      if (node.responseCode !== 100) {
+        return { id: key, error: (node.responseNotes || []).join(' - ') || 'Context unavailable' };
+      }
+      var customer = node.customerContext || {};
+      var stc = customer.staticContextId;
+      var ctx = customer.userContextId;
+      if (!stc || !ctx) return { id: key, error: 'Context identifiers unavailable' };
+      var port = key.toLowerCase().indexOf('desktop') !== -1 ? '4200' : '8085';
+      var origin = 'http://' + opts.environment + '.' + localBrand + '.local:' + port;
+      return {
+        id: key,
+        local: origin + '/' + stc + '/' + ctx,
+        localMfe: origin + '?staticContext=' + encodeURIComponent(stc) + '&userContext=' + encodeURIComponent(ctx)
+      };
+    });
   }
 
   // Splice a captured (stc, ctx) pair into a freshly generated logged-out
@@ -878,6 +934,141 @@
     return node;
   }
 
+  function makeDraggable(panel, handle) {
+    var pointerId = null, offsetX = 0, offsetY = 0;
+    handle.style.cursor = 'move';
+    handle.style.touchAction = 'none';
+    handle.style.userSelect = 'none';
+    handle.addEventListener('pointerdown', function (e) {
+      if (e.target.closest && e.target.closest('.lgt-header-actions')) return;
+      if (e.button !== undefined && e.button !== 0) return;
+      pointerId = e.pointerId;
+      var rect = panel.getBoundingClientRect();
+      panel.style.left = rect.left + 'px';
+      panel.style.top = rect.top + 'px';
+      panel.style.right = 'auto';
+      panel.style.bottom = 'auto';
+      panel.dataset.lgtMoved = '1';
+      offsetX = e.clientX - rect.left;
+      offsetY = e.clientY - rect.top;
+      try { handle.setPointerCapture(pointerId); } catch (ignored) {}
+      e.preventDefault();
+    });
+    handle.addEventListener('pointermove', function (e) {
+      if (pointerId === null || e.pointerId !== pointerId) return;
+      panel.style.left = Math.max(0, Math.min(window.innerWidth - panel.offsetWidth, e.clientX - offsetX)) + 'px';
+      panel.style.top = Math.max(0, Math.min(window.innerHeight - panel.offsetHeight, e.clientY - offsetY)) + 'px';
+      e.preventDefault();
+    });
+    function stopDragging(e) {
+      if (pointerId === null || (e.pointerId !== undefined && e.pointerId !== pointerId)) return;
+      try { handle.releasePointerCapture(pointerId); } catch (ignored) {}
+      pointerId = null;
+    }
+    handle.addEventListener('pointerup', stopDragging);
+    handle.addEventListener('pointercancel', stopDragging);
+    handle.addEventListener('lostpointercapture', function () { pointerId = null; });
+  }
+
+  var LOCAL_LINKS_MIN_VIEWPORT = 780;
+
+  function buildLocalLinksPanel(mainPanel) {
+    var panel = el('div', { id: 'lgt-local-links-panel', style: 'display:none' });
+    var content = el('div', { class: 'lgt-local-content' });
+    var results = el('div', {}, [el('div', { class: 'lgt-local-empty' }, ['Generate a link to load local developer URLs.'])]);
+    content.appendChild(results);
+    var onClose = null, onUnsupported = null;
+    var minBtn = el('span', { class: 'lgt-min', title: 'Minimize', onclick: function () {
+      panel.classList.toggle('lgt-collapsed');
+    } }, ['_']);
+    var closeBtn = el('span', { class: 'lgt-close', title: 'Close', onclick: function () {
+      panel.style.display = 'none';
+      if (onClose) onClose();
+    } }, ['x']);
+    var title = el('h3', {}, [
+      el('span', {}, ['Local Links']),
+      el('div', { class: 'lgt-header-actions' }, [minBtn, closeBtn])
+    ]);
+    panel.appendChild(title);
+    panel.appendChild(content);
+    makeDraggable(panel, title);
+    panel.addEventListener('pointerdown', function () {
+      panel.style.zIndex = '2147483647';
+      mainPanel.style.zIndex = '2147483646';
+    });
+    mainPanel.addEventListener('pointerdown', function () {
+      mainPanel.style.zIndex = '2147483647';
+      panel.style.zIndex = '2147483646';
+    });
+    (document.body || document.documentElement).appendChild(panel);
+
+    function renderLink(label, url) {
+      var block = el('div', { class: 'lgt-local-link' });
+      block.appendChild(el('div', { class: 'lgt-local-label' }, [label]));
+      block.appendChild(el('div', { class: 'lgt-local-url' }, [url]));
+      var buttons = el('div', { class: 'lgt-row' });
+      buttons.appendChild(el('button', { class: 'secondary', onclick: function () { navigator.clipboard.writeText(url); } }, ['Copy']));
+      buttons.appendChild(el('button', { class: 'secondary', onclick: function () { window.open(url, '_blank'); } }, ['Open']));
+      block.appendChild(buttons);
+      return block;
+    }
+
+    function render(entries, brand, environment) {
+      results.innerHTML = '';
+      results.appendChild(el('div', { class: 'lgt-local-meta' }, [(BRAND_LABELS[brand] || brand) + ' / ' + environment]));
+      if (!entries || !entries.length) {
+        results.appendChild(el('div', { class: 'lgt-local-empty' }, ['No local contexts are available for this selection.']));
+        return;
+      }
+      entries.forEach(function (entry) {
+        var group = el('div', { class: 'lgt-local-group' });
+        group.appendChild(el('div', { class: 'lgt-local-context' }, [entry.id]));
+        if (entry.error) group.appendChild(el('div', { class: 'lgt-local-error' }, [entry.error]));
+        else {
+          group.appendChild(renderLink('Local', entry.local));
+          group.appendChild(renderLink('Local MFE', entry.localMfe));
+        }
+        results.appendChild(group);
+      });
+    }
+
+    function show() {
+      if (window.innerWidth < LOCAL_LINKS_MIN_VIEWPORT) {
+        panel.style.display = 'none';
+        if (onUnsupported) onUnsupported();
+        return false;
+      }
+      panel.style.display = '';
+      if (panel.dataset.lgtMoved !== '1') {
+        var mainRect = mainPanel.getBoundingClientRect();
+        panel.style.left = Math.max(8, mainRect.left - panel.offsetWidth - 12) + 'px';
+        panel.style.top = Math.max(0, Math.min(window.innerHeight - panel.offsetHeight, mainRect.top)) + 'px';
+        panel.style.right = 'auto';
+      }
+      return true;
+    }
+
+    function onResize() {
+      if (panel.style.display !== 'none' && window.innerWidth < LOCAL_LINKS_MIN_VIEWPORT) {
+        panel.style.display = 'none';
+        if (onUnsupported) onUnsupported();
+      }
+    }
+    window.addEventListener('resize', onResize);
+    return {
+      panel: panel,
+      render: render,
+      show: show,
+      hide: function () { panel.style.display = 'none'; },
+      setOnClose: function (cb) { onClose = cb; },
+      setOnUnsupported: function (cb) { onUnsupported = cb; },
+      destroy: function () {
+        window.removeEventListener('resize', onResize);
+        if (panel.parentNode) panel.parentNode.removeChild(panel);
+      }
+    };
+  }
+
   function buildPanel() {
     var style = document.createElement('style');
     style.id = 'lgt-panel-style';
@@ -891,29 +1082,47 @@
       '#lgt-panel .lgt-tab.active{background:#ff6600;color:#101320;font-weight:600}',
       '#lgt-panel label{display:block;margin:8px 0 3px;color:#9aa3b8;font-size:11px;text-transform:uppercase}',
       '#lgt-panel select,#lgt-panel input{width:100%;box-sizing:border-box;padding:6px;border-radius:5px;border:1px solid #2b3350;background:#1c2233;color:#f6f7fb}',
+      '#lgt-panel input[type=checkbox]{width:auto;flex:0 0 auto;margin:0;accent-color:#ff6600}',
       '#lgt-panel button{margin-top:10px;width:100%;padding:8px;border:none;border-radius:6px;background:#ff6600;color:#101320;font-weight:600;cursor:pointer}',
       '#lgt-panel button.secondary{background:#2b3350;color:#f6f7fb;margin-top:6px}',
       '#lgt-panel .lgt-row{display:flex;gap:8px}',
       '#lgt-panel .lgt-row > *{flex:1}',
       '#lgt-panel .lgt-result{margin-top:10px;background:#1c2233;border-radius:6px;padding:8px;word-break:break-all;font-size:11px}',
       '#lgt-panel .lgt-log{margin-top:8px;font-size:11px;color:#9aa3b8;white-space:pre-wrap}',
-      '#lgt-panel .lgt-close{cursor:pointer;color:#9aa3b8}',
+      '#lgt-panel .lgt-close,#lgt-panel .lgt-min{cursor:pointer;color:#9aa3b8}',
       '#lgt-panel .lgt-cred{display:flex;justify-content:space-between;align-items:center;background:#1c2233;padding:6px;border-radius:5px;margin-top:6px}',
       '#lgt-panel .lgt-cred.default{border:1px solid #ff6600}',
-      '#lgt-panel .lgt-cred button{width:auto;margin:0;padding:3px 8px;font-size:11px}'
+      '#lgt-panel .lgt-cred button{width:auto;margin:0;padding:3px 8px;font-size:11px}',
+      '#lgt-local-links-panel{position:fixed;width:360px;max-height:88vh;overflow:auto;background:#101320;color:#f6f7fb;',
+      'font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;border-radius:10px;',
+      'box-shadow:0 8px 30px rgba(0,0,0,.4);z-index:2147483646;padding:14px;box-sizing:border-box}',
+      '#lgt-local-links-panel h3{margin:0 0 8px;font-size:15px;display:flex;justify-content:space-between;align-items:center}',
+      '#lgt-local-links-panel .lgt-header-actions{display:flex;align-items:center;gap:10px}',
+      '#lgt-local-links-panel .lgt-close,#lgt-local-links-panel .lgt-min{cursor:pointer;color:#9aa3b8}',
+      '#lgt-local-links-panel.lgt-collapsed .lgt-local-content{display:none}',
+      '#lgt-local-links-panel.lgt-collapsed h3{margin-bottom:0}',
+      '#lgt-local-links-panel .lgt-local-meta,#lgt-local-links-panel .lgt-local-empty,#lgt-local-links-panel .lgt-local-error{font-size:11px;color:#9aa3b8}',
+      '#lgt-local-links-panel .lgt-local-group{background:#1c2233;border-radius:6px;padding:8px;margin-top:8px}',
+      '#lgt-local-links-panel .lgt-local-context{font-weight:700;margin-bottom:5px}',
+      '#lgt-local-links-panel .lgt-local-label{font-size:10px;color:#9aa3b8;margin-top:6px;text-transform:uppercase}',
+      '#lgt-local-links-panel .lgt-local-url{font-size:11px;word-break:break-all}',
+      '#lgt-local-links-panel .lgt-row{display:flex;gap:8px}',
+      '#lgt-local-links-panel button{flex:1;margin-top:6px;padding:6px;border:none;border-radius:6px;background:#2b3350;color:#f6f7fb;font-weight:600;cursor:pointer}'
     ].join('');
     document.head.appendChild(style);
 
     var panel = el('div', { id: 'lgt-panel' });
+    var localLinksPanel = buildLocalLinksPanel(panel);
     var titleText = el('span', {}, ['Link Gen Tool ', el('span', { style: 'opacity:.5;font-weight:400;font-size:10px' }, [VERSION])]);
-    var title = el('h3', {}, [titleText, el('span', { class: 'lgt-close', onclick: function () { panel.style.display = 'none'; } }, ['x'])]);
+    var title = el('h3', {}, [titleText, el('div', { class: 'lgt-header-actions' }, [el('span', { class: 'lgt-close', onclick: function () { panel.style.display = 'none'; } }, ['x'])])]);
+    makeDraggable(panel, title);
     var tabs = el('div', { class: 'lgt-tabs' });
     var tabA = el('div', { class: 'lgt-tab active' }, ['Generate']);
     var tabB = el('div', { class: 'lgt-tab' }, ['Live Login']);
     var tabC = el('div', { class: 'lgt-tab' }, ['Credentials']);
     tabs.appendChild(tabA); tabs.appendChild(tabB); tabs.appendChild(tabC);
 
-    var bodyA = buildModeA();
+    var bodyA = buildModeA(localLinksPanel);
     var bodyB = buildModeB();
     var bodyC = buildModeC();
     bodyB.style.display = 'none';
@@ -942,6 +1151,7 @@
     // Exposed for bootstrap's auto-login-resume-after-navigation handling.
     panel.__lgtSwitchToLiveLogin = function () { tabB.click(); };
     panel.__lgtAutoLoginBtn = bodyB.__lgtAutoLoginBtn;
+    panel.__lgtLocalLinksPanel = localLinksPanel;
     return panel;
   }
 
@@ -951,15 +1161,31 @@
     });
   }
 
-  function buildModeA() {
+  function buildModeA(localLinksPanel) {
     var wrap = el('div', {});
     var brandSel = el('select', {}, brandOptions());
     var envSel = el('select', {}, ENV_LABELS.map(function (e) { return el('option', { value: e }, [e]); }));
     var loginSel = el('select', {}, [el('option', { value: 'out' }, ['logged-out']), el('option', { value: 'in' }, ['logged-in'])]);
     var bleChk = el('input', { type: 'checkbox' });
+    var localLinksChk = el('input', { type: 'checkbox' });
+    var localLinksHint = el('div', { class: 'lgt-log', style: 'display:none' });
     var filterInput = el('input', { type: 'text', placeholder: 'e.g. turkey, restofworld' });
     var result = el('div', { class: 'lgt-result', style: 'display:none' });
     var log = el('div', { class: 'lgt-log' });
+
+    function showUnsupported() {
+      localLinksChk.checked = false;
+      localLinksHint.style.display = '';
+      localLinksHint.textContent = 'Local Links: only in desktop viewport.';
+    }
+    localLinksPanel.setOnUnsupported(showUnsupported);
+    localLinksPanel.setOnClose(function () { localLinksChk.checked = false; });
+    localLinksChk.addEventListener('change', function () {
+      localLinksHint.style.display = 'none';
+      if (localLinksChk.checked) {
+        if (!localLinksPanel.show()) showUnsupported();
+      } else localLinksPanel.hide();
+    });
 
     var btn = el('button', {
       onclick: function () {
@@ -973,6 +1199,8 @@
           bleSource: bleChk.checked
         }).then(function (links) {
           log.textContent = 'Customer: ' + links.customerLabel;
+          localLinksPanel.render(links.localLinks, brandSel.value, envSel.value);
+          if (localLinksChk.checked) localLinksPanel.show();
           result.style.display = '';
           result.innerHTML = '';
           result.appendChild(renderLinkRow('Desktop', links.desktop));
@@ -991,6 +1219,8 @@
     ]));
     wrap.appendChild(el('label', {}, ['Customer key filter (optional)']));
     wrap.appendChild(filterInput);
+    wrap.appendChild(el('label', { style: 'display:flex;align-items:center;gap:6px;text-transform:none;margin-top:8px' }, [localLinksChk, ' Local links']));
+    wrap.appendChild(localLinksHint);
     var bleWrap = el('label', { style: 'display:flex;align-items:center;gap:6px;text-transform:none;margin-top:8px' }, [bleChk, ' BLE source (fresh live events on test/qa)']);
     wrap.appendChild(bleWrap);
     wrap.appendChild(btn);
@@ -1261,6 +1491,7 @@
   window.__lgtPanelInstance = {
     toggle: function () { panelEl.style.display = panelEl.style.display === 'none' ? '' : 'none'; },
     destroy: function () {
+      if (panelEl && panelEl.__lgtLocalLinksPanel) panelEl.__lgtLocalLinksPanel.destroy();
       if (panelEl && panelEl.parentNode) panelEl.parentNode.removeChild(panelEl);
       var oldStyle = document.getElementById('lgt-panel-style');
       if (oldStyle && oldStyle.parentNode) oldStyle.parentNode.removeChild(oldStyle);
