@@ -92,7 +92,36 @@ async function main() {
     log('Result row: ' + resultText.replace(/\s+/g, ' '));
     assert.match(resultText, /d-cf\.test\.btsplayground\.net/i);
 
-    console.log('PASS: CO live-capture dropdown option produced a spliced link.');
+    // Extract the captured desktop stc from the main "Desktop (live-login)"
+    // link, then verify the Local Links panel's "Betsson.co Desktop" entry
+    // was updated to the SAME stc (see spliceLocalLinkEntry) - previously
+    // it kept showing the original, stale API-derived context while the
+    // main row above already showed the freshly captured one.
+    const desktopLinkMatch = resultText.match(/https:\/\/d-cf\.test\.btsplayground\.net\/([^/]+)\//);
+    assert(desktopLinkMatch, 'could not extract desktop stc from the main result row');
+    const desktopStc = desktopLinkMatch[1];
+    log('Captured desktop stc: ' + desktopStc);
+
+    const localLinksChk = panel.locator('label').filter({ hasText: /^\s*Local links\s*$/ }).locator('input');
+    if (!(await localLinksChk.isChecked())) await localLinksChk.check();
+    const localPanel = page.locator('#lgt-local-links-panel');
+    await localPanel.waitFor({ state: 'visible', timeout: 10000 });
+
+    const groups = localPanel.locator('.lgt-local-group');
+    const groupCount = await groups.count();
+    let desktopGroupUrl = null;
+    for (let i = 0; i < groupCount; i++) {
+      const title = (await groups.nth(i).locator('.lgt-local-context').textContent()) || '';
+      if (title.trim().toLowerCase() === 'betsson.co desktop') {
+        desktopGroupUrl = (await groups.nth(i).locator('.lgt-local-url').first().textContent()) || '';
+        break;
+      }
+    }
+    assert(desktopGroupUrl, '"Betsson.co Desktop" group not found in the Local Links panel');
+    log('Local Links "Betsson.co Desktop" URL: ' + desktopGroupUrl);
+    assert(desktopGroupUrl.includes(desktopStc), 'Local Links "Betsson.co Desktop" entry does not match the captured desktop stc (' + desktopStc + ') - context mismatch regression!');
+
+    console.log('PASS: CO live-capture dropdown option produced a spliced link, and Local Links matches it.');
   } finally {
     await context.close();
   }

@@ -636,6 +636,35 @@
     return m[1] + stc + '/' + ctx + m[4];
   }
 
+  // Keeps the "Local Links" panel's device-named entries (e.g. betssonco's
+  // "Betsson.co Desktop"/"Betsson.co Mobile", see BRAND_CONTEXT_PREFIXES)
+  // in sync with a live-login/live-capture splice applied to the main
+  // desktop/mobile rows (spliceAndRender below). Without this, those two
+  // named local entries kept showing the ORIGINAL API-derived stc/ctx
+  // (buildLocalLinksFromContext reads directly off the customer-API
+  // response, never the freshly-captured live one) while the main row
+  // right above them already showed the spliced live stc/ctx - a real
+  // context mismatch a user spotted 2026-09-10 comparing the two side by
+  // side. Brands/local-entries with no BRAND_CONTEXT_PREFIXES match (i.e.
+  // no name-based coupling to a specific device link in the first place)
+  // are left completely untouched.
+  function spliceLocalLinkEntry(localLinks, brand, device, stc, ctx) {
+    if (!localLinks || !localLinks.length || !stc || !ctx) return localLinks;
+    var prefix = BRAND_CONTEXT_PREFIXES[brand];
+    if (!prefix) return localLinks;
+    var wantedId = (prefix + ' ' + device).toLowerCase();
+    return localLinks.map(function (entry) {
+      if (!entry || typeof entry.id !== 'string' || entry.id.toLowerCase() !== wantedId || !entry.local) return entry;
+      var m = entry.local.match(/^(https?:\/\/[^/]+)\//);
+      if (!m) return entry;
+      var origin = m[1];
+      return Object.assign({}, entry, {
+        local: origin + '/' + stc + '/' + ctx,
+        localMfe: origin + '?staticContext=' + encodeURIComponent(stc) + '&userContext=' + encodeURIComponent(ctx)
+      });
+    });
+  }
+
   // Mints a fresh, ALPHA-valid BLE customer context from PROD - the exact
   // same source and mechanism the bleSource sandbox-link option already
   // uses (see generateLink's `apiEnv = opts.bleSource ? 'prod' : ...`) -
@@ -2501,6 +2530,12 @@
         function spliceAndRender(stcDesktop, ctxDesktop, stcMobile, ctxMobile, bleSourceWanted) {
           generateLink({ brand: brand, environment: environment, loggedIn: false, customerKeyFilter: '', bleSource: bleSourceWanted }).then(function (links) {
             var suffix = bleSourceWanted ? ' + BLE' : '';
+            // Keep the Local Links panel's matching named entries (see
+            // spliceLocalLinkEntry) showing the SAME context as whatever
+            // just got spliced into the main row below, instead of the
+            // stale API-derived one buildLocalLinksFromContext put there.
+            links.localLinks = spliceLocalLinkEntry(links.localLinks, brand, 'desktop', stcDesktop, ctxDesktop);
+            links.localLinks = spliceLocalLinkEntry(links.localLinks, brand, 'mobile', stcMobile, ctxMobile);
             if (stcDesktop && ctxDesktop) {
               var d = spliceContext(links.desktop, stcDesktop, ctxDesktop);
               setRowContainer(desktopRowContainer, 'Desktop (live-login' + suffix + ')', d, brand, environment);
