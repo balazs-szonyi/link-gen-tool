@@ -119,13 +119,6 @@
     triobet: '36e4a5ae-37b5-435a-85fc-e7e1f537e131'
   };
 
-  // Market-specific aliases that share a parent brand GUID but must send a
-  // segmentId to the playground user-context endpoint. The customer-key
-  // registry alone only identifies the generic Betsson profile.
-  var BRAND_SEGMENTS = {
-    betssonco: '1a68008c-4da6-4f77-acbc-0614cb030d7d'
-  };
-
   var BRAND_LABELS = {
     betssonco: 'betsson.co'
   };
@@ -135,6 +128,7 @@
   };
 
   var BRAND_CONTEXT_PREFIXES = {
+    betsson: 'Default',
     betssonco: 'Betsson.co'
   };
 
@@ -556,8 +550,6 @@
         var customerKey = keys[0];
         var uri = base + '/api/user-context/' + customerKey +
           '?brand=' + brandGuid + '&shouldUseSbIl=false&generateLinksPage=true&overrideIFrameBaseUrlWith=';
-        var segmentId = BRAND_SEGMENTS[opts.brand];
-        if (segmentId) uri += '&segmentId=' + encodeURIComponent(segmentId);
         return fetchInternal(uri).then(function (r) {
           if (!r.ok) throw new Error('user-context fetch failed: HTTP ' + r.status);
           return r.json();
@@ -678,13 +670,16 @@
         var customerKey = keys[0];
         var uri = base + '/api/user-context/' + customerKey +
           '?brand=' + brandGuid + '&shouldUseSbIl=false&generateLinksPage=true&overrideIFrameBaseUrlWith=';
-        var segmentId = BRAND_SEGMENTS[brand];
-        if (segmentId) uri += '&segmentId=' + encodeURIComponent(segmentId);
         return fetchInternal(uri).then(function (r) {
           if (!r.ok) throw new Error('user-context fetch failed: HTTP ' + r.status);
           return r.json();
         }).then(function (data) {
-          var ctxNode = ((data.data || {}).context || {})[device] || {};
+          var contexts = ((data.data || {}).context || {});
+          var contextPrefix = BRAND_CONTEXT_PREFIXES[brand];
+          var namedContextKey = contextPrefix && Object.keys(contexts).filter(function (key) {
+            return key.toLowerCase() === (contextPrefix + ' ' + device).toLowerCase();
+          })[0];
+          var ctxNode = contexts[namedContextKey || device] || {};
           var stc = (ctxNode.customerContext || {}).staticContextId;
           var ctx = (ctxNode.customerContext || {}).userContextId;
           if (!stc || !ctx) throw new Error('No BLE context found for device "' + device + '" in the user-context response.');
@@ -1955,10 +1950,16 @@
       // separate copies of every rule.
       '#lgt-panel,#lgt-local-links-panel{--lgt-bg:#101320;--lgt-fg:#f6f7fb;--lgt-tab-bg:#1c2233;--lgt-accent:#ff6600;',
       '--lgt-accent-fg:#101320;--lgt-muted:#9aa3b8;--lgt-input-bg:#1c2233;--lgt-input-border:#2b3350;',
-      '--lgt-secondary-bg:#2b3350;}',
+      '--lgt-secondary-bg:#2b3350;--lgt-scroll-track:#0b0e18;--lgt-scroll-thumb:#3a4566;--lgt-scroll-thumb-hover:#ff6600;}',
       '#lgt-panel.lgt-theme-light,#lgt-local-links-panel.lgt-theme-light{--lgt-bg:#f4f5f9;--lgt-fg:#1b1f2b;--lgt-tab-bg:#e4e7f0;--lgt-accent:#ff6600;',
       '--lgt-accent-fg:#ffffff;--lgt-muted:#5a6178;--lgt-input-bg:#ffffff;--lgt-input-border:#c7cce0;',
-      '--lgt-secondary-bg:#dde1ee;}',
+      '--lgt-secondary-bg:#dde1ee;--lgt-scroll-track:#e4e7f0;--lgt-scroll-thumb:#aab1c7;--lgt-scroll-thumb-hover:#ff6600;}',
+      '#lgt-panel,#lgt-local-links-panel,#lgt-panel .lgt-brand-matrix{scrollbar-width:thin;',
+      'scrollbar-color:var(--lgt-scroll-thumb) var(--lgt-scroll-track)}',
+      '#lgt-panel::-webkit-scrollbar,#lgt-local-links-panel::-webkit-scrollbar,#lgt-panel .lgt-brand-matrix::-webkit-scrollbar{width:9px;height:9px}',
+      '#lgt-panel::-webkit-scrollbar-track,#lgt-local-links-panel::-webkit-scrollbar-track,#lgt-panel .lgt-brand-matrix::-webkit-scrollbar-track{background:var(--lgt-scroll-track);border-radius:10px}',
+      '#lgt-panel::-webkit-scrollbar-thumb,#lgt-local-links-panel::-webkit-scrollbar-thumb,#lgt-panel .lgt-brand-matrix::-webkit-scrollbar-thumb{background:var(--lgt-scroll-thumb);border:2px solid var(--lgt-scroll-track);border-radius:10px}',
+      '#lgt-panel::-webkit-scrollbar-thumb:hover,#lgt-local-links-panel::-webkit-scrollbar-thumb:hover,#lgt-panel .lgt-brand-matrix::-webkit-scrollbar-thumb:hover{background:var(--lgt-scroll-thumb-hover)}',
       '#lgt-panel{position:fixed;top:20px;right:20px;width:360px;max-height:88vh;overflow:auto;',
       'background:var(--lgt-bg);color:var(--lgt-fg);font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;',
       'border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.4);z-index:2147483647;padding:14px;}',

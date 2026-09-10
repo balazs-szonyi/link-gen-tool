@@ -12,9 +12,11 @@ brand page you're already logged into — no CLI, no headless automation.
   state / BLE-source, get a desktop + mobile link. Client-side port of
   `generate-link.ps1` — calls `internal.{env}.sbplayground1.net/api/*`
   directly (those endpoints have open CORS). `betsson.co` is exposed as a
-  separate market alias: it shares Betsson's brand GUID but automatically
-  sends the Colombia segment ID, avoiding the generic MGA/RestOfWorld
-  context returned when no segment is supplied. Enable **Local links** to
+  separate market alias: it shares Betsson's brand GUID but selects the
+  dedicated `Betsson.co Desktop` / `Betsson.co Mobile` content contexts.
+  It deliberately leaves the segment at the API default used by the real
+  Betsson.co integration instead of forcing the similarly named Colombia
+  segment. Enable **Local links** to
   open a separate panel docked to the left of the main tool with every named
   local developer URL and Local MFE URL returned for the selected brand.
   That panel can be minimized, closed, or dragged independently. It is
@@ -604,6 +606,8 @@ The main panel and the Local Links panel use Pointer Events with pointer
 capture, so both mouse and emulated/mobile touch pointers can drag them by
 their title bars. This replaces the previous mouse-only drag handling, which
 could not grab the tool while Chrome was emulating a touch viewport.
+Both panels and the credential brand list also use slim, rounded scrollbars
+whose track and thumb colors follow the active dark/light theme.
 
 ### Experimental Cross-Layer runtime (v1.20.6)
 

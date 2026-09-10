@@ -8,8 +8,6 @@ const { chromium } = require('playwright');
 
 const EXT_PATH = path.resolve(__dirname, 'extension');
 const BOOKMARKLET_PATH = path.resolve(__dirname, 'link-gen-tool.js');
-const COLOMBIA_SEGMENT_ID = '1a68008c-4da6-4f77-acbc-0614cb030d7d';
-
 const contextFixture = {
   data: {
     user: {
@@ -25,6 +23,16 @@ const contextFixture = {
       mobile: {
         responseCode: 100,
         customerContext: { staticContextId: 'stc-generic-m', userContextId: 'ctx-generic-m' },
+        iFrameHelper: { baseUri: 'https://m-cf.test.btsplayground.net' }
+      },
+      'Default Desktop': {
+        responseCode: 100,
+        customerContext: { staticContextId: 'stc-default-d', userContextId: 'ctx-default-d' },
+        iFrameHelper: { baseUri: 'https://d-cf.test.btsplayground.net' }
+      },
+      'Default Mobile': {
+        responseCode: 100,
+        customerContext: { staticContextId: 'stc-default-m', userContextId: 'ctx-default-m' },
         iFrameHelper: { baseUri: 'https://m-cf.test.btsplayground.net' }
       },
       'Betsson.co Desktop': {
@@ -87,7 +95,13 @@ async function testExtension() {
 
     const panel = page.locator('#lgt-panel');
     await panel.waitFor({ state: 'visible' });
-    await panel.locator('select:visible').nth(0).selectOption('betssonco');
+    assert.strictEqual(await panel.evaluate((el) => getComputedStyle(el).scrollbarWidth), 'thin');
+    assert.strictEqual(await panel.evaluate((el) => getComputedStyle(el).getPropertyValue('--lgt-scroll-thumb').trim()), '#3a4566');
+    await panel.locator('.lgt-theme-toggle').click();
+    assert.strictEqual(await panel.evaluate((el) => getComputedStyle(el).getPropertyValue('--lgt-scroll-thumb').trim()), '#aab1c7');
+    await panel.locator('.lgt-theme-toggle').click();
+    const brandSelect = panel.locator('select:visible').nth(0);
+    await brandSelect.selectOption('betssonco');
     await panel.locator('select:visible').nth(1).selectOption('test');
     await panel.locator('select:visible').nth(2).selectOption('out');
 
@@ -107,12 +121,21 @@ async function testExtension() {
     await localPanel.getByText('http://test.betsson.local:4200?staticContext=stc-co-d&userContext=ctx-co-d', { exact: true }).waitFor();
     assert(!((await localPanel.textContent()) || '').includes('stc-pe-d'), 'Another market leaked into betsson.co local links');
     assert(userContextUrl, 'No user-context request was made');
-    assert.strictEqual(new URL(userContextUrl).searchParams.get('segmentId'), COLOMBIA_SEGMENT_ID);
+    assert.strictEqual(new URL(userContextUrl).searchParams.get('segmentId'), null, 'betsson.co must keep the API default segment');
 
     const mainResultText = (await panel.locator('.lgt-result').first().textContent()) || '';
     assert(mainResultText.includes('/stc-co-d/ctx-co-d/'), 'Desktop link did not use the named Betsson.co context');
     assert(mainResultText.includes('/stc-co-m/ctx-co-m/'), 'Mobile link did not use the named Betsson.co context');
     assert(!mainResultText.includes('stc-generic'), 'Generic Betsson context leaked into the Betsson.co links');
+
+    await brandSelect.selectOption('betsson');
+    await panel.getByRole('button', { name: 'Generate', exact: true }).click();
+    await localPanel.getByText('http://test.betsson.local:4200/stc-default-d/ctx-default-d', { exact: true }).waitFor();
+    const betssonLocalText = (await localPanel.textContent()) || '';
+    assert(!betssonLocalText.includes('stc-co-d'), 'Betsson.co context leaked into Betsson.com local links');
+    assert(!betssonLocalText.includes('stc-pe-d'), 'Betsson.pe context leaked into Betsson.com local links');
+
+    await brandSelect.selectOption('betssonco');
 
     await localPanel.locator('.lgt-min').click();
     assert.strictEqual(await localPanel.locator('.lgt-local-content').evaluate((el) => getComputedStyle(el).display), 'none');
@@ -159,7 +182,7 @@ async function testExtension() {
     const mainAfterTouchDrag = await panel.boundingBox();
     assert(mainAfterTouchDrag.y > mainBeforeTouchDrag.y + 40, 'Touch pointer did not drag the main panel');
 
-    console.log('PASS: Local Links dock/render/minimize/drag/close/mobile guard and touch drag all work.');
+    console.log('PASS: extension Local Links filtering, themed scrollbars, panel controls and touch drag all work.');
   } finally {
     await context.close();
   }
@@ -183,6 +206,7 @@ async function testBookmarklet() {
     await page.addScriptTag({ path: BOOKMARKLET_PATH });
 
     const panel = page.locator('#lgt-panel');
+    assert.strictEqual(await panel.evaluate((el) => getComputedStyle(el).scrollbarWidth), 'thin');
     await panel.locator('select').nth(0).selectOption('betssonco');
     await panel.locator('select').nth(1).selectOption('test');
     await panel.locator('select').nth(2).selectOption('out');
@@ -223,7 +247,7 @@ async function testBookmarklet() {
     const after = await panel.boundingBox();
     assert(after.y > before.y + 40, 'Bookmarklet touch pointer did not drag the main panel');
 
-    console.log('PASS: bookmarklet Local Links and touch drag work.');
+    console.log('PASS: bookmarklet Local Links, styled scrollbar and touch drag work.');
   } finally {
     await browser.close();
   }

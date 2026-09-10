@@ -1,6 +1,6 @@
-// Live regression for the Betsson Colombia market alias. Verifies that the
+// Live regression for the Betsson.co market alias. Verifies that the
 // extension exposes a distinct betsson.co option, auto-detects the .co host,
-// and sends the Colombia segmentId while generating a sandbox link.
+// and selects the dedicated .co context without forcing a different segment.
 'use strict';
 
 const assert = require('assert');
@@ -11,7 +11,6 @@ const { chromium } = require('playwright');
 const EXT_PATH = path.resolve(__dirname, 'extension');
 const BOOKMARKLET_PATH = path.resolve(__dirname, 'link-gen-tool.js');
 const TARGET_URL = 'https://www.test.betsson.co/';
-const COLOMBIA_SEGMENT_ID = '1a68008c-4da6-4f77-acbc-0614cb030d7d';
 
 async function testExtension() {
   const context = await chromium.launchPersistentContext(
@@ -77,7 +76,7 @@ async function testExtension() {
     const request = await contextRequest;
     const requestUrl = new URL(request.url());
     assert.strictEqual(requestUrl.searchParams.get('brand'), '6a6d80b9-16ac-4387-a413-244d93a74deb');
-    assert.strictEqual(requestUrl.searchParams.get('segmentId'), COLOMBIA_SEGMENT_ID);
+    assert.strictEqual(requestUrl.searchParams.get('segmentId'), null, 'betsson.co must keep the API default segment');
     const responseBody = await (await request.response()).json();
     const namedDesktop = responseBody.data.context['Betsson.co Desktop'].customerContext;
     const namedMobile = responseBody.data.context['Betsson.co Mobile'].customerContext;
@@ -104,7 +103,7 @@ async function testExtension() {
     assert.match(comDetectedText || '', /Detected:\s*betsson\s*\/\s*test/i);
     assert.doesNotMatch(comDetectedText || '', /betssonco/i);
 
-    console.log('PASS: extension generated the Colombia link and kept betsson.com detection separate.');
+    console.log('PASS: extension generated the dedicated Betsson.co context without overriding the default segment.');
   } finally {
     await context.close();
   }
@@ -133,7 +132,7 @@ async function testBookmarklet() {
     await panel.getByRole('button', { name: 'Generate', exact: true }).click();
     const request = await contextRequest;
     const requestUrl = new URL(request.url());
-    assert.strictEqual(requestUrl.searchParams.get('segmentId'), COLOMBIA_SEGMENT_ID);
+    assert.strictEqual(requestUrl.searchParams.get('segmentId'), null, 'betsson.co must keep the API default segment');
     const responseBody = await (await request.response()).json();
     const namedDesktop = responseBody.data.context['Betsson.co Desktop'].customerContext;
     const namedMobile = responseBody.data.context['Betsson.co Mobile'].customerContext;
@@ -149,7 +148,7 @@ async function testBookmarklet() {
     assert.match(comDetectedText || '', /Detected:\s*betsson\s*\/\s*test/i);
     assert.doesNotMatch(comDetectedText || '', /betssonco/i);
 
-    console.log('PASS: bookmarklet generated the Colombia link and kept betsson.com detection separate.');
+    console.log('PASS: bookmarklet generated the dedicated Betsson.co context without overriding the default segment.');
   } finally {
     await browser.close();
   }
