@@ -37,7 +37,7 @@
   // bookmarklet on a page that already has a panel now always tears down
   // the old instance and rebuilds from the freshly-fetched script, instead
   // of just toggling stale, already-executed code back into view).
-  var VERSION = 'v16-2026-09-10';
+  var VERSION = 'v17-2026-09-10';
   console.log('[link-gen-tool] loaded ' + VERSION);
 
   // document.currentScript is only reliable synchronously during this
@@ -93,14 +93,6 @@
     triobet: '36e4a5ae-37b5-435a-85fc-e7e1f537e131'
   };
 
-  // Market-specific aliases that share a parent brand GUID but require an
-  // explicit segmentId when the playground mints the static/user context.
-  // Without this, Betsson Colombia silently falls back to the generic
-  // Betsson MGA/RestOfWorld segment even though the dropdown says .co.
-  var BRAND_SEGMENTS = {
-    betssonco: '1a68008c-4da6-4f77-acbc-0614cb030d7d'
-  };
-
   var BRAND_LABELS = {
     betssonco: 'betsson.co'
   };
@@ -112,6 +104,7 @@
   };
 
   var BRAND_CONTEXT_PREFIXES = {
+    betsson: 'Default',
     betssonco: 'Betsson.co'
   };
 
@@ -342,8 +335,6 @@
         var customerKey = keys[0];
         var uri = base + '/api/user-context/' + customerKey +
           '?brand=' + brandGuid + '&shouldUseSbIl=false&generateLinksPage=true&overrideIFrameBaseUrlWith=';
-        var segmentId = BRAND_SEGMENTS[opts.brand];
-        if (segmentId) uri += '&segmentId=' + encodeURIComponent(segmentId);
         return fetch(uri).then(function (r) {
           if (!r.ok) throw new Error('user-context fetch failed: HTTP ' + r.status);
           return r.json();
@@ -1076,6 +1067,11 @@
       '#lgt-panel{position:fixed;top:20px;right:20px;width:360px;max-height:88vh;overflow:auto;',
       'background:#101320;color:#f6f7fb;font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;',
       'border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.4);z-index:2147483647;padding:14px;}',
+      '#lgt-panel,#lgt-local-links-panel,#lgt-panel .lgt-brand-matrix{scrollbar-width:thin;scrollbar-color:#3a4566 #0b0e18}',
+      '#lgt-panel::-webkit-scrollbar,#lgt-local-links-panel::-webkit-scrollbar,#lgt-panel .lgt-brand-matrix::-webkit-scrollbar{width:9px;height:9px}',
+      '#lgt-panel::-webkit-scrollbar-track,#lgt-local-links-panel::-webkit-scrollbar-track,#lgt-panel .lgt-brand-matrix::-webkit-scrollbar-track{background:#0b0e18;border-radius:10px}',
+      '#lgt-panel::-webkit-scrollbar-thumb,#lgt-local-links-panel::-webkit-scrollbar-thumb,#lgt-panel .lgt-brand-matrix::-webkit-scrollbar-thumb{background:#3a4566;border:2px solid #0b0e18;border-radius:10px}',
+      '#lgt-panel::-webkit-scrollbar-thumb:hover,#lgt-local-links-panel::-webkit-scrollbar-thumb:hover,#lgt-panel .lgt-brand-matrix::-webkit-scrollbar-thumb:hover{background:#ff6600}',
       '#lgt-panel h3{margin:0 0 8px;font-size:15px;display:flex;justify-content:space-between;align-items:center}',
       '#lgt-panel .lgt-tabs{display:flex;gap:6px;margin-bottom:10px}',
       '#lgt-panel .lgt-tab{flex:1;text-align:center;padding:6px;border-radius:6px;background:#1c2233;cursor:pointer}',
