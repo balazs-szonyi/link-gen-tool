@@ -20,7 +20,8 @@ const { chromium } = require('playwright');
 
 const EXT_PATH = path.resolve(__dirname, 'extension');
 const BRAND = 'nordicbet';
-const TARGET_URL = 'https://test.nordicbet.com/en/sportsbook/live/football';
+const DEVICE = process.env.LGT_DEVICE || 'desktop';
+const TARGET_URL = process.env.LGT_TARGET_URL || 'https://test.nordicbet.com/en/sportsbook/live/football';
 const ALPHA_HOST = 'd-cf.alpha.ndbplayground.net';
 
 function log(msg) { console.log('[test] ' + new Date().toISOString().slice(11, 19) + ' ' + msg); }
@@ -85,12 +86,32 @@ async function main() {
     log('WARNING: auto-detect did not match expected brand "' + BRAND + '" - forcing selection.');
     await brandSel.selectOption(BRAND);
   }
+  const deviceSel = panel.locator('select:visible').nth(1);
+  await deviceSel.selectOption(DEVICE);
+  log('Selected device: ' + DEVICE);
 
   const applyBtn = panel.getByRole('button', { name: 'Apply', exact: true });
   await applyBtn.click();
   log('Clicked Apply, waiting for status to report an active override...');
 
-  const statusEl = panel.locator('.lgt-log:visible').first();
+  const maintenanceScenario = /\/maintenance\/?(?:[?#]|$)/i.test(TARGET_URL);
+  if (maintenanceScenario) {
+    await page.waitForURL(/^https:\/\/www\.nordicbet\.com\/en\/sportsbook(?:[/?#]|$)/, { timeout: 30000 });
+    log('PASS: maintenance bootstrap automatically continued on the working PROD shell: ' + page.url());
+    await sw.evaluate(async () => {
+      const tabs = await chrome.tabs.query({ url: '*://*.nordicbet.com/*' });
+      for (const t of tabs) {
+        await new Promise((resolve) => {
+          chrome.tabs.sendMessage(t.id, { type: 'lgt-toggle-panel' }, () => { void chrome.runtime.lastError; resolve(); });
+        });
+      }
+    });
+    await page.waitForSelector('#lgt-panel', { state: 'visible', timeout: 10000 });
+    await page.locator('#lgt-panel .lgt-tab').filter({ hasText: 'BLE Data' }).click();
+  }
+
+  const activePanel = page.locator('#lgt-panel');
+  const statusEl = activePanel.locator('.lgt-log:visible').first();
   const deadline = Date.now() + 25000;
   let statusText = '';
   while (Date.now() < deadline) {
@@ -105,10 +126,23 @@ async function main() {
   }
   log('PASS: BLE Data Override reports active. Status: ' + statusText.trim());
 
-  // Extract the applied stc value from the status text ("Active - desktop
-  // context stc--XXXX -> d-cf.alpha...") so we can confirm it below.
+  // Extract the applied stc from the visible status when possible. A
+  // maintenance fallback replaces the document, so its rebuilt panel has
+  // only the generic active status; in that case read the exact value from
+  // the browser's live modifyHeaders rule instead.
   const stcMatch = /context (\S+) ->/.exec(statusText);
-  const appliedStc = stcMatch ? stcMatch[1] : null;
+  let appliedStc = stcMatch ? stcMatch[1] : null;
+  if (!appliedStc) {
+    appliedStc = await sw.evaluate(async () => {
+      const rules = await chrome.declarativeNetRequest.getSessionRules();
+      for (const rule of rules) {
+        const headers = rule.action && rule.action.requestHeaders;
+        const stc = headers && headers.find((h) => h.header.toLowerCase() === 'x-sb-static-context-id');
+        if (stc && stc.value) return stc.value;
+      }
+      return null;
+    });
+  }
   log('Applied stc (parsed from status): ' + appliedStc);
 
   apiHits.length = 0;
@@ -143,22 +177,18 @@ async function main() {
   }
   log('PASS: page still renders real content (' + bodyText.length + ' chars) after BLE Data Override + reload - not a blank page.');
 
-  // Stale-rule cleanup check: navigating to a genuinely different page in
-  // the same tab must clear the override, same reasoning/mechanism as
-  // Bundle Override's own stale-cleanup fix (see
-  // test-bundle-override-stale-cleanup.cjs) - a redirect rule keyed to the
-  // OLD host must not silently keep affecting whatever loads next.
-  apiHits.length = 0;
-  await page.goto('https://test.nordicbet.com/en/sportsbook/live/tennis', { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await page.waitForTimeout(6000);
-  const alphaHitsAfterNav = apiHits.filter((h) => {
-    try { return new URL(h.url).hostname === ALPHA_HOST; } catch (e) { return false; }
+  // Same-origin sportsbook navigation deliberately keeps BLE Data active.
+  // A genuinely different origin must clear its tab-scoped rules.
+  await page.goto('https://example.com/', { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await page.waitForTimeout(1000);
+  const remainingBleRules = await sw.evaluate(async () => {
+    const rules = await chrome.declarativeNetRequest.getSessionRules();
+    return rules.filter((r) => r.id >= 910001 && r.id < 930001).length;
   });
-  log('/api/sb/v1/* requests redirected to ALPHA after navigating away: ' + alphaHitsAfterNav.length);
-  if (alphaHitsAfterNav.length) {
-    throw new Error('REGRESSION: BLE Data Override rules were still active after navigating to a different page - stale-cleanup did not fire.');
+  if (remainingBleRules) {
+    throw new Error('REGRESSION: BLE Data Override rules were still active after navigating to a different origin. Remaining rules: ' + remainingBleRules);
   }
-  log('PASS: BLE Data Override was correctly cleared after navigating away.');
+  log('PASS: BLE Data Override was correctly cleared after navigating to a different origin.');
 
   log('Test run complete.');
   await context.close();

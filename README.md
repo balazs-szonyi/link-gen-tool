@@ -11,7 +11,10 @@ brand page you're already logged into — no CLI, no headless automation.
 - **Generate** tab: pick brand / environment (test, qa, alpha, prod) / login
   state / BLE-source, get a desktop + mobile link. Client-side port of
   `generate-link.ps1` — calls `internal.{env}.sbplayground1.net/api/*`
-  directly (those endpoints have open CORS).
+  directly (those endpoints have open CORS). `betsson.co` is exposed as a
+  separate market alias: it shares Betsson's brand GUID but automatically
+  sends the Colombia segment ID, avoiding the generic MGA/RestOfWorld
+  context returned when no segment is supplied.
 - **Oddin Statistics fix** (Chrome extension only, enabled by default):
   allows the known Firestorm Oddin statistics iframe to render on the generic
   `d-cf`/`m-cf` TEST and QA `sbplayground1.net` hosts. It changes only the
@@ -103,7 +106,12 @@ brand page you're already logged into — no CLI, no headless automation.
   minted from PROD (the same mechanism the Generate/Live Login tabs'
   existing BLE-source option already uses) — both via a tab-scoped,
   session-only `declarativeNetRequest` rule pair, cleared automatically
-  on navigation or tab close, exactly like the Bundle tab. Because
+  when the tab leaves that origin or closes. If a QA/TEST shell has
+  already failed its `GameLauncher` and entered `/sportsbook/maintenance`
+  before those data calls can start, Apply automatically continues on
+  the equivalent working PROD shell; PROD is used only for bootstrap,
+  while the sportsbook REST calls still go to ALPHA with the freshly
+  minted BLE context. Because
   `competitions/liveEvents` is included, the page's own live-event list
   becomes populated with real ALPHA events automatically — just Apply,
   reload, and browse; no need to hand-craft a URL with an
