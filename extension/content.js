@@ -742,6 +742,32 @@
   var LIVE_LOGIN_CACHE_KEY = 'lgt-live-login-cache';
   var LIVE_LOGIN_CACHE_TTL_MS = 30 * 60 * 1000; // 30 min - conservative slice of the ~8-24h real validity (see REFERENCE.md)
 
+  // Sentinel "customer key" for the Betsson.co Colombia market (2026-09-10).
+  // The internal.{env}.sbplayground1.net customer API only ever exposes ONE
+  // customer for the "betsson"/"betssonco" brand guid
+  // (logged-out-en-eur-mga-restofworld) - even the dedicated "Betsson.co
+  // Desktop"/"Betsson.co Mobile" named contexts it also returns still
+  // resolve through that same EN/RestOfWorld customer, so a link built
+  // purely from that API (Generate tab's normal path) always renders EN
+  // content (languageCode "en", jurisdiction "Mga", EUR) - confirmed by
+  // directly diffing the rendered page state against a known-good CO link
+  // (languageCode "co", jurisdiction "Coljuegos", COP). A `segmentId`/
+  // `segmentGuid`/`territoryId`/`market` query override on that API was
+  // also tried and confirmed to have no effect. The only way found to get
+  // genuine CO content is to hit the REAL betsson.co site directly (its
+  // market resolves from the actual domain/segment configuration
+  // server-side, not from the playground's synthetic customer) and
+  // passively capture the resulting stc/ctx - same header-sniffing
+  // mechanism the Live Login tab already uses, just without any login
+  // step (this capture works identically logged in or out). Selecting
+  // this option in the Customer dropdown (only offered for
+  // brand === 'betssonco', logged-out) runs that passive capture instead
+  // of the normal generateLink() API call, then splices the captured
+  // stc/ctx into the standard logged-out link the same way the logged-in
+  // live-login fallback already splices its own capture (see
+  // spliceAndRender/runPassiveCoCaptureFallback below).
+  var BETSSONCO_CO_LIVE_KEY = '__betssonco_co_live_passive__';
+
   // Per-brand "silent login proven to work" memory (item 0c). A brand's
   // very first live-login always runs with the background tab briefly
   // visible (today's default) as a safety net, since we don't yet know
@@ -812,10 +838,17 @@
     // single shared context spliced into both link variants was the
     // confirmed 2026-08-07 root cause of "mobile bleSource link click
     // does nothing").
-    function start(brandKey, environment, visible, credentialId, device, cb) {
-      var url = realLoginUrl(brandKey, environment);
+    // `passive` (2026-09-10): skips the login step entirely - opens the
+    // brand's real ORIGIN (not its /login page) and, on the other side
+    // (resumeLiveLoginJobIfPending), only navigates into the Sportsbook
+    // section and passively captures whatever stc/ctx that logged-out
+    // visit yields. Used for the Betsson.co CO-market capture (see
+    // BETSSONCO_CO_LIVE_KEY) - not credential-based at all, so
+    // `credentialId` is always null for a passive job.
+    function start(brandKey, environment, visible, credentialId, device, cb, passive) {
+      var url = passive ? realBrandOrigin(brandKey, environment) : realLoginUrl(brandKey, environment);
       if (!url) { cb({ ok: false, error: 'Brand "' + brandKey + '" is not live-login-capable (no login selectors known).' }); return; }
-      var job = { id: 'j' + Date.now().toString(36), brand: brandKey, environment: environment, visible: !!visible, credentialId: credentialId || null, device: device || 'desktop', status: 'starting', stc: null, ctx: null, error: null, createdAt: Date.now() };
+      var job = { id: 'j' + Date.now().toString(36), brand: brandKey, environment: environment, visible: !!visible, credentialId: credentialId || null, device: device || 'desktop', status: 'starting', stc: null, ctx: null, error: null, createdAt: Date.now(), passive: !!passive };
       write(job, function () {
         chrome.runtime.sendMessage({ type: 'lgt-open-tab', url: url, active: !!visible, device: job.device }, function (response) {
           if (chrome.runtime.lastError) { cb({ ok: false, error: chrome.runtime.lastError.message }); return; }
@@ -2317,8 +2350,20 @@
           var keys = Object.keys(customers || {}).filter(function (k) {
             return k.toLowerCase().indexOf(prefix) === 0;
           });
+
+          // Synthetic entry: the playground's own customer API never
+          // exposes a real CO/Colombia customer for betssonco (only the
+          // one EN/RestOfWorld customer, see BETSSONCO_CO_LIVE_KEY) - add
+          // a second, non-API option here so it's still pickable from
+          // this same dropdown instead of needing separate UI. Only
+          // offered logged-out (the only login state a passive, no-
+          // credential capture supports).
+          var syntheticKeys = (brand === 'betssonco' && prefix === 'logged-out')
+            ? [{ value: BETSSONCO_CO_LIVE_KEY, label: 'CO - Logged Out (live capture from betsson.co)' }]
+            : [];
+
           customerSelect.innerHTML = '';
-          if (keys.length <= 1) {
+          if (keys.length + syntheticKeys.length <= 1) {
             customerWrap.style.display = 'none';
             pendingRestoreCustomerKey = null;
             return;
@@ -2326,7 +2371,10 @@
           keys.forEach(function (k) {
             customerSelect.appendChild(el('option', { value: k }, [(customers[k] || {}).label || k]));
           });
-          if (pendingRestoreCustomerKey && keys.indexOf(pendingRestoreCustomerKey) !== -1) {
+          syntheticKeys.forEach(function (s) {
+            customerSelect.appendChild(el('option', { value: s.value }, [s.label]));
+          });
+          if (pendingRestoreCustomerKey && (keys.indexOf(pendingRestoreCustomerKey) !== -1 || syntheticKeys.some(function (s) { return s.value === pendingRestoreCustomerKey; }))) {
             customerSelect.value = pendingRestoreCustomerKey;
           }
           pendingRestoreCustomerKey = null;
@@ -2641,6 +2689,110 @@
           })(0);
         }
 
+        // Passive counterpart to runLiveLoginFallback above, for the
+        // synthetic "CO - Logged Out (live capture)" customer option
+        // (see BETSSONCO_CO_LIVE_KEY / refreshCustomerOptions). No
+        // credential, no login form, no BLE/prod-login-environment
+        // switch - it simply opens the brand's real logged-out origin
+        // for the CURRENT target environment and passively captures
+        // whatever stc/ctx that visit yields (the real site resolves
+        // the genuine CO market/segment for betsson.co server-side,
+        // unlike the playground's synthetic customer API - see
+        // BETSSONCO_CO_LIVE_KEY's comment for the full root cause).
+        // Cache is namespaced with the same '::co-live' suffix
+        // LiveLoginJob.start()/resumeLiveLoginJobIfPending() use, so it
+        // never collides with a real logged-in live-login cache entry
+        // for the same brand/environment/device.
+        function runPassiveCoCaptureFallback(devicesToRun) {
+          var cacheBrand = brand + '::co-live';
+
+          function captureForDevice(device, onDone) {
+            function startFreshCapture(reasonPrefix) {
+              var settled = false;
+              var deadline = Date.now() + 60000;
+              isBrandSilentVerified(brand, function (verified) {
+                var wantVisible = forceVisibleChk.checked || !verified;
+                log.textContent = (reasonPrefix || '') + 'Passively capturing the real betsson.co ' + device + ' context (' + (wantVisible ? 'visible tab' : 'background tab, invisible') + ')...';
+
+                var jobChangeListener = null;
+                LiveLoginJob.start(brand, environment, wantVisible, null, device, function (startResult) {
+                  if (!startResult.ok) {
+                    log.textContent = 'Error starting live capture: ' + friendlyErrorMessage(new Error(startResult.error));
+                    setBtnBusy(false);
+                    return;
+                  }
+                  // Note: `true` as the final arg is `passive` (see
+                  // LiveLoginJob.start's comment) - opens the brand's
+                  // real ORIGIN, no login step.
+                  jobChangeListener = LiveLoginJob.onChange(function (job) {
+                    if (settled || !job) return;
+                    if (job.status === 'capturing') {
+                      log.textContent = 'Loading the real site (' + device + ' link)...';
+                    } else if (job.status === 'captured') {
+                      log.textContent = 'Captured ' + device + ' CO context!';
+                      markBrandSilentVerified(brand);
+                      settled = true;
+                      LiveLoginJob.offChange(jobChangeListener);
+                      LiveLoginJob.clear();
+                      onDone(job.stc, job.ctx);
+                    } else if (job.status === 'failed' || job.status === 'unsupported') {
+                      log.textContent = 'CO live capture failed (' + device + ' link): ' + (job.error || job.status) + ' (the background tab was kept open and brought to the front so you can see what happened - close it manually when done)';
+                      settled = true;
+                      LiveLoginJob.offChange(jobChangeListener);
+                      LiveLoginJob.clear();
+                      setBtnBusy(false);
+                    }
+                  });
+                }, true);
+
+                (function pollTimeout() {
+                  if (settled) return;
+                  if (Date.now() > deadline) {
+                    log.textContent = 'CO live capture timed out after 60s (' + device + ' link) - check for a leftover background tab.';
+                    settled = true;
+                    LiveLoginJob.offChange(jobChangeListener);
+                    setBtnBusy(false);
+                    return;
+                  }
+                  setTimeout(pollTimeout, 1000);
+                })();
+              });
+            }
+
+            if (forceFreshChk.checked) {
+              startFreshCapture();
+              return;
+            }
+            LiveLoginCache.get(cacheBrand, environment, device, function (cached) {
+              if (cached) {
+                log.textContent = 'Using cached ' + device + ' CO context (captured ' + Math.round((Date.now() - cached.capturedAt) / 60000) + ' min ago)...';
+                onDone(cached.stc, cached.ctx);
+                return;
+              }
+              startFreshCapture('No CO customer in the playground API - ');
+            });
+          }
+
+          var results = { desktop: null, mobile: null };
+          (function runNext(index) {
+            if (index >= devicesToRun.length) {
+              spliceAndRender(
+                results.desktop ? results.desktop.stc : null,
+                results.desktop ? results.desktop.ctx : null,
+                results.mobile ? results.mobile.stc : null,
+                results.mobile ? results.mobile.ctx : null,
+                false
+              );
+              return;
+            }
+            var device = devicesToRun[index];
+            captureForDevice(device, function (stc, ctx) {
+              results[device] = { stc: stc, ctx: ctx };
+              runNext(index + 1);
+            });
+          })(0);
+        }
+
         // Items 2/3/12: figure out which saved credential to use for a
         // logged-in live-login generation, prompting the user inline in
         // credResolveArea whenever there's a genuine choice to make
@@ -2699,6 +2851,17 @@
         }
 
         if (!loggedIn) {
+          // Betsson.co CO market, picked from the Customer dropdown (see
+          // BETSSONCO_CO_LIVE_KEY) - the playground API has no real CO
+          // customer to call generateLink() with, so this runs a passive
+          // capture against the real betsson.co site instead and splices
+          // the result into the normal logged-out link (same splice
+          // spliceAndRender already does for the logged-in live-login
+          // fallback below).
+          if (selectedCustomerKeyFilter() === BETSSONCO_CO_LIVE_KEY) {
+            runPassiveCoCaptureFallback(devices);
+            return;
+          }
           // Logged-out (with or without BLE) - unchanged path, BLE is
           // handled entirely inside generateLink() via the static
           // registry, no live-login involved either way.
@@ -4073,6 +4236,58 @@
         LiveLoginJob.update({ status: 'unsupported', error: 'Brand is not live-login-capable (missing login/Sportsbook-nav selectors).' }, focusThisTab);
         return;
       }
+
+      // Passive (logged-out) capture job - see BETSSONCO_CO_LIVE_KEY /
+      // LiveLoginJob.start's `passive` param. No credential/login-form at
+      // all: this tab already landed on the brand's real ORIGIN (not its
+      // /login page), so all that's needed is to reach the Sportsbook
+      // section (same nav-link click navigateToSportsbookAndAwaitCapture
+      // already does for the logged-in flow) and passively capture
+      // whatever stc/ctx that logged-out visit yields - the real site
+      // resolves the correct market/segment (e.g. CO for betsson.co)
+      // server-side regardless of login state, unlike the playground's
+      // synthetic customer API which only ever exposes one EN/RestOfWorld
+      // customer for this brand (see BETSSONCO_CO_LIVE_KEY's comment).
+      if (job.passive) {
+        LiveLoginJob.update({ status: 'capturing' }, function () {
+          var steps = [];
+          function log(m) { steps.push(m); console.log('[lgt-live-login]', m); }
+          var keepAliveIv = setInterval(function () {
+            chrome.runtime.sendMessage({ type: 'lgt-keepalive' }, function () { void chrome.runtime.lastError; });
+          }, 5000);
+          function stopKeepAlive() { clearInterval(keepAliveIv); }
+          var needsDebuggerHold = !job.visible || job.device === 'mobile';
+          if (needsDebuggerHold) {
+            chrome.runtime.sendMessage({ type: 'lgt-debugger-keepalive-start' }, function () { void chrome.runtime.lastError; });
+          }
+          function stopDebuggerKeepalive() {
+            if (needsDebuggerHold) {
+              chrome.runtime.sendMessage({ type: 'lgt-debugger-keepalive-stop' }, function () { void chrome.runtime.lastError; });
+            }
+          }
+          Capture.reset(function () {
+            navigateToSportsbookAndAwaitCapture(job.brand, log).then(function () {
+              Capture.get(function (c) {
+                stopKeepAlive();
+                stopDebuggerKeepalive();
+                if (c && c.stc && c.ctx) {
+                  LiveLoginJob.update({ status: 'captured', stc: c.stc, ctx: c.ctx }, function () {
+                    // Namespaced cache key (brand + '::co-live', not the
+                    // bare brand) so this logged-out passive capture never
+                    // collides with a genuine logged-in live-login cache
+                    // entry for the same brand/environment/device.
+                    LiveLoginCache.set(job.brand + '::co-live', job.environment, job.device, c.stc, c.ctx, closeThisTab);
+                  });
+                } else {
+                  LiveLoginJob.update({ status: 'failed', error: 'Navigated to Sportsbook, but no stc/ctx was captured. Steps: ' + steps.join(' > ') }, focusThisTab);
+                }
+              });
+            });
+          });
+        });
+        return;
+      }
+
       LiveLoginJob.update({ status: 'logging-in' }, function () {
         // Item 12: use the specific credential the Generate tab resolved
         // (brand-matrix match/user pick) when one was set on the job;
