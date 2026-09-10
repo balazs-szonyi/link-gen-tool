@@ -37,7 +37,7 @@
   // bookmarklet on a page that already has a panel now always tears down
   // the old instance and rebuilds from the freshly-fetched script, instead
   // of just toggling stale, already-executed code back into view).
-  var VERSION = 'v14-2026-08-05';
+  var VERSION = 'v15-2026-09-10';
   console.log('[link-gen-tool] loaded ' + VERSION);
 
   // document.currentScript is only reliable synchronously during this
@@ -64,6 +64,7 @@
     betsmith: 'abbae10d-550b-4bb1-8f61-183b76f4e06f',
     betsolid: '092219ad-a482-428a-b1a0-47fa005d339d',
     betsson: '6a6d80b9-16ac-4387-a413-244d93a74deb',
+    betssonco: '6a6d80b9-16ac-4387-a413-244d93a74deb',
     betssonarcb: '46df28af-e0f4-48d6-a3b3-3183b2586c44',
     betssonbr: '599869ba-7757-41ab-9b74-887dbf5c3705',
     betssondk: 'ce5be96a-8e97-4d71-8b04-b4a0dd30cfaa',
@@ -92,6 +93,18 @@
     triobet: '36e4a5ae-37b5-435a-85fc-e7e1f537e131'
   };
 
+  // Market-specific aliases that share a parent brand GUID but require an
+  // explicit segmentId when the playground mints the static/user context.
+  // Without this, Betsson Colombia silently falls back to the generic
+  // Betsson MGA/RestOfWorld segment even though the dropdown says .co.
+  var BRAND_SEGMENTS = {
+    betssonco: '1a68008c-4da6-4f77-acbc-0614cb030d7d'
+  };
+
+  var BRAND_LABELS = {
+    betssonco: 'betsson.co'
+  };
+
   // brand key -> real customer-facing domain, used for hostname auto-detection
   var BRAND_DOMAINS = {
     arcticbet: 'arcticbet.com',
@@ -102,6 +115,7 @@
     betsmith: 'betsmith.com',
     betsolid: 'betsolid.com',
     betsson: 'betsson.com',
+    betssonco: 'betsson.co',
     betssonarcb: 'betsson.bet.ar',
     betssonbr: 'betsson.bet.br',
     betssondk: 'betsson.dk',
@@ -167,6 +181,13 @@
       passwordSelector: 'input[name="password"], input[type="password"]',
       submitSelector: '[data-test-id="account-login-btn-1-button"], button[type="submit"]',
       sportsbookNavText: /sportsbook/i
+    },
+    betssonco: {
+      loginPath: '/login',
+      usernameSelector: 'input[name="email"], input#email-input, input[type="email"]',
+      passwordSelector: 'input[name="password"], input[type="password"]',
+      submitSelector: '[data-test-id="account-login-btn-1-button"], button[type="submit"]',
+      sportsbookNavText: /apuestas deportivas|sportsbook/i
     },
     betsafe: {
       loginPath: '/en/login',
@@ -311,6 +332,8 @@
         var customerKey = keys[0];
         var uri = base + '/api/user-context/' + customerKey +
           '?brand=' + brandGuid + '&shouldUseSbIl=false&generateLinksPage=true&overrideIFrameBaseUrlWith=';
+        var segmentId = BRAND_SEGMENTS[opts.brand];
+        if (segmentId) uri += '&segmentId=' + encodeURIComponent(segmentId);
         return fetch(uri).then(function (r) {
           if (!r.ok) throw new Error('user-context fetch failed: HTTP ' + r.status);
           return r.json();
@@ -489,7 +512,8 @@
     // iterated last below wins; use the Generate tab's brand selector to
     // override manually for Argentina brands.
     Object.keys(BRAND_DOMAINS).forEach(function (key) {
-      if (strippedHost === BRAND_DOMAINS[key] || strippedHost.indexOf(BRAND_DOMAINS[key]) !== -1) {
+      var domain = BRAND_DOMAINS[key];
+      if (strippedHost === domain || strippedHost.slice(-(domain.length + 1)) === '.' + domain) {
         brand = key;
       }
     });
@@ -923,7 +947,7 @@
 
   function brandOptions(selected) {
     return Object.keys(BRANDS).sort().map(function (k) {
-      return el('option', Object.assign({ value: k }, k === selected ? { selected: 'selected' } : {}), [k]);
+      return el('option', Object.assign({ value: k }, k === selected ? { selected: 'selected' } : {}), [BRAND_LABELS[k] || k]);
     });
   }
 

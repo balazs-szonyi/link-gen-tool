@@ -870,6 +870,7 @@ var BRAND_DOMAINS = {
   betsmith: 'betsmith.com',
   betsolid: 'betsolid.com',
   betsson: 'betsson.com',
+  betssonco: 'betsson.co',
   betssonarcb: 'betsson.bet.ar',
   betssonbr: 'betsson.bet.br',
   betssondk: 'betsson.dk',
@@ -1283,8 +1284,35 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
     currentHost = u.hostname;
     currentOrigin = u.origin;
   } catch (e) { sendResponse({ ok: false, error: 'could not read current tab URL' }); return false; }
-  if (currentOrigin) bleDataExpectedOriginByTab[tabId] = currentOrigin;
-  startBleDataOverrideRule(tabId, currentHost, alphaHost, stc, ctx).then(function () {
+
+  // A real brand's TEST shell can enter maintenance before its
+  // GameLauncher has created the sportsbook at all. In that state there
+  // are no /api/sb/v1/* calls for the BLE override to redirect. The BLE
+  // panel therefore supplies the equivalent working PROD sportsbook URL
+  // as bootstrapUrl. Install the rules for that destination host BEFORE
+  // the navigation starts, and make stale-cleanup expect that destination
+  // origin, so onBeforeNavigate does not tear the fresh rules down.
+  var sourceHost = currentHost;
+  var expectedOrigin = currentOrigin;
+  if (msg.bootstrapUrl) {
+    try {
+      var bootstrap = new URL(msg.bootstrapUrl);
+      var brandDomain = BRAND_DOMAINS[msg.brand];
+      var isProdBrandHost = brandDomain &&
+        (bootstrap.hostname === brandDomain || bootstrap.hostname === 'www.' + brandDomain);
+      if (bootstrap.protocol !== 'https:' || !isProdBrandHost) {
+        sendResponse({ ok: false, error: 'invalid BLE maintenance bootstrap URL' });
+        return false;
+      }
+      sourceHost = bootstrap.hostname;
+      expectedOrigin = bootstrap.origin;
+    } catch (e) {
+      sendResponse({ ok: false, error: 'invalid BLE maintenance bootstrap URL' });
+      return false;
+    }
+  }
+  if (expectedOrigin) bleDataExpectedOriginByTab[tabId] = expectedOrigin;
+  startBleDataOverrideRule(tabId, sourceHost, alphaHost, stc, ctx).then(function () {
     sendResponse({ ok: true });
   }).catch(function (err) {
     sendResponse({ ok: false, error: String(err && err.message || err) });
