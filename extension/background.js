@@ -205,12 +205,34 @@ function trustedKey(tabId, keyName) {
 // detach when it's done (that would tear down the very focus-emulation
 // the keepalive call was meant to hold for the WHOLE job, not just one
 // click/type sequence).
-var keepAttachedTabs = new Set();
+var KEEP_ATTACHED_KEY = 'lgt-debugger-attached-tabs';
+
+function getKeepAttached(tabId) {
+  return new Promise(function (resolve) {
+    chrome.storage.session.get([KEEP_ATTACHED_KEY], function (result) {
+      var tabs = result && result[KEEP_ATTACHED_KEY] || {};
+      resolve(!!tabs[String(tabId)]);
+    });
+  });
+}
+
+function setKeepAttached(tabId, attached) {
+  return new Promise(function (resolve) {
+    chrome.storage.session.get([KEEP_ATTACHED_KEY], function (result) {
+      var tabs = Object.assign({}, result && result[KEEP_ATTACHED_KEY]);
+      if (attached) tabs[String(tabId)] = true;
+      else delete tabs[String(tabId)];
+      var value = {};
+      value[KEEP_ATTACHED_KEY] = tabs;
+      chrome.storage.session.set(value, resolve);
+    });
+  });
+}
 
 function runTrustedSequence(tabId, actions) {
-  var keptAttached = keepAttachedTabs.has(tabId);
-  var attachStep = keptAttached ? Promise.resolve() : attachDebugger(tabId);
-  return attachStep.then(function () {
+  return getKeepAttached(tabId).then(function (keptAttached) {
+    var attachStep = keptAttached ? Promise.resolve() : attachDebugger(tabId);
+    return attachStep.then(function () {
     var chain = Promise.resolve();
     actions.forEach(function (action) {
       chain = chain.then(function () {
@@ -225,8 +247,9 @@ function runTrustedSequence(tabId, actions) {
       function () { return maybeDetach().then(function () { return { ok: true }; }); },
       function (err) { return maybeDetach().then(function () { return { ok: false, error: String(err && err.message || err) }; }); }
     );
-  }, function (err) {
-    return { ok: false, error: String(err && err.message || err) };
+    }, function (err) {
+      return { ok: false, error: String(err && err.message || err) };
+    });
   });
 }
 
@@ -251,16 +274,17 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
   var tabId = sender.tab.id;
   // A mobile-emulated job (see setupMobileEmulation above) already
-  // attached the debugger and added this tab to keepAttachedTabs before
+  // attached the debugger and recorded this tab in chrome.storage.session before
   // its content script ever started running - re-attaching here would
   // just error ("Another debugger is already attached") for no benefit;
   // this call's real job (holding the attach for the whole job) is
   // already satisfied, so just confirm ok.
-  if (keepAttachedTabs.has(tabId)) { sendResponse({ ok: true }); return false; }
-  attachDebugger(tabId).then(
-    function () { keepAttachedTabs.add(tabId); sendResponse({ ok: true }); },
-    function (err) { sendResponse({ ok: false, error: String(err && err.message || err) }); }
-  );
+  getKeepAttached(tabId).then(function (alreadyAttached) {
+    if (alreadyAttached) { sendResponse({ ok: true }); return; }
+    return attachDebugger(tabId).then(function () {
+      return setKeepAttached(tabId, true).then(function () { sendResponse({ ok: true }); });
+    });
+  }).catch(function (err) { sendResponse({ ok: false, error: String(err && err.message || err) }); });
   return true;
 });
 
@@ -268,8 +292,7 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   if (!msg || msg.type !== 'lgt-debugger-keepalive-stop') return false;
   if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
   var tabId = sender.tab.id;
-  keepAttachedTabs.delete(tabId);
-  detachDebugger(tabId).then(function () { sendResponse({ ok: true }); });
+  setKeepAttached(tabId, false).then(function () { return detachDebugger(tabId); }).then(function () { sendResponse({ ok: true }); });
   return true;
 });
 
@@ -334,7 +357,7 @@ var MOBILE_EMULATION_UA_METADATA = {
 // profile via CDP, then navigates it to the real target URL - all BEFORE
 // any page load happens, so the brand's site sees "mobile" from its very
 // first request rather than a desktop page that merely gets resized
-// afterward. Leaves the tab in `keepAttachedTabs` (same bookkeeping the
+// afterward. Records the tab in chrome.storage.session (same bookkeeping the
 // silent-job keepalive mechanism already uses) so content.js's later
 // lgt-debugger-keepalive-start call (sent once its own content script
 // loads) is recognized as already-held and skips re-attaching, and so
@@ -342,9 +365,10 @@ var MOBILE_EMULATION_UA_METADATA = {
 // settles, success or failure) correctly detaches it at the end.
 function setupMobileEmulation(tabId, url) {
   return attachDebugger(tabId).then(function () {
-    keepAttachedTabs.add(tabId);
-    return sendDebuggerCommand(tabId, 'Emulation.setDeviceMetricsOverride', {
-      width: 470, height: 944, deviceScaleFactor: 2, mobile: true
+    return setKeepAttached(tabId, true).then(function () {
+      return sendDebuggerCommand(tabId, 'Emulation.setDeviceMetricsOverride', {
+        width: 470, height: 944, deviceScaleFactor: 2, mobile: true
+      });
     });
   }).then(function () {
     return sendDebuggerCommand(tabId, 'Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 }).catch(function () {});
@@ -682,7 +706,7 @@ chrome.tabs.onRemoved.addListener(function (tabId) {
   stopBleCorsRule(tabId);
   stopBundleOverrideRule(tabId);
   stopBleDataOverrideRule(tabId);
-  keepAttachedTabs.delete(tabId);
+  setKeepAttached(tabId, false);
   delete runtimeMarkersByTab[tabId];
   delete networkByTab[tabId];
   delete frameDocByTab[tabId];

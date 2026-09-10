@@ -87,9 +87,11 @@ async function testExtension() {
       return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(contextFixture) });
     });
 
-    await page.goto('https://example.com/', { waitUntil: 'domcontentloaded' });
+    // Use a supported playground host now that the extension no longer runs
+    // on arbitrary pages outside the supported host allowlist.
+    await page.goto('https://internal.test.sbplayground1.net/', { waitUntil: 'domcontentloaded' });
     await serviceWorker.evaluate(async () => {
-      const tabs = await chrome.tabs.query({ url: 'https://example.com/*' });
+      const tabs = await chrome.tabs.query({ url: 'https://internal.test.sbplayground1.net/*' });
       await new Promise((resolve) => chrome.tabs.sendMessage(tabs[0].id, { type: 'lgt-toggle-panel' }, () => resolve()));
     });
 

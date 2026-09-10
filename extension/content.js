@@ -1703,7 +1703,7 @@
       style.id = 'lgt-vpn-popup-style';
       style.textContent = [
         '#lgt-vpn-popup-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:2147483647;',
-        'display:flex;align-items:center;justify-content:center;font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}',
+        'display:flex;align-items:center;justify-content:center;font:.8125rem/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}',
         '#lgt-vpn-popup{background:#101320;color:#f6f7fb;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.5);',
         'padding:20px;width:320px;text-align:center;border:1px solid #ff6600}',
         '#lgt-vpn-popup h4{margin:0 0 8px;font-size:16px}',
@@ -1821,7 +1821,7 @@
   var LOCAL_LINKS_MIN_VIEWPORT = 780;
 
   function buildLocalLinksPanel(mainPanel) {
-    var panel = el('div', { id: 'lgt-local-links-panel', style: 'display:none' });
+    var panel = el('div', { id: 'lgt-local-links-panel', role: 'dialog', 'aria-label': 'Local links', style: 'display:none' });
     var content = el('div', { class: 'lgt-local-content' });
     var results = el('div', { class: 'lgt-local-results' }, [
       el('div', { class: 'lgt-local-empty' }, ['Generate a link to load local developer URLs.'])
@@ -1829,19 +1829,20 @@
     content.appendChild(results);
     var onClose = null;
     var onUnsupported = null;
-    var minBtn = el('span', {
-      class: 'lgt-min', title: 'Minimize', onclick: function () {
+    var minBtn = el('button', {
+      class: 'lgt-min lgt-icon-button', type: 'button', title: 'Minimize', 'aria-label': 'Minimize local links panel', onclick: function () {
         panel.classList.toggle('lgt-collapsed');
       }
     }, ['_']);
-    var closeBtn = el('span', {
-      class: 'lgt-close', title: 'Close', onclick: function () {
+    var closeBtn = el('button', {
+      class: 'lgt-close lgt-icon-button', type: 'button', title: 'Close', 'aria-label': 'Close local links panel', onclick: function () {
         panel.style.display = 'none';
         if (onClose) onClose();
       }
     }, ['x']);
     var actions = el('div', { class: 'lgt-header-actions' }, [minBtn, closeBtn]);
     var title = el('h3', {}, [el('span', {}, ['Local Links']), actions]);
+    title.setAttribute('aria-label', 'Local links panel header');
     panel.appendChild(title);
     panel.appendChild(content);
     makeDraggable(panel, title);
@@ -1954,19 +1955,21 @@
       '#lgt-panel.lgt-theme-light,#lgt-local-links-panel.lgt-theme-light{--lgt-bg:#f4f5f9;--lgt-fg:#1b1f2b;--lgt-tab-bg:#e4e7f0;--lgt-accent:#ff6600;',
       '--lgt-accent-fg:#ffffff;--lgt-muted:#5a6178;--lgt-input-bg:#ffffff;--lgt-input-border:#c7cce0;',
       '--lgt-secondary-bg:#dde1ee;--lgt-scroll-track:#e4e7f0;--lgt-scroll-thumb:#aab1c7;--lgt-scroll-thumb-hover:#ff6600;}',
+      '#lgt-panel,#lgt-local-links-panel{color-scheme:dark;}',
+      '#lgt-panel.lgt-theme-light,#lgt-local-links-panel.lgt-theme-light{color-scheme:light;}',
       '#lgt-panel,#lgt-local-links-panel,#lgt-panel .lgt-brand-matrix{scrollbar-width:thin;',
       'scrollbar-color:var(--lgt-scroll-thumb) var(--lgt-scroll-track)}',
       '#lgt-panel::-webkit-scrollbar,#lgt-local-links-panel::-webkit-scrollbar,#lgt-panel .lgt-brand-matrix::-webkit-scrollbar{width:9px;height:9px}',
       '#lgt-panel::-webkit-scrollbar-track,#lgt-local-links-panel::-webkit-scrollbar-track,#lgt-panel .lgt-brand-matrix::-webkit-scrollbar-track{background:var(--lgt-scroll-track);border-radius:10px}',
       '#lgt-panel::-webkit-scrollbar-thumb,#lgt-local-links-panel::-webkit-scrollbar-thumb,#lgt-panel .lgt-brand-matrix::-webkit-scrollbar-thumb{background:var(--lgt-scroll-thumb);border:2px solid var(--lgt-scroll-track);border-radius:10px}',
       '#lgt-panel::-webkit-scrollbar-thumb:hover,#lgt-local-links-panel::-webkit-scrollbar-thumb:hover,#lgt-panel .lgt-brand-matrix::-webkit-scrollbar-thumb:hover{background:var(--lgt-scroll-thumb-hover)}',
-      '#lgt-panel{position:fixed;top:20px;right:20px;width:360px;max-height:88vh;overflow:auto;',
-      'background:var(--lgt-bg);color:var(--lgt-fg);font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;',
+      '#lgt-panel{position:fixed;top:20px;right:20px;inline-size:min(360px,calc(100vw - 2rem));max-block-size:88dvh;overflow:auto;',
+      'overscroll-behavior:contain;scrollbar-gutter:stable;background:var(--lgt-bg);color:var(--lgt-fg);font:.8125rem/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;',
       'border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.4);z-index:2147483647;padding:14px;}',
       '#lgt-panel h3{margin:0 0 8px;font-size:15px;display:flex;justify-content:space-between;align-items:center}',
       '#lgt-panel .lgt-header-actions{display:flex;align-items:center;gap:10px;flex:none}',
       '#lgt-panel .lgt-tabs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}',
-      '#lgt-panel .lgt-tab{flex:1 0 27%;text-align:center;padding:6px;border-radius:6px;background:var(--lgt-tab-bg);cursor:pointer}',
+      '#lgt-panel .lgt-tab{flex:1 0 27%;min-block-size:2rem;text-align:center;padding:6px;border:0;border-radius:6px;background:var(--lgt-tab-bg);color:var(--lgt-fg);cursor:pointer;font:inherit}',
       '#lgt-panel .lgt-tab.active{background:var(--lgt-accent);color:var(--lgt-accent-fg);font-weight:600}',
       '#lgt-panel label{display:block;margin:8px 0 3px;color:var(--lgt-muted);font-size:11px;text-transform:uppercase}',
       '#lgt-panel select,#lgt-panel input{width:100%;box-sizing:border-box;padding:6px;border-radius:5px;border:1px solid var(--lgt-input-border);background:var(--lgt-input-bg);color:var(--lgt-fg)}',
@@ -1986,6 +1989,8 @@
       '#lgt-panel .lgt-result{margin-top:10px;background:var(--lgt-tab-bg);border-radius:6px;padding:8px;word-break:break-all;font-size:11px}',
       '#lgt-panel .lgt-log{margin-top:8px;font-size:11px;color:var(--lgt-muted);white-space:pre-wrap}',
       '#lgt-panel .lgt-close,#lgt-panel .lgt-min,#lgt-panel .lgt-theme-toggle{cursor:pointer;color:var(--lgt-muted)}',
+      '#lgt-panel .lgt-icon-button,#lgt-local-links-panel .lgt-icon-button{min-inline-size:1.75rem;min-block-size:1.75rem;padding:2px;border:0;background:transparent;color:inherit;font:inherit;line-height:1;border-radius:4px}',
+      '#lgt-panel :is(button,select,input):focus-visible,#lgt-local-links-panel :is(button,select,input):focus-visible{outline:2px solid var(--lgt-accent);outline-offset:2px}',
       '#lgt-panel .lgt-min{font-weight:700}',
       // Collapsed ("_"-minimized): only the header stays visible, the
       // panel shrinks to fit since its content is removed from layout.
@@ -2032,8 +2037,8 @@
       '#lgt-panel .lgt-build-strip button{width:auto;margin:0;padding:3px 8px;font-size:10px;flex:none}',
       '#lgt-panel .lgt-build-strip .lgt-build-actions{display:flex;gap:6px;flex:none}',
       '#lgt-panel .lgt-build-detail{margin-top:2px;font-size:10px;color:var(--lgt-muted);white-space:pre-wrap;width:100%}',
-      '#lgt-local-links-panel{position:fixed;width:360px;max-height:88vh;overflow:auto;background:var(--lgt-bg);color:var(--lgt-fg);',
-      'font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;border-radius:10px;',
+      '#lgt-local-links-panel{position:fixed;inline-size:min(360px,calc(100vw - 2rem));max-block-size:88dvh;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;background:var(--lgt-bg);color:var(--lgt-fg);',
+      'font:.8125rem/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;border-radius:10px;',
       'box-shadow:0 8px 30px rgba(0,0,0,.4);z-index:2147483646;padding:14px;box-sizing:border-box}',
       '#lgt-local-links-panel h3{margin:0 0 8px;font-size:15px;display:flex;justify-content:space-between;align-items:center}',
       '#lgt-local-links-panel .lgt-header-actions{display:flex;align-items:center;gap:10px;flex:none}',
@@ -2050,14 +2055,16 @@
       '#lgt-local-links-panel .lgt-row{display:flex;gap:8px}',
       '#lgt-local-links-panel button{flex:1;margin-top:6px;padding:6px;border:none;border-radius:6px;',
       'background:var(--lgt-secondary-bg);color:var(--lgt-fg);font-weight:600;cursor:pointer}'
+      , '@media (forced-colors: active){#lgt-panel,#lgt-local-links-panel{--lgt-bg:Canvas;--lgt-fg:CanvasText;--lgt-tab-bg:Canvas;--lgt-input-bg:Canvas;--lgt-input-border:ButtonText;--lgt-secondary-bg:ButtonFace;--lgt-muted:GrayText;--lgt-scroll-track:Canvas;--lgt-scroll-thumb:ButtonText}#lgt-panel button,#lgt-local-links-panel button{border:1px solid ButtonText;forced-color-adjust:auto}}'
+      , '@media (prefers-reduced-motion: reduce){#lgt-panel *,#lgt-local-links-panel *{scroll-behavior:auto;transition:none!important;animation:none!important}}'
     ].join('');
     document.head.appendChild(style);
 
-    var panel = el('div', { id: 'lgt-panel', style: 'display:none' });
+    var panel = el('div', { id: 'lgt-panel', role: 'dialog', 'aria-label': 'Link Gen Tool', style: 'display:none' });
     var localLinksPanel = buildLocalLinksPanel(panel);
     var titleText = el('span', {}, ['Link Gen Tool ', el('span', { style: 'opacity:.5;font-weight:400;font-size:10px' }, [VERSION])]);
-    var themeBtn = el('span', {
-      class: 'lgt-theme-toggle', title: 'Toggle dark/light mode',
+    var themeBtn = el('button', {
+      class: 'lgt-theme-toggle lgt-icon-button', type: 'button', title: 'Toggle dark/light mode', 'aria-label': 'Toggle dark/light mode',
       onclick: function () {
         var next = panel.classList.contains('lgt-theme-light') ? 'dark' : 'light';
         applyTheme(next);
@@ -2074,14 +2081,14 @@
     chrome.storage.local.get([THEME_KEY], function (res) {
       if (res && res[THEME_KEY] === 'light') applyTheme('light');
     });
-    var minBtn = el('span', {
-      class: 'lgt-min', title: 'Minimize', onclick: function () {
+    var minBtn = el('button', {
+      class: 'lgt-min lgt-icon-button', type: 'button', title: 'Minimize', 'aria-label': 'Minimize Link Gen Tool', onclick: function () {
         panel.classList.toggle('lgt-collapsed');
         try { sessionStorage.setItem(PANEL_COLLAPSED_KEY, panel.classList.contains('lgt-collapsed') ? '1' : '0'); } catch (e) {}
       }
     }, ['_']);
-    var closeBtn = el('span', {
-      class: 'lgt-close', title: 'Close', onclick: function () {
+    var closeBtn = el('button', {
+      class: 'lgt-close lgt-icon-button', type: 'button', title: 'Close', 'aria-label': 'Close Link Gen Tool', onclick: function () {
         panel.style.display = 'none';
         try { sessionStorage.setItem(PANEL_OPEN_KEY, '0'); } catch (e) {}
       }
@@ -2089,14 +2096,14 @@
     var headerActions = el('div', { class: 'lgt-header-actions' }, [themeBtn, minBtn, closeBtn]);
     var title = el('h3', {}, [titleText, headerActions]);
     makeDraggable(panel, title);
-    var tabs = el('div', { class: 'lgt-tabs' });
-    var tabA = el('div', { class: 'lgt-tab active' }, ['Generate']);
-    var tabB = el('div', { class: 'lgt-tab' }, ['Live Login']);
-    var tabC = el('div', { class: 'lgt-tab' }, ['Credentials']);
-    var tabD = el('div', { class: 'lgt-tab' }, ['Bundle']);
-    var tabE = el('div', { class: 'lgt-tab' }, ['BLE Data']);
-    var tabF = el('div', { class: 'lgt-tab' }, ['Bonus Mock']);
-    var tabG = el('div', { class: 'lgt-tab' }, ['Bet Void']);
+    var tabs = el('div', { class: 'lgt-tabs', role: 'tablist', 'aria-label': 'Link Gen Tool sections' });
+    var tabA = el('button', { class: 'lgt-tab active', type: 'button', role: 'tab', id: 'lgt-tab-generate', 'aria-controls': 'lgt-body-generate', 'aria-selected': 'true' }, ['Generate']);
+    var tabB = el('button', { class: 'lgt-tab', type: 'button', role: 'tab', id: 'lgt-tab-live-login', 'aria-controls': 'lgt-body-live-login', 'aria-selected': 'false' }, ['Live Login']);
+    var tabC = el('button', { class: 'lgt-tab', type: 'button', role: 'tab', id: 'lgt-tab-credentials', 'aria-controls': 'lgt-body-credentials', 'aria-selected': 'false' }, ['Credentials']);
+    var tabD = el('button', { class: 'lgt-tab', type: 'button', role: 'tab', id: 'lgt-tab-bundle', 'aria-controls': 'lgt-body-bundle', 'aria-selected': 'false' }, ['Bundle']);
+    var tabE = el('button', { class: 'lgt-tab', type: 'button', role: 'tab', id: 'lgt-tab-ble', 'aria-controls': 'lgt-body-ble', 'aria-selected': 'false' }, ['BLE Data']);
+    var tabF = el('button', { class: 'lgt-tab', type: 'button', role: 'tab', id: 'lgt-tab-bonus-mock', 'aria-controls': 'lgt-body-bonus-mock', 'aria-selected': 'false' }, ['Bonus Mock']);
+    var tabG = el('button', { class: 'lgt-tab', type: 'button', role: 'tab', id: 'lgt-tab-bet-void', 'aria-controls': 'lgt-body-bet-void', 'aria-selected': 'false' }, ['Bet Void']);
     tabs.appendChild(tabA); tabs.appendChild(tabB); tabs.appendChild(tabC); tabs.appendChild(tabD); tabs.appendChild(tabE); tabs.appendChild(tabF); tabs.appendChild(tabG);
 
     var bodyA = buildModeA(localLinksPanel);
@@ -2106,12 +2113,13 @@
     var bodyE = buildModeE();
     var bodyF = buildModeF();
     var bodyG = buildModeG();
-    bodyB.style.display = 'none';
-    bodyC.style.display = 'none';
-    bodyD.style.display = 'none';
-    bodyE.style.display = 'none';
-    bodyF.style.display = 'none';
-    bodyG.style.display = 'none';
+    bodyA.id = 'lgt-body-generate'; bodyA.setAttribute('role', 'tabpanel'); bodyA.setAttribute('aria-labelledby', tabA.id);
+    bodyB.id = 'lgt-body-live-login'; bodyB.setAttribute('role', 'tabpanel'); bodyB.setAttribute('aria-labelledby', tabB.id); bodyB.style.display = 'none';
+    bodyC.id = 'lgt-body-credentials'; bodyC.setAttribute('role', 'tabpanel'); bodyC.setAttribute('aria-labelledby', tabC.id); bodyC.style.display = 'none';
+    bodyD.id = 'lgt-body-bundle'; bodyD.setAttribute('role', 'tabpanel'); bodyD.setAttribute('aria-labelledby', tabD.id); bodyD.style.display = 'none';
+    bodyE.id = 'lgt-body-ble'; bodyE.setAttribute('role', 'tabpanel'); bodyE.setAttribute('aria-labelledby', tabE.id); bodyE.style.display = 'none';
+    bodyF.id = 'lgt-body-bonus-mock'; bodyF.setAttribute('role', 'tabpanel'); bodyF.setAttribute('aria-labelledby', tabF.id); bodyF.style.display = 'none';
+    bodyG.id = 'lgt-body-bet-void'; bodyG.setAttribute('role', 'tabpanel'); bodyG.setAttribute('aria-labelledby', tabG.id); bodyG.style.display = 'none';
     bodyB.__lgtGoToCredentials = function () { tabC.click(); };
     bodyA.__lgtGoToCredentials = function () { tabC.click(); };
 
@@ -2123,6 +2131,7 @@
       pair[1].addEventListener('click', function () {
         pairs.forEach(function (p) {
           p[1].classList.toggle('active', p === pair);
+          p[1].setAttribute('aria-selected', p === pair ? 'true' : 'false');
           p[2].style.display = p === pair ? '' : 'none';
         });
         // Remembers which tab was open so a page reload (whether triggered
@@ -2133,6 +2142,14 @@
         // Mock's Apply, since the next thing to do is reload and re-check
         // that same tab.
         try { sessionStorage.setItem(ACTIVE_TAB_KEY, pair[0]); } catch (e) {}
+      });
+      pair[1].addEventListener('keydown', function (event) {
+        if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return;
+        event.preventDefault();
+        var index = pairs.indexOf(pair);
+        var next = event.key === 'ArrowRight' ? (index + 1) % pairs.length : (index + pairs.length - 1) % pairs.length;
+        pairs[next][1].focus();
+        pairs[next][1].click();
       });
     });
 
@@ -4151,7 +4168,7 @@
           // (setupMobileEmulation) to set the mobile viewport/UA before
           // the very first request, so this call is what correctly
           // detaches it once the job settles - see the matching
-          // keepAttachedTabs guard in background.js's
+          // chrome.storage.session debugger-attach guard in background.js's
           // lgt-debugger-keepalive-start handler (a no-op there when
           // already held, so no double-attach happens here either).
           var needsDebuggerHold = !job.visible || job.device === 'mobile';
