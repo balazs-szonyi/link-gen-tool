@@ -745,7 +745,7 @@ is largely unchanged:
   Runtime markers are read by a `document_idle`, `all_frames:true`
   MAIN-world content script (`layer-detect.js`) that polls for up to ~20s
   after each frame loads, then stops — this keeps it cheap on the
-  `<all_urls>` pages it necessarily also runs on (an isolated-world relay,
+  supported brand and playground pages it runs on (an isolated-world relay,
   `layer-relay.js`, forwards whatever it finds to the background service
   worker via `chrome.runtime.sendMessage`; content scripts cannot call
   extension APIs directly from the MAIN world). Network evidence is
