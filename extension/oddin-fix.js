@@ -37,69 +37,17 @@
       url.searchParams.get('brandToken') === FIRESTORM_TOKEN;
   }
 
-  function install(chromeApi) {
-    var chrome = chromeApi;
-    var operationsByTab = Object.create(null);
-    // Startup reconciliation and the first navigation can overlap. Record
-    // onBeforeNavigate's destination synchronously so a slower tabs.query()
-    // snapshot cannot mistake a freshly-installed rule for a stale one.
-    var pendingNavigationHostByTab = Object.create(null);
-
-    function lastErrorMessage() {
-      return chrome.runtime && chrome.runtime.lastError && chrome.runtime.lastError.message;
-    }
-
-    function getRules() {
-      return new Promise(function (resolve) {
-        chrome.declarativeNetRequest.getSessionRules(function (rules) { resolve(rules || []); });
-      });
-    }
-
-    function ownRules(rules) {
-      return (rules || []).filter(function (rule) {
-        return rule.id >= RULE_ID_START && rule.id < RULE_ID_END;
-      });
-    }
-
-    function rulesForTab(rules, tabId) {
-      return ownRules(rules).filter(function (rule) {
-        return rule.condition && Array.isArray(rule.condition.tabIds) && rule.condition.tabIds.indexOf(tabId) !== -1;
-      });
-    }
-
-    function updateRules(addRules, removeRuleIds) {
-      return new Promise(function (resolve, reject) {
-        chrome.declarativeNetRequest.updateSessionRules({
-          addRules: addRules || [],
-          removeRuleIds: removeRuleIds || []
-        }, function () {
-          var error = lastErrorMessage();
-          if (error) reject(new Error(error));
-          else resolve();
-        });
-      });
-    }
-
-    function nextId(rules) {
-      var used = Object.create(null);
-      ownRules(rules).forEach(function (rule) { used[rule.id] = true; });
-      for (var id = RULE_ID_START; id < RULE_ID_END; id += 1) {
-        if (!used[id]) return id;
-      }
-      throw new Error('Oddin Statistics fix session-rule range is exhausted');
-    }
-
-    function refererForRule(rule) {
-      var headers = rule && rule.action && rule.action.requestHeaders;
-      var entry = (headers || []).find(function (header) { return String(header.header).toLowerCase() === 'referer'; });
-      return entry && entry.value;
-    }
-
-    function ruleHost(rule) {
-      var domains = rule && rule.condition && rule.condition.initiatorDomains;
-      return domains && domains[0];
-    }
-
+  function install(chromeApi, dependencies) {
+    const chrome = chromeApi;
+    const core = typeof module === 'object' && module.exports ? require('./worker-state.js') : globalThis.LgtWorkerState;
+    const store = dependencies?.store || core.createStore(chrome);
+    const dnr = dependencies?.dnr || core.createDnr(chrome, store);
+    const latest = core.createLatestTasks();
+    const sequence = core.createQueue();
+    const call = (owner, method, ...args) => core.call(chrome, owner, method, ...args);
+    const lastErrorMessage = () => chrome.runtime.lastError?.message;
+    const refererForRule = rule => rule?.action?.requestHeaders?.find(header => header.header.toLowerCase() === 'referer')?.value;
+    const ruleHost = rule => rule?.condition?.initiatorDomains?.[0];
     function buildRule(id, tabId, hostname, referer) {
       return {
         id: id,
@@ -118,52 +66,30 @@
       };
     }
 
-    function enabled() {
-      return new Promise(function (resolve) {
-        chrome.storage.local.get([SETTING_KEY], function (result) {
-          resolve(!result || typeof result[SETTING_KEY] !== 'boolean' || result[SETTING_KEY]);
-        });
-      });
-    }
 
-    function queue(tabId, operation) {
-      var previous = operationsByTab[tabId] || Promise.resolve();
-      var current = previous.catch(function () {}).then(operation);
-      operationsByTab[tabId] = current;
-      current.then(function () {
-        if (operationsByTab[tabId] === current) delete operationsByTab[tabId];
-      }, function () {
-        if (operationsByTab[tabId] === current) delete operationsByTab[tabId];
-      });
-      return current;
+    async function enabled() { return (await call(chrome.storage.local, 'get', SETTING_KEY))[SETTING_KEY] !== false; }
+    function stopTab(tabId) { latest.cancel(tabId); return dnr.stop('oddin', tabId); }
+    async function startOrKeep(tabId, info, isCurrent) {
+      const existing = (await dnr.status('oddin', tabId)).rules;
+      if (!isCurrent()) return;
+      if (existing.length === 1 && ruleHost(existing[0]) === info.hostname) return;
+      await dnr.apply('oddin', tabId, { scope: { kind: 'hostname', value: info.hostname } }, async () => allocate =>
+        [buildRule(allocate(1)[0], tabId, info.hostname, ALPHA_REFERER)]);
     }
-
-    function stopTab(tabId) {
-      return getRules().then(function (rules) {
-        var ids = rulesForTab(rules, tabId).map(function (rule) { return rule.id; });
-        return ids.length ? updateRules([], ids) : undefined;
-      });
-    }
-
-    function startOrKeep(tabId, info) {
-      return getRules().then(function (rules) {
-        var existing = rulesForTab(rules, tabId);
-        if (existing.length === 1 && ruleHost(existing[0]) === info.hostname) return;
-        var removeIds = existing.map(function (rule) { return rule.id; });
-        return updateRules([buildRule(nextId(rules), tabId, info.hostname, ALPHA_REFERER)], removeIds);
-      });
-    }
-
     function reconcileNavigation(details) {
       if (!details || details.frameId !== 0 || details.tabId == null) return Promise.resolve();
-      var info = playgroundInfo(details.url);
-      return enabled().then(function (isEnabled) {
-        return queue(details.tabId, function () {
-          return isEnabled && info ? startOrKeep(details.tabId, info) : stopTab(details.tabId);
+      dnr.cancel('oddin', details.tabId);
+      return latest.run(details.tabId, async isCurrent => {
+        const info = playgroundInfo(details.url);
+        const on = await enabled();
+        if (!isCurrent()) return;
+        return sequence(details.tabId, async () => {
+          if (!isCurrent()) return;
+          if (on && info) await startOrKeep(details.tabId, info, isCurrent);
+          else await dnr.stop('oddin', details.tabId);
         });
       });
     }
-
     function retryIframe(tabId) {
       return new Promise(function (resolve, reject) {
         chrome.scripting.executeScript({
@@ -204,98 +130,46 @@
       }, function () { void lastErrorMessage(); });
     }
 
+
     function handleCompleted(details) {
       if (!details || details.tabId == null || details.tabId < 0 || details.statusCode !== 403 ||
           details.type !== 'sub_frame' || !isTargetOddinUrl(details.url)) return Promise.resolve();
-      return queue(details.tabId, function () {
-        return getRules().then(function (rules) {
-          var existing = rulesForTab(rules, details.tabId);
-          if (!existing.length) return;
-          var active = existing[0];
-          if (refererForRule(active) === PROD_REFERER) {
-            warnProdFailure(details.tabId);
-            return;
-          }
-          if (refererForRule(active) !== ALPHA_REFERER) return;
-          var replacement = buildRule(nextId(rules), details.tabId, ruleHost(active), PROD_REFERER);
-          return updateRules([replacement], existing.map(function (rule) { return rule.id; })).then(function () {
-            return retryIframe(details.tabId);
-          });
-        });
+      return sequence(details.tabId, async () => {
+        const { rules, metadata } = await dnr.status('oddin', details.tabId);
+        const active = rules[0];
+        if (!active) return;
+        if (refererForRule(active) === PROD_REFERER) { warnProdFailure(details.tabId); return; }
+        if (refererForRule(active) !== ALPHA_REFERER) return;
+        await dnr.apply('oddin', details.tabId, metadata, async () => allocate =>
+          [buildRule(allocate(1)[0], details.tabId, ruleHost(active), PROD_REFERER)]);
+        await retryIframe(details.tabId);
       });
     }
-
-    function stopAll() {
-      return getRules().then(function (rules) {
-        var ids = ownRules(rules).map(function (rule) { return rule.id; });
-        return ids.length ? updateRules([], ids) : undefined;
-      });
+    async function stopAll() {
+      await dnr.ready;
+      const rules = core.rulesFor(await call(chrome.declarativeNetRequest, 'getSessionRules'), 'oddin');
+      await Promise.all([...new Set(rules.flatMap(rule => rule.condition.tabIds))].map(stopTab));
     }
-
-    function reconcileExisting() {
-      if (!chrome.tabs || !chrome.tabs.query) return Promise.resolve();
-      return Promise.all([getRules(), enabled(), new Promise(function (resolve) { chrome.tabs.query({}, resolve); })])
-        .then(function (values) {
-          var rules = ownRules(values[0]);
-          var isEnabled = values[1];
-          var tabs = values[2] || [];
-          var valid = Object.create(null);
-          tabs.forEach(function (tab) {
-            var info = isEnabled && playgroundInfo(tab.url);
-            if (info) valid[tab.id] = info.hostname;
-          });
-          Object.keys(pendingNavigationHostByTab).forEach(function (tabId) {
-            var hostname = pendingNavigationHostByTab[tabId];
-            if (isEnabled && hostname) valid[tabId] = hostname;
-            else delete valid[tabId];
-          });
-          var stale = rules.filter(function (rule) {
-            var tabIds = rule.condition && rule.condition.tabIds;
-            return !tabIds || tabIds.length !== 1 || valid[tabIds[0]] !== ruleHost(rule);
-          }).map(function (rule) { return rule.id; });
-          return stale.length ? updateRules([], stale) : undefined;
-        });
+    async function reconcileExisting() {
+      await dnr.ready;
+      if (!await enabled()) await stopAll();
     }
-
-    chrome.webNavigation.onBeforeNavigate.addListener(function (details) {
-      if (details && details.frameId === 0 && details.tabId != null) {
-        var destination = playgroundInfo(details.url);
-        pendingNavigationHostByTab[details.tabId] = destination && destination.hostname;
-      }
-      reconcileNavigation(details).catch(function (error) { console.warn('[link-gen-tool] Oddin navigation setup failed:', error); });
+    chrome.webNavigation.onBeforeNavigate.addListener(details => {
+      void core.observe(reconcileNavigation(details), 'Oddin navigation');
     });
-    // Chromium normally delivers webNavigation first. onUpdated is a second
-    // early signal for profiles/runners where the worker was not awake for
-    // that event; startOrKeep is idempotent, so receiving both is harmless.
-    if (chrome.tabs.onUpdated) chrome.tabs.onUpdated.addListener(function (tabId, changeInfo) {
-      if (!changeInfo || !changeInfo.url) return;
-      var destination = playgroundInfo(changeInfo.url);
-      pendingNavigationHostByTab[tabId] = destination && destination.hostname;
-      reconcileNavigation({ frameId: 0, tabId: tabId, url: changeInfo.url }).catch(function (error) {
-        console.warn('[link-gen-tool] Oddin tab-update setup failed:', error);
-      });
+    chrome.tabs.onUpdated.addListener((tabId, info) => {
+      if (info.url) void core.observe(reconcileNavigation({ tabId, frameId: 0, url: info.url }), 'Oddin tab update');
     });
-    chrome.webRequest.onCompleted.addListener(function (details) {
-      handleCompleted(details).catch(function (error) { console.warn('[link-gen-tool] Oddin fallback failed:', error); });
+    chrome.webRequest.onCompleted.addListener(details => {
+      void core.observe(handleCompleted(details), 'Oddin fallback');
     }, { urls: ['https://disir.oddin.gg/*'], types: ['sub_frame'] });
-    chrome.tabs.onRemoved.addListener(function (tabId) {
-      queue(tabId, function () { return stopTab(tabId); }).catch(function () {});
+    chrome.tabs.onRemoved.addListener(tabId => { void core.observe(stopTab(tabId), 'Oddin tab cleanup'); });
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'local' || !changes[SETTING_KEY]) return;
+      void core.observe(changes[SETTING_KEY].newValue === false ? stopAll() : reconcileExisting(), 'Oddin setting');
     });
-    chrome.storage.onChanged.addListener(function (changes, area) {
-      if (area !== 'local' || !changes || !changes[SETTING_KEY]) return;
-      if (changes[SETTING_KEY].newValue === false) stopAll().catch(function (error) { console.warn('[link-gen-tool] Oddin disable cleanup failed:', error); });
-      else reconcileExisting().catch(function (error) { console.warn('[link-gen-tool] Oddin enable reconciliation failed:', error); });
-    });
-
-    reconcileExisting().catch(function (error) { console.warn('[link-gen-tool] Oddin startup reconciliation failed:', error); });
-
-    return {
-      reconcileNavigation: reconcileNavigation,
-      handleCompleted: handleCompleted,
-      stopTab: stopTab,
-      stopAll: stopAll,
-      reconcileExisting: reconcileExisting
-    };
+    void core.observe(reconcileExisting(), 'Oddin startup');
+    return { reconcileNavigation, handleCompleted, stopTab, stopAll, reconcileExisting };
   }
 
   return {

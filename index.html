@@ -15,18 +15,9 @@
 <body>
   <main>
     <h1>Link Gen Tool</h1>
-    <p>Bookmarklet-injectable browser addon for generating environment-correct Betsson sportsbook QA links (test/qa/alpha/prod, logged-in/out, desktop/mobile, BLE source) and for capturing live-login stc/ctx pairs directly from a brand page.</p>
-    <p><a class="button" href="./link-gen-tool.js">Open link-gen-tool.js</a></p>
-    <p>Drag this to your bookmarks bar to load the panel on any page:</p>
-    <pre id="bm"></pre>
-    <p>Script path: <code>/link-gen-tool.js</code></p>
-    <p>The loaded version number is shown in the panel title bar and logged to the browser console (<code>[link-gen-tool] loaded vX...</code>) - check it after re-clicking the bookmarklet to confirm you're running the latest deploy.</p>
+    <p>Chrome extension for generating environment-correct Betsson sportsbook QA links and capturing live-login context directly from supported brand pages.</p>
+    <p><a class="button" href="https://github.com/balazs-szonyi/link-gen-tool/releases/tag/extension-latest">Download the latest Chrome extension ZIP</a></p>
+    <p>Extract the ZIP, open <code>chrome://extensions</code>, enable Developer mode, and choose “Load unpacked”.</p>
   </main>
-  <script>
-    document.getElementById('bm').textContent =
-      "javascript:(function(){var s=document.createElement('script');s.src='" +
-      location.origin + location.pathname.replace(/index\.html$/, '') +
-      "link-gen-tool.js?t='+Date.now();document.body.appendChild(s);})()";
-  </script>
 </body>
 </html>
