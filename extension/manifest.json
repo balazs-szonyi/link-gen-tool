@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Link Gen Tool",
   "version": "1.22.24",
-  "description": "Generate environment-correct Betsson sportsbook QA links and capture live-login session context (network-level, immune to page fetch/XHR timing races). Companion to the link-gen-tool bookmarklet.",
+  "description": "Generate environment-correct Betsson sportsbook QA links and capture live-login session context directly in Chrome.",
   "permissions": ["storage", "webRequest", "webNavigation", "debugger", "tabs", "declarativeNetRequest", "declarativeNetRequestFeedback", "scripting"],
   "host_permissions": [
     "*://*.sbplayground1.net/*",
@@ -72,7 +72,9 @@
         "*://*.ibet.com/*", "*://*.inkabet.pe/*", "*://*.jetbahis.com/*",
         "*://*.mobilbahis.com/*", "*://*.nordicbet.com/*", "*://*.nordicbet.dk/*",
         "*://*.playgurus.com/*", "*://*.rexbet.com/*", "*://*.rizk.com/*",
-        "*://*.spelklubben.se/*", "*://*.triobet.com/*"
+    "*://*.spelklubben.se/*", "*://*.triobet.com/*",
+    "https://disir.oddin.gg/*", "https://*.oddin.gg/*",
+    "https://*.sportradar.com/*", "https://*.betradar.com/*"
       ],
       "js": ["bonus-mock.js", "bet-void-mock.js", "cross-layer-main.js"],
       "run_at": "document_start",
@@ -103,7 +105,7 @@
         "*://*.playgurus.com/*", "*://*.rexbet.com/*", "*://*.rizk.com/*",
         "*://*.spelklubben.se/*", "*://*.triobet.com/*"
       ],
-      "js": ["bonus-mock.js", "bet-void-mock.js", "content.js"],
+      "js": ["bonus-mock.js", "bet-void-mock.js", "content-bridge.js", "content.js"],
       "run_at": "document_idle",
       "all_frames": false
     },

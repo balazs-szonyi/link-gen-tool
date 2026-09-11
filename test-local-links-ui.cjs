@@ -7,7 +7,6 @@ const path = require('path');
 const { chromium } = require('playwright');
 
 const EXT_PATH = path.resolve(__dirname, 'extension');
-const BOOKMARKLET_PATH = path.resolve(__dirname, 'link-gen-tool.js');
 const contextFixture = {
   data: {
     user: {
@@ -90,12 +89,13 @@ async function testExtension() {
     // Use a supported playground host now that the extension no longer runs
     // on arbitrary pages outside the supported host allowlist.
     await page.goto('https://internal.test.sbplayground1.net/', { waitUntil: 'domcontentloaded' });
+    const panel = page.locator('#lgt-panel');
+    await panel.waitFor({ state: 'attached', timeout: 15000 });
     await serviceWorker.evaluate(async () => {
       const tabs = await chrome.tabs.query({ url: 'https://internal.test.sbplayground1.net/*' });
       await new Promise((resolve) => chrome.tabs.sendMessage(tabs[0].id, { type: 'lgt-toggle-panel' }, () => resolve()));
     });
 
-    const panel = page.locator('#lgt-panel');
     await panel.waitFor({ state: 'visible' });
     assert.strictEqual(await panel.evaluate((el) => getComputedStyle(el).scrollbarWidth), 'thin');
     assert.strictEqual(await panel.evaluate((el) => getComputedStyle(el).getPropertyValue('--lgt-scroll-thumb').trim()), '#3a4566');
@@ -190,74 +190,8 @@ async function testExtension() {
   }
 }
 
-async function testBookmarklet() {
-  const browser = await chromium.launch({ channel: 'chromium', headless: true });
-  try {
-    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
-    await page.route('https://internal.test.sbplayground1.net/api/customers/**', (route) => route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({ 'logged-out-en-eur-mga-restofworld': { label: 'Logged out' } })
-    }));
-    await page.route('https://internal.test.sbplayground1.net/api/user-context/**', (route) => route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify(contextFixture)
-    }));
-    await page.goto('https://example.com/', { waitUntil: 'domcontentloaded' });
-    await page.addScriptTag({ path: BOOKMARKLET_PATH });
-
-    const panel = page.locator('#lgt-panel');
-    assert.strictEqual(await panel.evaluate((el) => getComputedStyle(el).scrollbarWidth), 'thin');
-    await panel.locator('select').nth(0).selectOption('betssonco');
-    await panel.locator('select').nth(1).selectOption('test');
-    await panel.locator('select').nth(2).selectOption('out');
-    const localToggle = panel.locator('label').filter({ hasText: /^\s*Local links\s*$/ }).locator('input');
-    await localToggle.check();
-    const localPanel = page.locator('#lgt-local-links-panel');
-    await localPanel.waitFor({ state: 'visible' });
-    await panel.getByRole('button', { name: 'Generate', exact: true }).click();
-    await localPanel.getByText('http://test.betsson.local:4200/stc-co-d/ctx-co-d', { exact: true }).waitFor();
-    await localPanel.getByText('http://test.betsson.local:8085?staticContext=stc-co-m&userContext=ctx-co-m', { exact: true }).waitFor();
-    const resultText = (await panel.locator('.lgt-result').first().textContent()) || '';
-    assert(resultText.includes('/stc-co-d/ctx-co-d/'));
-    assert(resultText.includes('/stc-co-m/ctx-co-m/'));
-
-    await localPanel.locator('.lgt-min').click();
-    assert.strictEqual(await localPanel.locator('.lgt-local-content').evaluate((el) => getComputedStyle(el).display), 'none');
-    await localPanel.locator('.lgt-min').click();
-    await localPanel.locator('.lgt-close').click();
-    assert.strictEqual(await localToggle.isChecked(), false);
-
-    await page.setViewportSize({ width: 390, height: 844 });
-    await localToggle.click();
-    assert.strictEqual(await localToggle.isChecked(), false);
-    await panel.getByText('Local Links: only in desktop viewport.', { exact: true }).waitFor();
-
-    const before = await panel.boundingBox();
-    const header = panel.locator('h3').first();
-    assert.strictEqual(await header.evaluate((el) => getComputedStyle(el).touchAction), 'none');
-    await header.dispatchEvent('pointerdown', {
-      pointerId: 88, pointerType: 'touch', button: 0,
-      clientX: before.x + 30, clientY: before.y + 15
-    });
-    await header.dispatchEvent('pointermove', {
-      pointerId: 88, pointerType: 'touch', button: 0,
-      clientX: before.x + 10, clientY: before.y + 95
-    });
-    await header.dispatchEvent('pointerup', { pointerId: 88, pointerType: 'touch', button: 0 });
-    const after = await panel.boundingBox();
-    assert(after.y > before.y + 40, 'Bookmarklet touch pointer did not drag the main panel');
-
-    console.log('PASS: bookmarklet Local Links, styled scrollbar and touch drag work.');
-  } finally {
-    await browser.close();
-  }
-}
-
 async function main() {
   await testExtension();
-  await testBookmarklet();
 }
 
 main().catch((error) => {

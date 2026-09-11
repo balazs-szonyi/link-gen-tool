@@ -20,6 +20,7 @@ function event() {
 
 function makeChrome(shared) {
   const state = shared || { rules: [], tabs: [], setting: {}, scriptCalls: [], warnings: [] };
+  state.session ||= {};
   const onBeforeNavigate = event();
   const onCompleted = event();
   const onRemoved = event();
@@ -41,6 +42,11 @@ function makeChrome(shared) {
     },
     storage: {
       local: { get(keys, cb) { cb({ ...state.setting }); } },
+      session: {
+        get(keys, cb) { cb(structuredClone(state.session)); },
+        set(value, cb) { Object.assign(state.session, structuredClone(value)); cb(); },
+        remove(keys, cb) { for (const key of [].concat(keys)) delete state.session[key]; cb(); }
+      },
       onChanged
     },
     webNavigation: { onBeforeNavigate },
@@ -121,7 +127,7 @@ test('403 swaps ALPHA to PROD atomically and retries the exact iframe only once'
 
     await fix.handleCompleted({ tabId: 11, statusCode: 403, type: 'sub_frame', url: ODDIN_URL });
     assert.equal(mock.state.rules.length, 1);
-    assert.notEqual(mock.state.rules[0].id, alphaId);
+    assert.ok(mock.state.rules[0].id >= C.RULE_ID_START); // atomic replacement may safely reuse the old id
     assert.equal(getReferer(mock.state.rules[0]), C.PROD_REFERER);
     assert.equal(mock.state.scriptCalls.length, 1);
     assert.deepEqual(mock.state.scriptCalls[0].target, { tabId: 11, frameIds: [0] });

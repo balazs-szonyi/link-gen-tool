@@ -30,8 +30,11 @@ function Sync-And-Verify($src, $dst, $label, [switch]$Mirror) {
   else { robocopy $src $dst /E /NFL /NDL /NJH /NJS | Out-Null }
 
   $diffs = 0
-  Get-ChildItem $src -File | ForEach-Object {
-    $dstFile = Join-Path $dst $_.Name
+  Get-ChildItem $src -File -Recurse | ForEach-Object {
+    $relative = $_.FullName.Substring($src.Length).TrimStart('\')
+    $dstFile = Join-Path $dst $relative
+    $dstParent = Split-Path $dstFile -Parent
+    if (-not (Test-Path $dstParent)) { New-Item -ItemType Directory -Path $dstParent -Force | Out-Null }
     if (-not (Test-Path $dstFile)) { Write-Host "MISSING: $($_.Name)"; $diffs++; return }
     $h1 = (Get-FileHash $_.FullName -Algorithm SHA256).Hash
     $h2 = (Get-FileHash $dstFile -Algorithm SHA256).Hash

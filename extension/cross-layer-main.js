@@ -41,10 +41,11 @@
       } catch (e) { /* status telemetry must never affect the response */ }
     }
 
-    function responseWithMock(response, config, url) {
+    async function responseWithMock(response, config, url) {
       var contentType = response.headers.get('content-type') || '';
-      if (!/json/i.test(contentType)) return Promise.resolve(response);
-      return response.clone().json().then(function (original) {
+      if (!/json/i.test(contentType)) return response;
+      try {
+        var original = await response.clone().json();
         var replacement;
         var responseFormat;
         if (bonusMock.hasResponseShape(original)) { replacement = config.payload; responseFormat = 'bss'; }
@@ -60,18 +61,17 @@
           statusText: response.statusText,
           headers: headers
         });
-      }).catch(function () { return response; });
+      } catch (_) { return response; }
     }
 
     var nativeBonusFetch = window.fetch;
-    window.fetch = function (input, init) {
+    window.fetch = async function (input, init) {
       var url = typeof input === 'string' || input instanceof URL ? String(input) : input.url;
       var method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
       var config = readConfig();
-      return nativeBonusFetch.apply(this, arguments).then(function (response) {
-        if (!config || method !== 'GET' || !bonusMock.matchesEndpoint(url)) return response;
-        return responseWithMock(response, config, url);
-      });
+      var response = await nativeBonusFetch.apply(this, arguments);
+      if (!config || method !== 'GET' || !bonusMock.matchesEndpoint(url)) return response;
+      return responseWithMock(response, config, url);
     };
 
     var NativeBonusXHR = window.XMLHttpRequest;
@@ -156,10 +156,11 @@
       } catch (e) { /* status telemetry must never affect the response */ }
     }
 
-    function responseWithBetVoidMock(response, url) {
+    async function responseWithBetVoidMock(response, url) {
       var contentType = response.headers.get('content-type') || '';
-      if (!/json/i.test(contentType)) return Promise.resolve(response);
-      return response.clone().json().then(function (original) {
+      if (!/json/i.test(contentType)) return response;
+      try {
+        var original = await response.clone().json();
         if (!betVoidMock.hasResponseShape(original)) return response;
         recordSeen(url, original);
         var config = readConfig();
@@ -176,17 +177,16 @@
           statusText: response.statusText,
           headers: headers
         });
-      }).catch(function () { return response; });
+      } catch (_) { return response; }
     }
 
     var nativeBetVoidFetch = window.fetch;
-    window.fetch = function (input, init) {
+    window.fetch = async function (input, init) {
       var url = typeof input === 'string' || input instanceof URL ? String(input) : input.url;
       var method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
-      return nativeBetVoidFetch.apply(this, arguments).then(function (response) {
-        if (method !== 'GET' || !betVoidMock.matchesEndpoint(url)) return response;
-        return responseWithBetVoidMock(response, url);
-      });
+      var response = await nativeBetVoidFetch.apply(this, arguments);
+      if (method !== 'GET' || !betVoidMock.matchesEndpoint(url)) return response;
+      return responseWithBetVoidMock(response, url);
     };
 
     var NativeBetVoidXHR = window.XMLHttpRequest;
@@ -365,7 +365,7 @@
   window.__lgtSportsbookToolEnvironment = config.bundleEnv;
 
   var nativeFetch = window.fetch;
-  window.fetch = function (input, init) {
+  window.fetch = async function (input, init) {
     var originalUrl = typeof input === 'string' || input instanceof URL ? String(input) : input.url;
     var method = (init && init.method) || (input && input.method) || 'GET';
     var plan = route(originalUrl, method);
@@ -374,16 +374,16 @@
     if (plan.url !== originalUrl) {
       routedInput = typeof input === 'string' || input instanceof URL ? plan.url : new Request(plan.url, input);
     }
-    return nativeFetch.call(this, routedInput, init).then(function (response) {
+    var response = await nativeFetch.call(this, routedInput, init);
       if (plan.kind !== 'config' && plan.kind !== 'context') return response;
       var contentType = response.headers.get('content-type') || '';
       if (!/json/i.test(contentType)) return response;
-      return response.clone().json().then(function (body) {
+      try {
+        var body = await response.clone().json();
         var headers = new Headers(response.headers);
         headers.delete('content-length'); headers.delete('content-encoding');
         return new Response(JSON.stringify(adaptJson(plan.kind, body)), { status: response.status, statusText: response.statusText, headers: headers });
-      }).catch(function () { return response; });
-    });
+      } catch (_) { return response; }
   };
 
   var NativeXHR = window.XMLHttpRequest;

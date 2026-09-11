@@ -4,9 +4,9 @@
  * Captures x-sb-static-context-id / x-sb-user-context-id headers via
  * chrome.webRequest.onSendHeaders - a NETWORK-LAYER observation, entirely
  * independent of page JS timing. This closes the root cause behind the
- * bookmarklet's flaky passive capture: a bundled SPA that grabs a reference
+ * legacy page-injected script's flaky passive capture: a bundled SPA that grabs a reference
  * to the native `fetch` at its own module-init time (milliseconds after
- * page load, before any bookmarklet click is even possible) makes an
+ * page load, before any legacy page-injected script click is even possible) makes an
  * in-page fetch/XHR monkey-patch structurally blind to that traffic -
  * reassigning window.fetch afterwards has zero effect on an already-
  * captured reference. chrome.webRequest sees the real request on the wire
@@ -18,13 +18,25 @@
  * this service worker's own memory, which Chrome can terminate/restart at
  * any time under MV3) keyed per page origin - so it also survives a hard
  * full-page navigation with zero sessionStorage-breadcrumb / window.open /
- * re-injection machinery of any kind, unlike the bookmarklet's v10-v13
+ * re-injection machinery of any kind, unlike the legacy page-injected script's v10-v13
  * fixes for the same problem class.
  */
 'use strict';
 
-importScripts('oddin-fix.js');
-var oddinFix = LgtOddinFix.install(chrome);
+importScripts('worker-state.js', 'detection-state.js', 'debugger-session.js', 'oddin-fix.js');
+var workerStore = LgtWorkerState.createStore(chrome);
+var dnr = LgtWorkerState.createDnr(chrome, workerStore);
+var detection = LgtDetectionState.create(workerStore);
+var debuggerSession = LgtDebuggerSession.create(chrome, workerStore);
+var handleMessage = LgtWorkerState.createDispatcher(chrome);
+var observeTask = LgtWorkerState.observe;
+var navigationTasks = LgtWorkerState.createLatestTasks();
+function chromeCall(owner, method, ...args) { return LgtWorkerState.call(chrome, owner, method, ...args); }
+function senderTabId(sender) {
+  if (sender.tab?.id == null) throw new Error('no tab');
+  return sender.tab.id;
+}
+var oddinFix = LgtOddinFix.install(chrome, { dnr: dnr, store: workerStore });
 
 var CAPTURE_PREFIX = 'lgtCapture:';
 
@@ -51,18 +63,13 @@ chrome.webRequest.onSendHeaders.addListener(
     var ctx = headers['x-sb-user-context-id'];
 
     var key = captureKeyFor(origin);
-    chrome.storage.local.get([key], function (res) {
-      var entry = (res && res[key]) || { stc: null, ctx: null, source: null, seenCount: 0 };
+    void observeTask(workerStore.serialize('capture:' + origin, async () => {
+      const res = await chromeCall(chrome.storage.local, 'get', key);
+      const entry = res[key] || { stc: null, ctx: null, source: null, seenCount: 0 };
       entry.seenCount = (entry.seenCount || 0) + 1;
-      if (stc && ctx) {
-        entry.stc = stc;
-        entry.ctx = ctx;
-        entry.source = details.url;
-      }
-      var obj = {};
-      obj[key] = entry;
-      chrome.storage.local.set(obj);
-    });
+      if (stc && ctx) { entry.stc = stc; entry.ctx = ctx; entry.source = details.url; }
+      await chromeCall(chrome.storage.local, 'set', { [key]: entry });
+    }), 'capture headers');
   },
   { urls: ['*://*/*sb/fe-api/*'] },
   ['requestHeaders', 'extraHeaders']
@@ -75,7 +82,7 @@ chrome.webRequest.onSendHeaders.addListener(
 // `event.isTrusted` (or equivalent framework-level "was this a real user
 // gesture" heuristics) and silently ignore a content script's synthetic
 // dispatchEvent()/click() - a genuine, unavoidable limitation of DOM-level
-// simulation (this affected both the bookmarklet and this extension's
+// simulation (this affected both the legacy page-injected script and this extension's
 // content.js equally, since content scripts run in the same "not a real
 // user" trust tier no matter how they're delivered). chrome.debugger is
 // different: it's a background-service-worker-only API (content scripts
@@ -83,7 +90,7 @@ chrome.webRequest.onSendHeaders.addListener(
 // injects input via the same Input.dispatchMouseEvent/dispatchKeyEvent
 // pipeline real DevTools/Playwright use - indistinguishable from a real
 // user to the page, so isTrusted-gated handlers fire normally. This is
-// the one "not the bookmarklet anymore" capability that actually matters
+// the one "not the legacy page-injected script anymore" capability that actually matters
 // here.
 //
 // Trade-off: attaching shows Chrome's built-in "<name> started debugging
@@ -97,55 +104,16 @@ function sleep(ms) {
   return new Promise(function (resolve) { setTimeout(resolve, ms); });
 }
 
-function sendDebuggerCommand(tabId, method, params) {
-  return new Promise(function (resolve, reject) {
-    chrome.debugger.sendCommand({ tabId: tabId }, method, params || {}, function (result) {
-      if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
-      resolve(result);
-    });
-  });
-}
+function sendDebuggerCommand(tabId, method, params) { return debuggerSession.command(tabId, method, params); }
 
-function attachDebugger(tabId) {
-  return new Promise(function (resolve, reject) {
-    chrome.debugger.attach({ tabId: tabId }, '1.3', function () {
-      if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
-      resolve();
-    });
-  }).then(function () {
-    // Fixes the 0a race condition: a tab created with active:false has
-    // never been visible, so Chrome doesn't route keyboard/mouse focus to
-    // it and (on some pages) delays compositing - trusted CDP input then
-    // has nothing to hit-test/focus against until the user manually
-    // clicks the tab, at which point it suddenly becomes real. Emulation.
-    // setFocusEmulationEnabled is the CDP-documented fix for exactly this
-    // ("simulate a focused and active page, even if the browser window is
-    // not visible") - it makes document.hasFocus()/:focus-visible and
-    // real DOM/input-widget focus behave as if the tab were frontmost,
-    // without ever actually stealing the user's real window/tab focus.
-    // Page.setWebLifecycleState('active') additionally guards against
-    // Chrome's own page-freezing/backgrounding heuristics interfering
-    // mid-sequence. Both are best-effort (older Chrome builds or odd page
-    // states could reject either) - a rejection here should never break
-    // the actual login attempt, just fall back to the pre-fix behavior.
-    return sendDebuggerCommand(tabId, 'Emulation.setFocusEmulationEnabled', { enabled: true }).catch(function () {})
-      .then(function () { return sendDebuggerCommand(tabId, 'Page.setWebLifecycleState', { state: 'active' }).catch(function () {}); });
-  });
-}
 
-function detachDebugger(tabId) {
-  return new Promise(function (resolve) {
-    chrome.debugger.detach({ tabId: tabId }, function () {
-      void chrome.runtime.lastError; // ignore - already detached is fine
-      resolve();
-    });
-  });
-}
 
-function trustedClick(tabId, x, y) {
-  return sendDebuggerCommand(tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: x, y: y })
-    .then(function () { return sendDebuggerCommand(tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: x, y: y, button: 'left', clickCount: 1 }); })
-    .then(function () { return sendDebuggerCommand(tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: x, y: y, button: 'left', clickCount: 1 }); });
+
+
+async function trustedClick(send, x, y) {
+  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+  await send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+  await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
 }
 
 // 'rawKeyDown' (not 'keyDown') for the down-event is deliberate: CDP's
@@ -159,15 +127,13 @@ function trustedClick(tabId, x, y) {
 // passing. 'rawKeyDown' dispatches the physical key-down without
 // inserting anything, leaving the 'char' event as the single source of
 // the actual character insertion (the CDP-documented pattern for typing).
-function trustedType(tabId, text) {
-  var chars = String(text || '').split('');
-  return chars.reduce(function (chain, ch) {
-    return chain
-      .then(function () { return sendDebuggerCommand(tabId, 'Input.dispatchKeyEvent', { type: 'rawKeyDown', text: ch, unmodifiedText: ch, key: ch }); })
-      .then(function () { return sendDebuggerCommand(tabId, 'Input.dispatchKeyEvent', { type: 'char', text: ch }); })
-      .then(function () { return sendDebuggerCommand(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', text: ch, unmodifiedText: ch, key: ch }); })
-      .then(function () { return sleep(10 + Math.random() * 25); });
-  }, Promise.resolve());
+async function trustedType(send, text) {
+  for (const ch of String(text || '')) {
+    await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', text: ch, unmodifiedText: ch, key: ch });
+    await send('Input.dispatchKeyEvent', { type: 'char', text: ch });
+    await send('Input.dispatchKeyEvent', { type: 'keyUp', text: ch, unmodifiedText: ch, key: ch });
+    await sleep(10 + Math.random() * 25);
+  }
 }
 
 // Named (non-character) keys - Tab to blur a field and let any on-blur
@@ -186,15 +152,12 @@ var NAMED_KEYS = {
   Enter: { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, text: '\r', unmodifiedText: '\r', downType: 'keyDown' }
 };
 
-function trustedKey(tabId, keyName) {
-  var k = NAMED_KEYS[keyName];
-  if (!k) return Promise.resolve();
-  var downType = k.downType || 'rawKeyDown';
-  var payload = { key: k.key, code: k.code, windowsVirtualKeyCode: k.windowsVirtualKeyCode, nativeVirtualKeyCode: k.nativeVirtualKeyCode, text: k.text, unmodifiedText: k.unmodifiedText };
-  var down = Object.assign({ type: downType }, payload);
-  var up = Object.assign({ type: 'keyUp' }, payload);
-  return sendDebuggerCommand(tabId, 'Input.dispatchKeyEvent', down)
-    .then(function () { return sendDebuggerCommand(tabId, 'Input.dispatchKeyEvent', up); });
+async function trustedKey(send, keyName) {
+  const key = NAMED_KEYS[keyName];
+  if (!key) return;
+  const { downType, ...payload } = key;
+  await send('Input.dispatchKeyEvent', { type: downType || 'rawKeyDown', ...payload });
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', ...payload });
 }
 
 // Tabs whose debugger/focus-emulation is being held attached for an
@@ -205,52 +168,23 @@ function trustedKey(tabId, keyName) {
 // detach when it's done (that would tear down the very focus-emulation
 // the keepalive call was meant to hold for the WHOLE job, not just one
 // click/type sequence).
-var KEEP_ATTACHED_KEY = 'lgt-debugger-attached-tabs';
 
-function getKeepAttached(tabId) {
-  return new Promise(function (resolve) {
-    chrome.storage.session.get([KEEP_ATTACHED_KEY], function (result) {
-      var tabs = result && result[KEEP_ATTACHED_KEY] || {};
-      resolve(!!tabs[String(tabId)]);
-    });
-  });
-}
 
-function setKeepAttached(tabId, attached) {
-  return new Promise(function (resolve) {
-    chrome.storage.session.get([KEEP_ATTACHED_KEY], function (result) {
-      var tabs = Object.assign({}, result && result[KEEP_ATTACHED_KEY]);
-      if (attached) tabs[String(tabId)] = true;
-      else delete tabs[String(tabId)];
-      var value = {};
-      value[KEEP_ATTACHED_KEY] = tabs;
-      chrome.storage.session.set(value, resolve);
-    });
-  });
-}
 
-function runTrustedSequence(tabId, actions) {
-  return getKeepAttached(tabId).then(function (keptAttached) {
-    var attachStep = keptAttached ? Promise.resolve() : attachDebugger(tabId);
-    return attachStep.then(function () {
-    var chain = Promise.resolve();
-    actions.forEach(function (action) {
-      chain = chain.then(function () {
-        if (action.type === 'click') return trustedClick(tabId, action.x, action.y);
-        if (action.type === 'type') return trustedType(tabId, action.text);
-        if (action.type === 'key') return trustedKey(tabId, action.key);
-        return Promise.resolve();
-      }).then(function () { return sleep(action.delayAfter || 80); });
+
+
+async function runTrustedSequence(tabId, actions) {
+  try {
+    await debuggerSession.withSession(tabId, async send => {
+      for (const action of actions) {
+        if (action.type === 'click') await trustedClick(send, action.x, action.y);
+        if (action.type === 'type') await trustedType(send, action.text);
+        if (action.type === 'key') await trustedKey(send, action.key);
+        await sleep(action.delayAfter || 80);
+      }
     });
-    function maybeDetach() { return keptAttached ? Promise.resolve() : detachDebugger(tabId); }
-    return chain.then(
-      function () { return maybeDetach().then(function () { return { ok: true }; }); },
-      function (err) { return maybeDetach().then(function () { return { ok: false, error: String(err && err.message || err) }; }); }
-    );
-    }, function (err) {
-      return { ok: false, error: String(err && err.message || err) };
-    });
-  });
+    return { ok: true };
+  } catch (error) { return { ok: false, error: String(error.message || error) }; }
 }
 
 // Item (2026-08-07, second follow-up): the 0a race-condition fix above
@@ -269,39 +203,19 @@ function runTrustedSequence(tabId, actions) {
 // settles (success or failure alike, every exit path) - holding the
 // focus-emulated/active state for the polling phases too, not just the
 // type/click moment.
-chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
-  if (!msg || msg.type !== 'lgt-debugger-keepalive-start') return false;
-  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
-  var tabId = sender.tab.id;
-  // A mobile-emulated job (see setupMobileEmulation above) already
-  // attached the debugger and recorded this tab in chrome.storage.session before
-  // its content script ever started running - re-attaching here would
-  // just error ("Another debugger is already attached") for no benefit;
-  // this call's real job (holding the attach for the whole job) is
-  // already satisfied, so just confirm ok.
-  getKeepAttached(tabId).then(function (alreadyAttached) {
-    if (alreadyAttached) { sendResponse({ ok: true }); return; }
-    return attachDebugger(tabId).then(function () {
-      return setKeepAttached(tabId, true).then(function () { sendResponse({ ok: true }); });
-    });
-  }).catch(function (err) { sendResponse({ ok: false, error: String(err && err.message || err) }); });
-  return true;
+handleMessage('lgt-debugger-keepalive-start', async function (msg, sender) {
+  await debuggerSession.hold(senderTabId(sender));
+  return { ok: true };
 });
 
-chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
-  if (!msg || msg.type !== 'lgt-debugger-keepalive-stop') return false;
-  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
-  var tabId = sender.tab.id;
-  setKeepAttached(tabId, false).then(function () { return detachDebugger(tabId); }).then(function () { sendResponse({ ok: true }); });
-  return true;
+handleMessage('lgt-debugger-keepalive-stop', async function (msg, sender) {
+  await debuggerSession.release(senderTabId(sender));
+  return { ok: true };
 });
 
 
-chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
-  if (!msg || msg.type !== 'lgt-trusted-sequence') return false;
-  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
-  runTrustedSequence(sender.tab.id, msg.actions || []).then(sendResponse);
-  return true; // keep the message channel open for the async sendResponse
+handleMessage('lgt-trusted-sequence', async function (msg, sender) {
+  return runTrustedSequence(senderTabId(sender), msg.actions || []);
 });
 
 // Opens/closes the background (inactive) tab used for the Generate tab's
@@ -314,10 +228,8 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
 // worker, so it doesn't idle-terminate mid-login and miss the
 // chrome.webRequest.onSendHeaders event(s) that the whole capture
 // mechanism depends on.
-chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
-  if (!msg || msg.type !== 'lgt-keepalive') return false;
-  sendResponse({ ok: true });
-  return false;
+handleMessage('lgt-keepalive', async function (msg, sender) {
+  return { ok: true };
 });
 
 // ---------------------------------------------------------------------
@@ -363,26 +275,16 @@ var MOBILE_EMULATION_UA_METADATA = {
 // loads) is recognized as already-held and skips re-attaching, and so
 // the existing lgt-debugger-keepalive-stop call (sent when the job
 // settles, success or failure) correctly detaches it at the end.
-function setupMobileEmulation(tabId, url) {
-  return attachDebugger(tabId).then(function () {
-    return setKeepAttached(tabId, true).then(function () {
-      return sendDebuggerCommand(tabId, 'Emulation.setDeviceMetricsOverride', {
-        width: 470, height: 944, deviceScaleFactor: 2, mobile: true
-      });
-    });
-  }).then(function () {
-    return sendDebuggerCommand(tabId, 'Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 }).catch(function () {});
-  }).then(function () {
-    return sendDebuggerCommand(tabId, 'Network.enable', {});
-  }).then(function () {
-    return sendDebuggerCommand(tabId, 'Network.setUserAgentOverride', {
-      userAgent: MOBILE_EMULATION_UA,
-      platform: 'Android',
-      userAgentMetadata: MOBILE_EMULATION_UA_METADATA
-    });
-  }).then(function () {
-    return sendDebuggerCommand(tabId, 'Page.navigate', { url: url });
-  });
+async function setupMobileEmulation(tabId, url) {
+  await debuggerSession.withSession(tabId, async send => {
+    await send('Emulation.setDeviceMetricsOverride', { width: 470, height: 944, deviceScaleFactor: 2, mobile: true });
+    try { await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 }); } catch (_) { /* best effort */ }
+    await send('Network.enable', {});
+    await send('Network.setUserAgentOverride', { userAgent: MOBILE_EMULATION_UA, platform: 'Android', userAgentMetadata: MOBILE_EMULATION_UA_METADATA });
+    // Persist the held lease before navigation can start content-script polling.
+    await workerStore.update('debugger', tabId, () => ({ held: true }));
+    await chromeCall(chrome.tabs, 'update', tabId, { url: url });
+  }, true);
 }
 
 // Tracks, per job (background/login/passive-capture) tab id, which tab &
@@ -399,120 +301,43 @@ function setupMobileEmulation(tabId, url) {
 // captured header state is - an MV3 service worker can be
 // terminated/restarted mid-flight, which would otherwise silently drop
 // the mapping.
-var JOB_ORIGIN_MAP_KEY = 'lgt-job-origin-map';
 
-function rememberJobOrigin(jobTabId, originTabId, originWindowId, cb) {
-  if (jobTabId == null || originTabId == null) { if (cb) cb(); return; }
-  chrome.storage.local.get([JOB_ORIGIN_MAP_KEY], function (res) {
-    var map = (res && res[JOB_ORIGIN_MAP_KEY]) || {};
-    map[jobTabId] = { tabId: originTabId, windowId: originWindowId };
-    var obj = {};
-    obj[JOB_ORIGIN_MAP_KEY] = map;
-    chrome.storage.local.set(obj, function () { if (cb) cb(); });
-  });
+async function rememberJobOrigin(jobTabId, originTabId, originWindowId) {
+  if (jobTabId == null || originTabId == null) return;
+  await workerStore.update('jobOrigin', jobTabId, () => ({ tabId: originTabId, windowId: originWindowId }));
 }
 
 // Reads back and removes (one-shot) the origin entry for a job tab.
-function takeJobOrigin(jobTabId, cb) {
-  chrome.storage.local.get([JOB_ORIGIN_MAP_KEY], function (res) {
-    var map = (res && res[JOB_ORIGIN_MAP_KEY]) || {};
-    var entry = map[jobTabId] || null;
-    if (entry) {
-      delete map[jobTabId];
-      var obj = {};
-      obj[JOB_ORIGIN_MAP_KEY] = map;
-      chrome.storage.local.set(obj, function () { cb(entry); });
-    } else {
-      cb(null);
-    }
-  });
+async function takeJobOrigin(jobTabId) {
+  let origin = null;
+  await workerStore.update('jobOrigin', jobTabId, value => { origin = value; return null; });
+  return origin;
 }
 
 // active:false keeps the tab out of the user's way for its whole (short)
 // lifetime; it closes itself via lgt-close-tab once its job settles
 // (success or failure alike - there's no reason to leave an inactive tab
 // open either way).
-chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
-  if (!msg || msg.type !== 'lgt-open-tab') return false;
-  // msg.device (new): 'mobile' triggers setupMobileEmulation above before
-  // navigating to the real url; anything else (or omitted) is the
-  // existing desktop-shaped behavior, unchanged.
-  var wantMobile = msg.device === 'mobile';
-  // Captured here (not later) because `sender` is only meaningful for
-  // THIS message - it identifies the tab that is CURRENTLY sending
-  // lgt-open-tab, i.e. the Generate panel's own tab, before any new job
-  // tab exists to confuse the two.
-  var originTabId = sender.tab && sender.tab.id != null ? sender.tab.id : null;
-  var originWindowId = sender.tab && sender.tab.windowId != null ? sender.tab.windowId : null;
-
-  function afterTabCreated(tabId) {
-    if (tabId == null) { sendResponse({ ok: false, error: 'tab not created' }); return; }
-    function respond(response) {
-      if (response.ok) {
-        rememberJobOrigin(tabId, originTabId, originWindowId, function () { sendResponse(response); });
-      } else {
-        sendResponse(response);
-      }
-    }
-    if (!wantMobile) { respond({ ok: true, tabId: tabId }); return; }
-    setupMobileEmulation(tabId, msg.url).then(
-      function () { respond({ ok: true, tabId: tabId }); },
-      function (err) { respond({ ok: false, error: 'mobile emulation setup failed: ' + String(err && err.message || err) }); }
-    );
+handleMessage('lgt-open-tab', async function (msg, sender) {
+  const mobile = msg.device === 'mobile';
+  let tab;
+  if (msg.active) tab = await chromeCall(chrome.tabs, 'create', { url: 'about:blank', active: true });
+  else {
+    const win = await chromeCall(chrome.windows, 'create', { url: 'about:blank', focused: false, state: 'minimized' });
+    tab = win.tabs?.[0] || (await chromeCall(chrome.tabs, 'query', { windowId: win.id }))[0];
   }
-
-  // msg.active (item 0b/0c): defaults to false (background/invisible) as
-  // before; content.js sets it true when the brand isn't yet proven to
-  // work silently, or when the user manually ticks "Show login tab".
-  if (msg.active) {
-    chrome.tabs.create({ url: wantMobile ? 'about:blank' : msg.url, active: true }, function (tab) {
-      if (chrome.runtime.lastError) { sendResponse({ ok: false, error: chrome.runtime.lastError.message }); return; }
-      afterTabCreated(tab && tab.id);
-    });
-    return true;
+  if (tab?.id == null) throw new Error('tab not created');
+  // Save opener before starting navigation; an exceptionally fast capture may
+  // finish before the tabs.update callback otherwise.
+  await rememberJobOrigin(tab.id, sender.tab?.id, sender.tab?.windowId);
+  try {
+    if (mobile) await setupMobileEmulation(tab.id, msg.url);
+    else await chromeCall(chrome.tabs, 'update', tab.id, { url: msg.url });
+    return { ok: true, tabId: tab.id };
+  } catch (error) {
+    await workerStore.update('jobOrigin', tab.id, () => null);
+    throw new Error((mobile ? 'mobile emulation setup failed: ' : '') + error.message);
   }
-  // Silent path: a plain active:false tab still lands in the CURRENT
-  // window's tab strip - visible (as a background/inactive tab), just not
-  // focused. User-confirmed 2026-08-07 this still doesn't read as
-  // "silent" (a new tab appearing at all, even unfocused, is exactly what
-  // this mode is supposed to avoid - only the Generate button's own
-  // loader should indicate anything is happening). Opening it in its own,
-  // separately minimized window instead keeps it out of the current
-  // window's tab strip entirely.
-  //
-  // A v1.9.7 attempt to avoid minimizing (positioning the window off any
-  // real monitor instead, top/left: -32000) was reverted the same day -
-  // Chrome's own chrome.windows.create validation rejects bounds where
-  // less than 50% of the window overlaps a real display ("Invalid value
-  // for bounds. Bounds must be at least 50% within visible screen space"),
-  // so that approach cannot work at all as a fully-invisible option; it
-  // isn't a workaround, it's a hard platform rule (deliberately closing
-  // exactly this kind of "genuinely invisible window" loophole for
-  // anti-abuse reasons). `state: 'minimized'` set at creation time (not as
-  // a later update) is what actually avoids an on-screen flash on most
-  // Chrome/OS combinations - a create-then-minimize as two steps reliably
-  // flashes the new window on screen first.
-  //
-  // Trade-off this reintroduces: a minimized window's page has
-  // document.visibilityState = 'hidden', which pauses/heavily throttles
-  // requestAnimationFrame - some brands' login-modal mount/animate-in
-  // apparently depends on rAF timing, which can occasionally make an
-  // already-slow modal mount even more slowly while minimized (see the
-  // un-minimize "nudge" during the slow-mount retry wait in content.js's
-  // attemptAutoLogin, which mitigates this without giving up full
-  // invisibility for the common/fast case).
-  chrome.windows.create({ url: wantMobile ? 'about:blank' : msg.url, focused: false, state: 'minimized' }, function (win) {
-    if (chrome.runtime.lastError || !win) { sendResponse({ ok: false, error: chrome.runtime.lastError ? chrome.runtime.lastError.message : 'window not created' }); return; }
-    var tab = win.tabs && win.tabs[0];
-    if (tab && tab.id != null) { afterTabCreated(tab.id); return; }
-    // Some Chrome versions don't populate `tabs` on the just-created
-    // Window object - fall back to a tab query scoped to the new window.
-    chrome.tabs.query({ windowId: win.id }, function (tabs) {
-      var t = tabs && tabs[0];
-      afterTabCreated(t && t.id);
-    });
-  });
-  return true;
 });
 
 // Item (2026-08-07 follow-up): lets the job tab's OWN content script pull
@@ -526,54 +351,30 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
 // actually in a visible/active tab already (forceVisible / already-proven
 // brand path) - updating an already-normal, unfocused-by-request window's
 // state to 'normal' again does nothing.
-chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
-  if (!msg || msg.type !== 'lgt-window-set-state') return false;
-  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
-  var state = msg.state === 'minimized' ? 'minimized' : 'normal';
-  chrome.tabs.get(sender.tab.id, function (tab) {
-    if (chrome.runtime.lastError || !tab || tab.windowId == null) { sendResponse({ ok: false, error: 'no window' }); return; }
-    chrome.windows.update(tab.windowId, { state: state, focused: false }, function () {
-      void chrome.runtime.lastError; // ignore - e.g. window already closed
-      sendResponse({ ok: true });
-    });
-  });
-  return true;
+handleMessage('lgt-window-set-state', async function (msg, sender) {
+  const tab = await chromeCall(chrome.tabs, 'get', senderTabId(sender));
+  if (tab?.windowId == null) throw new Error('no window');
+  await chromeCall(chrome.windows, 'update', tab.windowId, { state: msg.state === 'minimized' ? 'minimized' : 'normal', focused: false });
+  return { ok: true };
 });
 
-chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
-  if (!msg || msg.type !== 'lgt-close-tab') return false;
-  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
-  var jobTabId = sender.tab.id;
-  // Look up (and forget) the origin tab BEFORE removing the job tab - a
-  // successful capture should hand focus straight back to wherever the
-  // Generate panel actually is, not leave it to whatever tab Chrome's own
-  // "next active tab after this one closes" heuristic happens to pick
-  // (confirmed 2026-09-10: that heuristic is not the origin tab once the
-  // origin tab isn't also the most-recently-focused one beforehand).
-  takeJobOrigin(jobTabId, function (origin) {
-    chrome.tabs.remove(jobTabId, function () {
-      void chrome.runtime.lastError; // ignore - tab may already be gone
-      if (!origin || origin.tabId == null) { sendResponse({ ok: true }); return; }
-      chrome.tabs.update(origin.tabId, { active: true }, function () {
-        void chrome.runtime.lastError; // ignore - e.g. origin tab was itself closed meanwhile
-        if (origin.windowId == null) { sendResponse({ ok: true }); return; }
-        // Only force state to 'normal' if the origin window is actually
-        // minimized - unlike the job tab's window (which the silent path
-        // always creates minimized), the origin window is the user's own
-        // regular window and may legitimately be maximized; unconditionally
-        // setting state:'normal' here would incorrectly un-maximize it.
-        chrome.windows.get(origin.windowId, function (win) {
-          var updateProps = { focused: true };
-          if (!chrome.runtime.lastError && win && win.state === 'minimized') updateProps.state = 'normal';
-          chrome.windows.update(origin.windowId, updateProps, function () {
-            void chrome.runtime.lastError;
-            sendResponse({ ok: true });
-          });
-        });
-      });
-    });
-  });
-  return true;
+handleMessage('lgt-close-tab', async function (msg, sender) {
+  const tabId = senderTabId(sender);
+  const origin = await takeJobOrigin(tabId);
+  await debuggerSession.release(tabId);
+  await chromeCall(chrome.tabs, 'remove', tabId);
+  if (origin?.tabId != null) {
+    // Closing the origin meanwhile is expected; do not reinterpret a completed
+    // capture as a failed login merely because focus cannot be restored.
+    try {
+      await chromeCall(chrome.tabs, 'update', origin.tabId, { active: true });
+      if (origin.windowId != null) {
+        const win = await chromeCall(chrome.windows, 'get', origin.windowId);
+        await chromeCall(chrome.windows, 'update', origin.windowId, { focused: true, ...(win.state === 'minimized' ? { state: 'normal' } : {}) });
+      }
+    } catch (error) { console.warn('[link-gen-tool] origin focus unavailable:', error); }
+  }
+  return { ok: true };
 });
 
 // Brings the background tab to the front instead of closing it - used
@@ -582,28 +383,10 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
 // prompt, unexpected layout, etc.) instead of the tab silently vanishing
 // with only a generic error string to go on (added 2026-08-06 after a
 // NordicBet failure that couldn't otherwise be diagnosed remotely).
-chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
-  if (!msg || msg.type !== 'lgt-focus-tab') return false;
-  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
-  chrome.tabs.update(sender.tab.id, { active: true }, function (tab) {
-    if (chrome.runtime.lastError) { sendResponse({ ok: false, error: chrome.runtime.lastError.message }); return; }
-    if (tab && tab.windowId != null) {
-      // state: 'normal' is required here, not just focused: true - the
-      // silent path above opens the tab in its own state:'minimized'
-      // window, and focused:true alone does not reliably restore a
-      // minimized window on every platform (it can end up "focused" but
-      // still minimized/invisible). top/left reposition it to a sane
-      // on-screen spot in case anything nudged it (see lgt-window-set-
-      // state) to an unusual position first.
-      chrome.windows.update(tab.windowId, { focused: true, state: 'normal', top: 40, left: 40 }, function () {
-        void chrome.runtime.lastError;
-        sendResponse({ ok: true });
-      });
-      return;
-    }
-    sendResponse({ ok: true });
-  });
-  return true;
+handleMessage('lgt-focus-tab', async function (msg, sender) {
+  const tab = await chromeCall(chrome.tabs, 'update', senderTabId(sender), { active: true });
+  if (tab?.windowId != null) await chromeCall(chrome.windows, 'update', tab.windowId, { focused: true, state: 'normal', top: 40, left: 40 });
+  return { ok: true };
 });
 
 // ---------------------------------------------------------------------
@@ -647,7 +430,6 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
 // ---------------------------------------------------------------------
 
 var EMBED_RULE_ID_START = 900001;
-var embedRuleIdByTab = {}; // tabId -> ruleId
 
 // MV3 service workers are ephemeral - they can be unloaded and restarted
 // at any time (e.g. after ~30s idle), which resets any in-memory counter
@@ -679,13 +461,7 @@ var embedRuleIdByTab = {}; // tabId -> ruleId
 // Restricting the scan to each feature's own range makes id allocation
 // depend only on that feature's own rule count/history, never on
 // apply order relative to any other feature.
-function nextUniqueSessionRuleId(startId, endIdExclusive, cb) {
-  chrome.declarativeNetRequest.getSessionRules(function (rules) {
-    var max = startId - 1;
-    (rules || []).forEach(function (r) { if (r.id >= startId && r.id < endIdExclusive && r.id > max) max = r.id; });
-    cb(max + 1);
-  });
-}
+
 
 // Same ephemeral-service-worker problem as above, but for STATUS/STOP
 // correctness rather than id allocation: the *-RuleIdsByTab in-memory maps
@@ -700,27 +476,15 @@ function nextUniqueSessionRuleId(startId, endIdExclusive, cb) {
 // tab, filtered to the id range owned by the calling feature, is immune
 // to this regardless of how many times the service worker restarted
 // between Apply and this call.
-function getOwnSessionRuleIdsForTab(tabId, startId, endIdExclusive) {
-  return new Promise(function (resolve) {
-    chrome.declarativeNetRequest.getSessionRules(function (rules) {
-      var ids = (rules || []).filter(function (r) {
-        return r.id >= startId && r.id < endIdExclusive &&
-          r.condition && Array.isArray(r.condition.tabIds) && r.condition.tabIds.indexOf(tabId) !== -1;
-      }).map(function (r) { return r.id; });
-      resolve(ids);
-    });
-  });
+async function getOwnSessionRuleIdsForTab(tabId, startId, endIdExclusive) {
+  await dnr.ready;
+  const rules = await chromeCall(chrome.declarativeNetRequest, 'getSessionRules');
+  return rules.filter(rule => rule.id >= startId && rule.id < endIdExclusive && rule.condition?.tabIds?.includes(tabId)).map(rule => rule.id);
 }
 
-function startEmbedRule(tabId, origin) {
-  var previousRuleId = embedRuleIdByTab[tabId]; // swap atomically instead of
-  // leaking the old rule - without this, re-clicking "Embed here" in the
-  // same tab would leave a stale rule alongside the new one.
-  return new Promise(function (resolve, reject) {
-    nextUniqueSessionRuleId(EMBED_RULE_ID_START, BLE_DATA_RULE_ID_START, function (ruleId) {
-      chrome.declarativeNetRequest.updateSessionRules({
-        addRules: [{
-          id: ruleId,
+async function startEmbedRule(tabId, origin) {
+  return dnr.apply('embed', tabId, { scope: { kind: 'origin', value: origin } }, async () => allocate => [{
+          id: allocate(1)[0],
           priority: 1,
           action: {
             type: 'modifyHeaders',
@@ -734,48 +498,22 @@ function startEmbedRule(tabId, origin) {
             resourceTypes: ['sub_frame'],
             tabIds: [tabId]
           }
-        }],
-        removeRuleIds: previousRuleId ? [previousRuleId] : []
-      }, function () {
-        if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
-        embedRuleIdByTab[tabId] = ruleId;
-        resolve();
-      });
-    });
-  });
+        }]);
 }
 
-function stopEmbedRule(tabId) {
-  var ruleId = embedRuleIdByTab[tabId];
-  if (!ruleId) return Promise.resolve();
-  delete embedRuleIdByTab[tabId];
-  return new Promise(function (resolve) {
-    chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [ruleId] }, function () {
-      void chrome.runtime.lastError; // ignore - rule may already be gone
-      resolve();
-    });
-  });
-}
+function stopEmbedRule(tabId) { return dnr.stop('embed', tabId); }
 
-chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
-  if (!msg || msg.type !== 'lgt-embed-start') return false;
-  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
-  var tabId = sender.tab.id;
-  var origin = msg.origin;
-  if (!origin) { sendResponse({ ok: false, error: 'no origin' }); return false; }
-  stopEmbedRule(tabId).then(function () { return startEmbedRule(tabId, origin); }).then(function () {
-    sendResponse({ ok: true });
-  }).catch(function (err) {
-    sendResponse({ ok: false, error: String(err && err.message || err) });
-  });
-  return true;
+handleMessage('lgt-embed-start', async function (msg, sender) {
+  const tabId = senderTabId(sender);
+  if (!msg.origin) throw new Error('no origin');
+  await startEmbedRule(tabId, msg.origin);
+  return { ok: true };
 });
 
-chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
-  if (!msg || msg.type !== 'lgt-embed-stop') return false;
-  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
-  stopEmbedRule(sender.tab.id).then(function () { sendResponse({ ok: true }); });
-  return true;
+handleMessage('lgt-embed-stop', async function (msg, sender) {
+  const tabId = senderTabId(sender);
+  await stopEmbedRule(tabId);
+  return { ok: true };
 });
 
 // Safety net - never leave a header-stripping rule behind on a closed or
@@ -783,64 +521,13 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
 // restart, but a long-lived tab reused for other browsing later
 // shouldn't keep silently stripping these headers for that origin).
 chrome.tabs.onRemoved.addListener(function (tabId) {
-  stopEmbedRule(tabId);
-  stopSrSpoofRule(tabId);
-  stopBleCorsRule(tabId);
-  stopBundleOverrideRule(tabId);
-  stopBleDataOverrideRule(tabId);
-  setKeepAttached(tabId, false);
-  delete runtimeMarkersByTab[tabId];
-  delete networkByTab[tabId];
-  delete frameDocByTab[tabId];
-  // Safety net for the job-origin map (see lgt-open-tab/lgt-close-tab
-  // above): a job whose tab is closed by the USER (manually, e.g. a failed
-  // login left visible via lgt-focus-tab) rather than via lgt-close-tab
-  // never gets its own map entry cleaned up otherwise - it would just sit
-  // there forever as harmless but unbounded storage growth across many
-  // sessions.
-  takeJobOrigin(tabId, function () {});
-});
-chrome.tabs.onUpdated.addListener(function (tabId, changeInfo) {
-  if (changeInfo.status === 'loading' && embedRuleIdByTab[tabId]) stopEmbedRule(tabId);
-  if (changeInfo.status === 'loading' && srSpoofRuleIdByTab[tabId]) {
-    // Every navigation (including our OWN deliberate about:blank -> target-
-    // URL hop right after the rule is added, and every later manual
-    // reload/F5 of the same page) fires a 'loading' status change here, not
-    // just "user navigated to a different, unrelated site". Naively
-    // stopping the rule on ANY 'loading' event was removing it the instant
-    // the real navigation began (or on every refresh), so the page's first
-    // Sportradar requests always ran unspoofed and showed the licensing
-    // error before the fix could ever apply - confirmed by the user
-    // (2026-08-07). Only tear the rule down when the tab is actually
-    // navigating to a DIFFERENT origin than the one it was opened for;
-    // same-origin reloads/SPA navigations (changeInfo.url absent, or same
-    // origin) must keep the rule alive.
-    var expectedOrigin = srSpoofExpectedOriginByTab[tabId];
-    var navigatingAway = false;
-    if (changeInfo.url && expectedOrigin) {
-      try { navigatingAway = new URL(changeInfo.url).origin !== expectedOrigin; }
-      catch (e) { navigatingAway = false; }
-    }
-    if (navigatingAway) stopSrSpoofRule(tabId);
-  }
-  if (changeInfo.status === 'loading' && bleCorsRuleIdByTab[tabId]) {
-    // Same "same-origin reload/SPA-nav vs. actually left the page" logic as
-    // the Sportradar-spoof cleanup above - a fresh bleSource=1 navigation to
-    // the SAME origin re-adds its own replacement rule via onBeforeNavigate
-    // anyway, so only tear down here when the tab has genuinely moved to a
-    // different origin.
-    var bleExpectedOrigin = bleCorsExpectedOriginByTab[tabId];
-    var bleNavigatingAway = false;
-    if (changeInfo.url && bleExpectedOrigin) {
-      try { bleNavigatingAway = new URL(changeInfo.url).origin !== bleExpectedOrigin; }
-      catch (e) { bleNavigatingAway = false; }
-    }
-    if (bleNavigatingAway) stopBleCorsRule(tabId);
-  }
-  // Bundle Override's own stale-rule cleanup runs in
-  // chrome.webNavigation.onBeforeNavigate instead (see the comment there)
-  // - onUpdated's 'loading' event fires too late to reliably beat the new
-  // page's own first bundle-file request.
+  navigationTasks.cancel(tabId);
+  dnr.cancelTab(tabId);
+  void observeTask((async () => {
+    await dnr.dropTab(tabId);
+    await debuggerSession.release(tabId);
+    await workerStore.dropTab(tabId);
+  })(), 'tab cleanup');
 });
 
 // ---------------------------------------------------------------------
@@ -864,25 +551,10 @@ chrome.tabs.onUpdated.addListener(function (tabId, changeInfo) {
 // ---------------------------------------------------------------------
 
 var SR_SPOOF_RULE_ID_START = 950001;
-var srSpoofRuleIdByTab = {}; // tabId -> ruleId
-var srSpoofExpectedOriginByTab = {}; // tabId -> origin of the URL the tab was
-// opened for, so the onUpdated cleanup listener can tell "still on the same
-// page (reload/SPA nav)" apart from "user actually navigated to a different
-// site in this tab" (see that listener for why this distinction matters).
 
-function startSrSpoofRule(tabId, spoofOrigin, requestDomains) {
-  var previousRuleId = srSpoofRuleIdByTab[tabId]; // swap atomically below instead of
-  // leaking the old rule - without this, re-navigating the same tab through
-  // this function twice (e.g. auto-detect firing again on a reload, or a
-  // brand switch in the same tab) would leave a stale rule alongside the
-  // new one, and declarativeNetRequest's behavior with two same-priority
-  // modifyHeaders rules matching the same request is not something to rely
-  // on.
-  return new Promise(function (resolve, reject) {
-    nextUniqueSessionRuleId(SR_SPOOF_RULE_ID_START, BLE_CORS_RULE_ID_START, function (ruleId) {
-      chrome.declarativeNetRequest.updateSessionRules({
-        addRules: [{
-          id: ruleId,
+async function startSrSpoofRule(tabId, spoofOrigin, requestDomains, expectedOrigin) {
+  return dnr.apply('sportradar', tabId, { scope: { kind: 'origin', value: expectedOrigin || new URL((await chromeCall(chrome.tabs, 'get', tabId)).url).origin } }, async () => allocate => [{
+          id: allocate(1)[0],
           priority: 1,
           action: {
             type: 'modifyHeaders',
@@ -929,29 +601,10 @@ function startSrSpoofRule(tabId, spoofOrigin, requestDomains) {
             resourceTypes: ['xmlhttprequest', 'sub_frame', 'script', 'image', 'websocket', 'ping', 'other'],
             tabIds: [tabId]
           }
-        }],
-        removeRuleIds: previousRuleId ? [previousRuleId] : []
-      }, function () {
-        if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
-        srSpoofRuleIdByTab[tabId] = ruleId;
-        resolve();
-      });
-    });
-  });
+        }]);
 }
 
-function stopSrSpoofRule(tabId) {
-  var ruleId = srSpoofRuleIdByTab[tabId];
-  if (!ruleId) return Promise.resolve();
-  delete srSpoofRuleIdByTab[tabId];
-  delete srSpoofExpectedOriginByTab[tabId];
-  return new Promise(function (resolve) {
-    chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [ruleId] }, function () {
-      void chrome.runtime.lastError; // ignore - rule may already be gone
-      resolve();
-    });
-  });
-}
+function stopSrSpoofRule(tabId) { return dnr.stop('sportradar', tabId); }
 
 // ---------------------------------------------------------------------
 // Auto-apply Sportradar spoofing on every matching navigation - no button
@@ -1068,101 +721,29 @@ function realBrandOriginBg(brandKey, environment) {
   return 'https://www.' + prefix + domain;
 }
 
-if (chrome.webNavigation && chrome.webNavigation.onBeforeNavigate) {
+if (chrome.webNavigation?.onBeforeNavigate) {
   chrome.webNavigation.onBeforeNavigate.addListener(function (details) {
-    if (details.frameId !== 0) return; // top-level navigations only
-
-    // Bundle Override stale-rule cleanup (2026-08-10 fix) - MUST run here,
-    // in onBeforeNavigate (fires before the navigation's own first request
-    // goes out), not in chrome.tabs.onUpdated's 'loading' event (which
-    // fires too late in practice: the async declarativeNetRequest rule
-    // removal was still in flight by the time the new page's first script
-    // request already matched the stale rule, confirmed by a live repro
-    // where the old removal-on-'loading' approach still let the override
-    // carry over - the whole point is to guarantee removal happens BEFORE
-    // any request the new page makes, not merely "eventually"). Placed
-    // ahead of the playground-host detection below and NOT gated on it,
-    // since Bundle Override must be cleared even if the tab is navigating
-    // away to something that isn't itself a recognized playground host.
-    // Deliberately compares the FULL URL, not just the origin - unlike BLE
-    // Data below, the Bundle redirect condition (urlFilter matching
-    // brandId/device/prefix, see buildBundleRedirectRules) is NOT anchored
-    // to a specific host, so it would otherwise keep silently redirecting
-    // the bundle on ANY other same-origin page the user browses to next in
-    // this tab - confirmed as the actual real-world bug this cleanup
-    // exists to prevent (see test-bundle-override-stale-cleanup.cjs).
-    if (bundleRuleIdsByTab[details.tabId]) {
-      var bundleExpectedUrl = bundleExpectedUrlByTab[details.tabId];
-      if (bundleExpectedUrl && details.url !== bundleExpectedUrl) {
-        stopBundleOverrideRule(details.tabId).catch(function (err) {
-          console.warn('[link-gen-tool] stale Bundle Override cleanup failed:', err);
-        });
+    // This is an early signal, not a blocking navigation hook. Chrome does not
+    // await DNR removal. Explicitly opened tabs install rules before navigation.
+    void observeTask(detection.navigate(details), 'clear document observations');
+    if (details.frameId !== 0) return;
+    const cleanup = dnr.navigate(details.tabId, details.url); // cancels unfinished Apply synchronously
+    void observeTask(navigationTasks.run(details.tabId, async isCurrent => {
+      await cleanup;
+      if (!isCurrent()) return;
+      const url = new URL(details.url);
+      const info = detectBrandAndEnvFromPlaygroundHost(url.hostname);
+      if (!info) return;
+      if (url.searchParams.get('bleSource') === '1' && PLAYGROUND_HOST_SUFFIX[info.brand]) {
+        await startBleCorsRule(details.tabId, PLAYGROUND_HOST_SUFFIX[info.brand], url.origin);
       }
-    }
-
-    // Same stale-rule cleanup intent, but for BLE Data Override compares
-    // only the ORIGIN, not the full URL (2026-08-10 follow-up fix, real
-    // bug: BLE Data's redirect condition IS anchored to a specific host
-    // (regexFilter built from escapeRegexLiteral(currentHost) - see
-    // startBleDataOverrideRule), so it can only ever match requests from
-    // that exact host regardless of path/query - a same-origin
-    // reload/redirect/query-param change (common on SPA sportsbook pages)
-    // does NOT invalidate it, but comparing the exact full URL string was
-    // wrongly treating any such change as "navigated away" and tearing the
-    // override down before the reloaded page's own requests went out -
-    // confirmed live (2026-08-10): applying BLE Data + Bundle Override
-    // together, then reloading, left BLE Data reporting "not active" and
-    // no fresh data flowing, while Bundle Override (already origin-
-    // tolerant via its own, unrelated urlFilter pattern) kept working.
-    // Only a genuinely different ORIGIN un-anchors the redirect regex, so
-    // only that should clear it - matches the same reasoning already
-    // proven for the Sportradar-spoof rule below (see its onUpdated
-    // 'loading' handler comment).
-    if (bleDataRuleIdsByTab[details.tabId]) {
-      var bleDataExpectedOrigin = bleDataExpectedOriginByTab[details.tabId];
-      var navOrigin;
-      try { navOrigin = new URL(details.url).origin; } catch (e) { navOrigin = null; }
-      if (bleDataExpectedOrigin && navOrigin && navOrigin !== bleDataExpectedOrigin) {
-        stopBleDataOverrideRule(details.tabId).catch(function (err) {
-          console.warn('[link-gen-tool] stale BLE Data Override cleanup failed:', err);
-        });
-      }
-    }
-
-    var hostname;
-    try { hostname = new URL(details.url).hostname; } catch (e) { return; }
-    var info = detectBrandAndEnvFromPlaygroundHost(hostname);
-    if (!info) return;
-
-    // bleSource=1 mobile CORS fix - see comment block above startBleCorsRule.
-    // Deliberately independent of the Sportradar-spoof machinery below (does
-    // NOT require a resolvable real brand domain/spoofOrigin - it only needs
-    // the playground suffix, which every entry in PLAYGROUND_HOST_SUFFIX
-    // already has); only gated on the URL actually carrying bleSource=1.
-    var isBleSource = false;
-    try { isBleSource = new URL(details.url).searchParams.get('bleSource') === '1'; } catch (e) { /* ignore */ }
-    if (isBleSource) {
-      var playgroundSuffix = PLAYGROUND_HOST_SUFFIX[info.brand];
-      if (playgroundSuffix) {
-        var bleTabId = details.tabId;
-        try { bleCorsExpectedOriginByTab[bleTabId] = new URL(details.url).origin; } catch (e) { /* ignore */ }
-        startBleCorsRule(bleTabId, playgroundSuffix).catch(function (err) {
-          console.warn('[link-gen-tool] auto bleSource CORS fix failed:', err);
-        });
-      }
-    }
-
-    var spoofOrigin = realBrandOriginBg(info.brand, info.environment);
-    if (!spoofOrigin) return;
-    chrome.storage.local.get([SR_SPOOF_SETTING_KEY], function (res) {
-      var enabled = !res || typeof res[SR_SPOOF_SETTING_KEY] !== 'boolean' || res[SR_SPOOF_SETTING_KEY];
-      if (!enabled) return;
-      var tabId = details.tabId;
-      try { srSpoofExpectedOriginByTab[tabId] = new URL(details.url).origin; } catch (e) { /* ignore */ }
-      startSrSpoofRule(tabId, spoofOrigin).catch(function (err) {
-        console.warn('[link-gen-tool] auto Sportradar spoof failed:', err);
-      });
-    });
+      if (!isCurrent()) return;
+      const spoofOrigin = realBrandOriginBg(info.brand, info.environment);
+      if (!spoofOrigin) return;
+      const setting = await chromeCall(chrome.storage.local, 'get', SR_SPOOF_SETTING_KEY);
+      if (!isCurrent()) return;
+      if (setting[SR_SPOOF_SETTING_KEY] !== false) await startSrSpoofRule(details.tabId, spoofOrigin, undefined, url.origin);
+    }), 'navigation overrides');
   });
 }
 
@@ -1197,18 +778,10 @@ var BLE_CORS_RULE_ID_START = 970001;
 var BLE_CORS_RULE_ID_END = 990001; // exclusive upper bound of this
 // feature's own id range, used to scope nextUniqueSessionRuleId's max-id
 // scan (see that function's comment for why this is required).
-var bleCorsRuleIdByTab = {}; // tabId -> ruleId
-var bleCorsExpectedOriginByTab = {}; // tabId -> origin of the URL the tab was
-// opened for, same "reload/SPA-nav vs actually left the page" distinction as
-// srSpoofExpectedOriginByTab above.
 
-function startBleCorsRule(tabId, playgroundSuffix) {
-  var previousRuleId = bleCorsRuleIdByTab[tabId];
-  return new Promise(function (resolve, reject) {
-    nextUniqueSessionRuleId(BLE_CORS_RULE_ID_START, BLE_CORS_RULE_ID_END, function (ruleId) {
-      chrome.declarativeNetRequest.updateSessionRules({
-        addRules: [{
-          id: ruleId,
+async function startBleCorsRule(tabId, playgroundSuffix, expectedOrigin) {
+  return dnr.apply('bleCors', tabId, { scope: { kind: 'origin', value: expectedOrigin || new URL((await chromeCall(chrome.tabs, 'get', tabId)).url).origin } }, async () => allocate => [{
+          id: allocate(1)[0],
           priority: 1,
           action: {
             type: 'modifyHeaders',
@@ -1222,29 +795,10 @@ function startBleCorsRule(tabId, playgroundSuffix) {
             resourceTypes: ['xmlhttprequest', 'sub_frame', 'script', 'image', 'websocket', 'ping', 'other'],
             tabIds: [tabId]
           }
-        }],
-        removeRuleIds: previousRuleId ? [previousRuleId] : []
-      }, function () {
-        if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
-        bleCorsRuleIdByTab[tabId] = ruleId;
-        resolve();
-      });
-    });
-  });
+        }]);
 }
 
-function stopBleCorsRule(tabId) {
-  var ruleId = bleCorsRuleIdByTab[tabId];
-  if (!ruleId) return Promise.resolve();
-  delete bleCorsRuleIdByTab[tabId];
-  delete bleCorsExpectedOriginByTab[tabId];
-  return new Promise(function (resolve) {
-    chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [ruleId] }, function () {
-      void chrome.runtime.lastError; // ignore - rule may already be gone
-      resolve();
-    });
-  });
-}
+function stopBleCorsRule(tabId) { return dnr.stop('bleCors', tabId); }
 
 // ---------------------------------------------------------------------
 // BLE Data Override - resolves the "22-es csapda" (catch-22) between
@@ -1306,18 +860,14 @@ function stopBleCorsRule(tabId) {
 // ---------------------------------------------------------------------
 
 var BLE_DATA_RULE_ID_START = 910001;
-var bleDataRuleIdsByTab = {}; // tabId -> [redirectRuleId, headerRuleId]
-var bleDataExpectedOriginByTab = {}; // tabId -> the ORIGIN the override was
-// applied for, same stale-cleanup role as bundleExpectedOriginByTab above.
 
 function escapeRegexLiteral(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function startBleDataOverrideRule(tabId, currentHost, alphaHost, stc, ctx) {
-  var previousRuleIds = bleDataRuleIdsByTab[tabId];
-  return new Promise(function (resolve, reject) {
-    nextUniqueSessionRuleIds(BLE_DATA_RULE_ID_START, BUNDLE_RULE_ID_START, 2, function (ruleIds) {
+async function startBleDataOverrideRule(tabId, currentHost, alphaHost, stc, ctx, expectedOrigin) {
+  return dnr.apply('bleData', tabId, { scope: { kind: 'origin', value: expectedOrigin || 'https://' + currentHost } }, async () => allocate => {
+    const ruleIds = allocate(2);
       var redirectRule = {
         id: ruleIds[0],
         priority: 1,
@@ -1351,52 +901,24 @@ function startBleDataOverrideRule(tabId, currentHost, alphaHost, stc, ctx) {
           tabIds: [tabId]
         }
       };
-      chrome.declarativeNetRequest.updateSessionRules({
-        addRules: [redirectRule, headerRule],
-        removeRuleIds: previousRuleIds || []
-      }, function () {
-        if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
-        bleDataRuleIdsByTab[tabId] = [redirectRule.id, headerRule.id];
-        resolve();
-      });
-    });
+
+    return [redirectRule, headerRule];
   });
 }
 
-function stopBleDataOverrideRule(tabId) {
-  var ruleIds = bleDataRuleIdsByTab[tabId];
-  delete bleDataExpectedOriginByTab[tabId];
-  delete bleDataRuleIdsByTab[tabId];
-  // Also query the browser's own live session rules for this tab/id-range,
-  // not just the in-memory map - a service-worker restart between Apply
-  // and Stop/navigation wipes bleDataRuleIdsByTab (plain JS variable) but
-  // NOT the actual declarativeNetRequest session rules (those persist
-  // across SW restarts within the same browser session), so trusting the
-  // memory map alone can silently leave a real rule behind uncleared.
-  return getOwnSessionRuleIdsForTab(tabId, BLE_DATA_RULE_ID_START, BUNDLE_RULE_ID_START).then(function (liveIds) {
-    var allIds = (ruleIds || []).concat(liveIds).filter(function (id, i, arr) { return arr.indexOf(id) === i; });
-    if (!allIds.length) return;
-    return new Promise(function (resolve) {
-      chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: allIds }, function () {
-        void chrome.runtime.lastError; // ignore - rules may already be gone
-        resolve();
-      });
-    });
-  });
-}
+function stopBleDataOverrideRule(tabId) { return dnr.stop('bleData', tabId); }
 
-chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
-  if (!msg || msg.type !== 'lgt-ble-data-start') return false;
-  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
+handleMessage('lgt-ble-data-start', async function (msg, sender) {
+  if (!sender.tab || sender.tab.id == null) { return { ok: false, error: 'no tab' }; }
   var tabId = sender.tab.id;
   var alphaHost = msg.alphaHost, stc = msg.stc, ctx = msg.ctx;
-  if (!alphaHost || !stc || !ctx) { sendResponse({ ok: false, error: 'missing alphaHost, stc, or ctx' }); return false; }
+  if (!alphaHost || !stc || !ctx) { return { ok: false, error: 'missing alphaHost, stc, or ctx' }; }
   var currentHost, currentOrigin;
   try {
     var u = new URL(sender.tab.url);
     currentHost = u.hostname;
     currentOrigin = u.origin;
-  } catch (e) { sendResponse({ ok: false, error: 'could not read current tab URL' }); return false; }
+  } catch (e) { return { ok: false, error: 'could not read current tab URL' }; }
 
   // A real brand's TEST shell can enter maintenance before its
   // GameLauncher has created the sportsbook at all. In that state there
@@ -1414,47 +936,28 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       var isProdBrandHost = brandDomain &&
         (bootstrap.hostname === brandDomain || bootstrap.hostname === 'www.' + brandDomain);
       if (bootstrap.protocol !== 'https:' || !isProdBrandHost) {
-        sendResponse({ ok: false, error: 'invalid BLE maintenance bootstrap URL' });
-        return false;
+        return { ok: false, error: 'invalid BLE maintenance bootstrap URL' };
       }
       sourceHost = bootstrap.hostname;
       expectedOrigin = bootstrap.origin;
     } catch (e) {
-      sendResponse({ ok: false, error: 'invalid BLE maintenance bootstrap URL' });
-      return false;
+      return { ok: false, error: 'invalid BLE maintenance bootstrap URL' };
     }
   }
-  if (expectedOrigin) bleDataExpectedOriginByTab[tabId] = expectedOrigin;
-  startBleDataOverrideRule(tabId, sourceHost, alphaHost, stc, ctx).then(function () {
-    sendResponse({ ok: true });
-  }).catch(function (err) {
-    sendResponse({ ok: false, error: String(err && err.message || err) });
-  });
-  return true;
+  await startBleDataOverrideRule(tabId, sourceHost, alphaHost, stc, ctx, expectedOrigin);
+  return { ok: true };
 });
 
-chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
-  if (!msg || msg.type !== 'lgt-ble-data-stop') return false;
-  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
-  stopBleDataOverrideRule(sender.tab.id).then(function () { sendResponse({ ok: true }); });
-  return true;
+handleMessage('lgt-ble-data-stop', async function (msg, sender) {
+  const tabId = senderTabId(sender);
+  await stopBleDataOverrideRule(tabId);
+  return { ok: true };
 });
 
-chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
-  if (!msg || msg.type !== 'lgt-ble-data-status') return false;
-  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
-  var tabId = sender.tab.id;
-  // Derive truth from the browser's own live session rules, not just the
-  // in-memory map (see stopBleDataOverrideRule comment above for why the
-  // map alone is unsafe after a service-worker restart) - resync the map
-  // from whatever is actually still registered so later stop/reapply
-  // calls stay consistent.
-  getOwnSessionRuleIdsForTab(tabId, BLE_DATA_RULE_ID_START, BUNDLE_RULE_ID_START).then(function (liveIds) {
-    if (liveIds.length) bleDataRuleIdsByTab[tabId] = liveIds;
-    else delete bleDataRuleIdsByTab[tabId];
-    sendResponse({ ok: true, active: liveIds.length > 0 });
-  });
-  return true;
+handleMessage('lgt-ble-data-status', async function (msg, sender) {
+  const tabId = senderTabId(sender);
+  const { rules } = await dnr.status('bleData', tabId);
+  return { ok: true, active: rules.length > 0 };
 });
 
 // ---------------------------------------------------------------------
@@ -1505,35 +1008,7 @@ function bundleEnvironmentsInLayer(environment) {
 }
 
 var BUNDLE_RULE_ID_START = 930001;
-var bundleRuleIdsByTab = {}; // tabId -> ruleId[] - an override can add up
-// to ~4 rules at once (2 devices x N files-per-device), unlike the single-
-// rule-per-tab features above, so this tracks an array, not one id.
-var bundleTargetEnvByTab = {}; // tabId -> the env the Bundle tab last
-// applied ('alpha'/'prod'/'qa'/'test') - a best-effort synchronous cache
-// (refreshed from the browser's own live session rules on every
-// lgt-bundle-status poll, same self-healing pattern as bundleRuleIdsByTab
-// above) that lets computeDetectionRows recognize the ONE specific,
-// already-documented divergence a Bundle Override intentionally causes
-// (see bundleTargetNeedsMfeOverrideFlag's comment: the startup context
-// stays pinned to the layer's base environment/version even once the
-// actual network artifact has been redirected) instead of flagging it as
-// a false Mismatch.
-var bundleExpectedUrlByTab = {}; // tabId -> the FULL URL (not just origin)
-// the tab was showing when Bundle Override was applied - see the
-// stale-cleanup logic in chrome.webNavigation.onBeforeNavigate above for
-// why this must be the whole URL, unlike the origin-only tracking used by
-// BLE Data Override/Sportradar-spoof/BLE-CORS.
-var bundleMatchedByTab = {}; // tabId -> {ruleId, requestUrl, timestamp}[] -
-// populated by the onRuleMatchedDebug listener below, purely for the
-// Bundle tab's own "N request(s) redirected" status readout - the same
-// verification role the standalone tool's Service Worker console log
-// plays (see REFERENCE.md "Debugging").
 
-var bundleIndexerCache = {}; // targetEnv -> {ts, data} - avoids re-fetching
-// indexer.json on every single Apply click while the Bundle tab stays
-// open; intentionally not persisted anywhere and lost on a service-worker
-// restart, which just means the next Apply re-fetches - never stale
-// beyond BUNDLE_INDEXER_CACHE_MS.
 var BUNDLE_INDEXER_CACHE_MS = 5 * 60 * 1000;
 
 // The QA Sportsbook Tool derives the effective mFE environment from the
@@ -1563,8 +1038,7 @@ function bundleOverrideBaseEnvFor(targetEnv) {
   return BUNDLE_ENV_LAYERS[targetEnv] === 'ble' ? 'qa' : 'prod';
 }
 
-function bundleOverrideExplainsEnvDivergence(tabId, runtimeEnv, networkEnv) {
-  var targetEnv = bundleTargetEnvByTab[tabId];
+function bundleOverrideExplainsEnvDivergence(targetEnv, runtimeEnv, networkEnv) {
   if (!targetEnv || !bundleTargetNeedsMfeOverrideFlag(targetEnv)) return false;
   return runtimeEnv === bundleOverrideBaseEnvFor(targetEnv) && networkEnv === normalizeEnv(targetEnv);
 }
@@ -1606,16 +1080,7 @@ function setBundleMfeOverrideFlag(tabId, targetEnv) {
   });
 }
 
-function getLiveBundleRulesForTab(tabId) {
-  return new Promise(function (resolve) {
-    chrome.declarativeNetRequest.getSessionRules(function (allRules) {
-      resolve((allRules || []).filter(function (rule) {
-        return rule.id >= BUNDLE_RULE_ID_START && rule.id < SR_SPOOF_RULE_ID_START &&
-          rule.condition && Array.isArray(rule.condition.tabIds) && rule.condition.tabIds.indexOf(tabId) !== -1;
-      }));
-    });
-  });
-}
+async function getLiveBundleRulesForTab(tabId) { return (await dnr.status('bundle', tabId)).rules; }
 
 function bundleTargetEnvFromRules(liveRules) {
   var targetEnvs = (liveRules || []).map(function (rule) {
@@ -1626,26 +1091,32 @@ function bundleTargetEnvFromRules(liveRules) {
   return targetEnvs.length === 1 ? targetEnvs[0] : null;
 }
 
-function syncBundleMfeOverrideFlag(tabId) {
-  return getLiveBundleRulesForTab(tabId).then(function (liveRules) {
-    return setBundleMfeOverrideFlag(tabId, bundleTargetEnvFromRules(liveRules));
-  });
+async function syncBundleMfeOverrideFlag(tabId) {
+  const liveRules=await getLiveBundleRulesForTab(tabId);
+	return await setBundleMfeOverrideFlag(tabId,bundleTargetEnvFromRules(liveRules));
 }
 
-function fetchBundleIndexer(targetEnv) {
-  var cached = bundleIndexerCache[targetEnv];
-  if (cached && (Date.now() - cached.ts) < BUNDLE_INDEXER_CACHE_MS) {
-    return Promise.resolve(cached.data);
-  }
-  var url = BUNDLE_INDEXER_URLS[targetEnv];
-  if (!url) return Promise.reject(new Error('Unknown target env: ' + targetEnv));
-  return fetch(url).then(function (r) {
-    if (!r.ok) throw new Error('indexer.json fetch failed: HTTP ' + r.status);
-    return r.json();
-  }).then(function (data) {
-    bundleIndexerCache[targetEnv] = { ts: Date.now(), data: data };
-    return data;
-  });
+async function fetchBundleIndexer(targetEnv) {
+  const url = BUNDLE_INDEXER_URLS[targetEnv];
+  if (!url) throw new Error('Unknown target env: ' + targetEnv);
+  let cache;
+  try {
+    cache = await caches.open('lgt-indexer-v2');
+    const cached = await cache.match(url);
+    if (cached) {
+      const age = Date.now() - Number(cached.headers.get('x-lgt-cached-at'));
+      if (age >= 0 && age < BUNDLE_INDEXER_CACHE_MS) return await cached.json();
+      await cache.delete(url);
+    }
+  } catch (error) { console.warn('[link-gen-tool] indexer cache read unavailable:', error); }
+  const response = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(25000) });
+  if (!response.ok) throw new Error('indexer.json fetch failed: HTTP ' + response.status);
+  const data = await response.json();
+  if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Invalid indexer.json');
+  try {
+    if (cache) await cache.put(url, new Response(JSON.stringify(data), { headers: { 'content-type': 'application/json', 'x-lgt-cached-at': String(Date.now()) } }));
+  } catch (error) { console.warn('[link-gen-tool] indexer cache write unavailable:', error); }
+  return data;
 }
 
 // Same service-worker-restart-safe id allocation as nextUniqueSessionRuleId
@@ -1658,15 +1129,7 @@ function fetchBundleIndexer(targetEnv) {
 // its comment for the full root-cause writeup) - `endIdExclusive` is
 // REQUIRED and the max-id scan is restricted to this feature's own
 // range, never the global max across all registered rules.
-function nextUniqueSessionRuleIds(startId, endIdExclusive, count, cb) {
-  chrome.declarativeNetRequest.getSessionRules(function (rules) {
-    var max = startId - 1;
-    (rules || []).forEach(function (r) { if (r.id >= startId && r.id < endIdExclusive && r.id > max) max = r.id; });
-    var ids = [];
-    for (var i = 1; i <= count; i++) ids.push(max + i);
-    cb(ids);
-  });
-}
+
 
 // Builds one declarativeNetRequest redirect rule per bundle file listed in
 // the target env's indexer.json for this brand (device-agnostic - iterates
@@ -1947,74 +1410,29 @@ function buildBundleRedirectRules(indexerData, layerIndexerData, brandId, target
   return { rules: rules, skippedNoBrand: false };
 }
 
-function startBundleOverrideRule(tabId, targetEnv, brandId, currentEnv, pageOrigin) {
-  var previousRuleIds = bundleRuleIdsByTab[tabId]; // swap atomically, same
-  // reasoning as the other three declarativeNetRequest features above -
-  // re-applying (e.g. switching target env without disabling first) must
-  // not leave the old rules alongside the new ones.
-  // Cross-Layer Lab compares all four live indexers so source-only main/shell
-  // entrypoints are neutralized as well. Standard mode retains the narrower
-  // same-layer lookup and behavior.
-  var layerEnvironments = currentEnv && BUNDLE_ENV_LAYERS[currentEnv] !== BUNDLE_ENV_LAYERS[targetEnv]
-    ? Object.keys(BUNDLE_INDEXER_URLS)
-    : bundleEnvironmentsInLayer(targetEnv);
-  return Promise.all(layerEnvironments.map(function (environment) {
-    return fetchBundleIndexer(environment).then(function (data) {
-      return { environment: environment, data: data };
-    }).catch(function (err) {
-      if (environment === targetEnv) throw err;
-      return { environment: environment, data: null };
-    });
-  })).then(function (layerResults) {
-    var targetResult = layerResults.filter(function (result) { return result.environment === targetEnv; })[0];
-    var indexerData = targetResult && targetResult.data;
-    var layerIndexerData = layerResults.map(function (result) { return result.data; }).filter(function (data) { return !!data; });
-    return new Promise(function (resolve, reject) {
-      // Reserve room for both target redirects and same-layer source-only
-      // entrypoint neutralizers, plus one generic unlisted-chunk catch-all
-      // noop rule per device (desktop, mobile) - see buildBundleRedirectRules.
-      nextUniqueSessionRuleIds(BUNDLE_RULE_ID_START, SR_SPOOF_RULE_ID_START, 23, function (ruleIds) {
-        var crossLayer = !!currentEnv && BUNDLE_ENV_LAYERS[currentEnv] !== BUNDLE_ENV_LAYERS[targetEnv];
-        var built = buildBundleRedirectRules(indexerData, layerIndexerData, brandId, targetEnv, tabId, ruleIds, crossLayer, currentEnv, pageOrigin);
-        if (built.skippedNoBrand) { reject(new Error('Brand not found in ' + targetEnv + ' indexer.json')); return; }
-        if (!built.rules.length) { reject(new Error('No bundle files found for this brand/env')); return; }
-        chrome.declarativeNetRequest.updateSessionRules({
-          addRules: built.rules,
-          removeRuleIds: previousRuleIds || []
-        }, function () {
-          if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
-          bundleRuleIdsByTab[tabId] = built.rules.map(function (r) { return r.id; });
-          bundleTargetEnvByTab[tabId] = targetEnv;
-          bundleMatchedByTab[tabId] = []; // reset the log for a fresh override
-          resolve({ ruleCount: built.rules.length });
-        });
-      });
-    });
+async function startBundleOverrideRule(tabId, targetEnv, brandId, currentEnv, pageOrigin, expectedUrl) {
+  const crossLayer = !!currentEnv && BUNDLE_ENV_LAYERS[currentEnv] !== BUNDLE_ENV_LAYERS[targetEnv];
+  const environments = crossLayer ? Object.keys(BUNDLE_INDEXER_URLS) : bundleEnvironmentsInLayer(targetEnv);
+  return dnr.apply('bundle', tabId, { targetEnv: targetEnv, scope: { kind: 'url', value: expectedUrl } }, async () => {
+    const results = await Promise.all(environments.map(async environment => {
+      try { return { environment, data: await fetchBundleIndexer(environment) }; }
+      catch (error) { if (environment === targetEnv) throw error; return { environment, data: null }; }
+    }));
+    const indexer = results.find(result => result.environment === targetEnv)?.data;
+    const layerData = results.map(result => result.data).filter(Boolean);
+    return allocate => {
+      const built = buildBundleRedirectRules(indexer, layerData, brandId, targetEnv, tabId, allocate(23), crossLayer, currentEnv, pageOrigin);
+      if (built.skippedNoBrand) throw new Error('Brand not found in ' + targetEnv + ' indexer.json');
+      if (!built.rules.length) throw new Error('No bundle files found for this brand/env');
+      return built.rules;
+    };
   });
 }
 
-function stopBundleOverrideRule(tabId) {
-  var ruleIds = bundleRuleIdsByTab[tabId];
-  delete bundleExpectedUrlByTab[tabId];
-  delete bundleRuleIdsByTab[tabId];
-  delete bundleTargetEnvByTab[tabId];
-  delete bundleMatchedByTab[tabId];
-  // Same SW-restart-safe cleanup as stopBleDataOverrideRule above - query
-  // the browser's own live rules for this tab in our id range, not just
-  // the in-memory map, since a service-worker restart between Apply and
-  // Stop/navigation wipes the map but not the actual registered rules.
-  return getOwnSessionRuleIdsForTab(tabId, BUNDLE_RULE_ID_START, SR_SPOOF_RULE_ID_START).then(function (liveIds) {
-    var allIds = (ruleIds || []).concat(liveIds).filter(function (id, i, arr) { return arr.indexOf(id) === i; });
-    if (!allIds.length) return;
-    return new Promise(function (resolve) {
-      chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: allIds }, function () {
-        void chrome.runtime.lastError; // ignore - rules may already be gone
-        resolve();
-      });
-    });
-  }).then(function () {
-    return setBundleMfeOverrideFlag(tabId, null);
-  });
+async function stopBundleOverrideRule(tabId) {
+  await dnr.stop('bundle', tabId);
+  await workerStore.update('bundleMatches', tabId, () => null);
+  return setBundleMfeOverrideFlag(tabId, null);
 }
 
 // Verification hook mirroring the standalone tool's Service Worker console
@@ -2023,26 +1441,24 @@ function stopBundleOverrideRule(tabId) {
 // always sideloaded, never published to the Chrome Web Store).
 if (chrome.declarativeNetRequest.onRuleMatchedDebug) {
   chrome.declarativeNetRequest.onRuleMatchedDebug.addListener(function (info) {
-    var ruleId = info && info.rule && info.rule.ruleId;
-    if (typeof ruleId !== 'number' || ruleId < BUNDLE_RULE_ID_START || ruleId >= BUNDLE_RULE_ID_START + 100000) return; // not one of ours
-    var tabId = info.request && info.request.tabId;
-    if (tabId == null || !bundleMatchedByTab[tabId]) return;
-    bundleMatchedByTab[tabId].push({ ruleId: ruleId, requestUrl: info.request.url, timestamp: Date.now() });
-    if (bundleMatchedByTab[tabId].length > 50) bundleMatchedByTab[tabId].shift();
+    const ruleId = info?.rule?.ruleId;
+    const tabId = info?.request?.tabId;
+    if (typeof ruleId !== 'number' || ruleId < BUNDLE_RULE_ID_START || ruleId >= SR_SPOOF_RULE_ID_START || tabId == null || tabId < 0) return;
+    void observeTask(workerStore.update('bundleMatches', tabId, value => ({
+      matched: [...(value?.matched || []), { ruleId, requestUrl: String(info.request.url).slice(0, 4096), timestamp: Date.now() }].slice(-50)
+    })), 'bundle match log');
   });
 }
 
-chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
-  if (!msg || msg.type !== 'lgt-bundle-start') return false;
-  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
+handleMessage('lgt-bundle-start', async function (msg, sender) {
+  if (!sender.tab || sender.tab.id == null) { return { ok: false, error: 'no tab' }; }
   var tabId = sender.tab.id;
   var targetEnv = msg.targetEnv, currentEnv = msg.currentEnv, brandId = msg.brandId;
-  if (!targetEnv || !brandId) { sendResponse({ ok: false, error: 'missing targetEnv or brandId' }); return false; }
-  if (!BUNDLE_ENV_LAYERS[targetEnv]) { sendResponse({ ok: false, error: 'unknown target environment: ' + targetEnv }); return false; }
+  if (!targetEnv || !brandId) { return { ok: false, error: 'missing targetEnv or brandId' }; }
+  if (!BUNDLE_ENV_LAYERS[targetEnv]) { return { ok: false, error: 'unknown target environment: ' + targetEnv }; }
   if (currentEnv && BUNDLE_ENV_LAYERS[currentEnv] !== BUNDLE_ENV_LAYERS[targetEnv]) {
     if (!msg.labAuthorized) {
-      sendResponse({ ok: false, error: 'cross-layer bundle override requires an authorized Cross-Layer Lab session (' + currentEnv + ' -> ' + targetEnv + ')' });
-      return false;
+      return { ok: false, error: 'cross-layer bundle override requires an authorized Cross-Layer Lab session (' + currentEnv + ' -> ' + targetEnv + ')' };
     }
   }
   // Remember the exact URL the override was applied for (see the
@@ -2051,8 +1467,8 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   // whole URL, not just the origin) - Bundle Override is meant to be tied
   // to one specific tested link, unlike the Sportradar-spoof/BLE-CORS
   // domain-wide fixes.
+  var expectedUrl = sender.tab.url || null;
   if (sender.tab.url) {
-    var expectedUrl = sender.tab.url;
     if (msg.expectedUrl) {
       try {
         var currentPageUrl = new URL(sender.tab.url);
@@ -2061,86 +1477,41 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
         // the current page. Do not let this message weaken stale-navigation
         // cleanup by authorizing a different origin or pathname.
         if (requestedExpectedUrl.origin !== currentPageUrl.origin || requestedExpectedUrl.pathname !== currentPageUrl.pathname) {
-          sendResponse({ ok: false, error: 'expected reload URL must keep the current origin and pathname' });
-          return false;
+          return { ok: false, error: 'expected reload URL must keep the current origin and pathname' };
         }
         expectedUrl = requestedExpectedUrl.toString();
       } catch (expectedUrlError) {
-        sendResponse({ ok: false, error: 'invalid expected reload URL' });
-        return false;
+        return { ok: false, error: 'invalid expected reload URL' };
       }
     }
-    bundleExpectedUrlByTab[tabId] = expectedUrl;
   }
-  var pageOrigin = null;
-  try { pageOrigin = sender.tab.url ? new URL(sender.tab.url).origin : null; } catch (pageOriginError) {}
-  startBundleOverrideRule(tabId, targetEnv, brandId, currentEnv, pageOrigin).then(function (result) {
-    return setBundleMfeOverrideFlag(tabId, targetEnv).then(function (flagResult) {
-      sendResponse({ ok: true, ruleCount: result.ruleCount, targetEnv: targetEnv, mfeFlag: flagResult });
-    });
-  }).catch(function (err) {
-    sendResponse({ ok: false, error: String(err && err.message || err) });
-  });
-  return true;
+  const pageOrigin = new URL(sender.tab.url).origin;
+  const result = await startBundleOverrideRule(tabId, targetEnv, brandId, currentEnv, pageOrigin, expectedUrl);
+  await workerStore.update('bundleMatches', tabId, () => ({ matched: [] }));
+  const flagResult = await setBundleMfeOverrideFlag(tabId, targetEnv);
+  return { ok: true, ruleCount: result.ruleCount, targetEnv: targetEnv, mfeFlag: flagResult };
 });
 
-chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
-  if (!msg || msg.type !== 'lgt-bundle-stop') return false;
-  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
-  stopBundleOverrideRule(sender.tab.id).then(function () { sendResponse({ ok: true }); });
-  return true;
+handleMessage('lgt-bundle-stop', async function (msg, sender) {
+  const tabId = senderTabId(sender);
+  await stopBundleOverrideRule(tabId);
+  return { ok: true };
 });
 
-chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
-  if (!msg || msg.type !== 'lgt-bundle-status') return false;
-  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
-  var tabId = sender.tab.id;
-  // Derive truth from the browser's own live session rules, not just the
-  // in-memory map (see stopBundleOverrideRule comment above for why the
-  // map alone is unsafe after a service-worker restart) - resync the map
-  // from whatever is actually still registered so later stop/reapply
-  // calls stay consistent.
-  chrome.declarativeNetRequest.getSessionRules(function (allRules) {
-    var liveRules = (allRules || []).filter(function (rule) {
-      return rule.id >= BUNDLE_RULE_ID_START && rule.id < SR_SPOOF_RULE_ID_START &&
-        rule.condition && Array.isArray(rule.condition.tabIds) && rule.condition.tabIds.indexOf(tabId) !== -1;
-    });
-    var liveIds = liveRules.map(function (rule) { return rule.id; });
-    if (liveIds.length) bundleRuleIdsByTab[tabId] = liveIds;
-    else delete bundleRuleIdsByTab[tabId];
-    var targetEnvs = liveRules.map(function (rule) {
-      var redirectUrl = rule.action && rule.action.redirect && rule.action.redirect.url;
-      if (!redirectUrl) return null;
-      try { return envLabelFromHostname(new URL(redirectUrl).hostname); } catch (e) { return null; }
-    }).filter(function (env, index, values) { return env && values.indexOf(env) === index; });
-    var resolvedTargetEnv = targetEnvs.length === 1 ? targetEnvs[0] : null;
-    // Keep computeDetectionRows' synchronous cache honest the same way -
-    // it can only recognize an active override's expected runtime/network
-    // divergence if this stays in sync with the browser's own live rules.
-    if (resolvedTargetEnv) bundleTargetEnvByTab[tabId] = resolvedTargetEnv;
-    else delete bundleTargetEnvByTab[tabId];
-    sendResponse({
-      ok: true,
-      active: liveIds.length > 0,
-      ruleCount: liveIds.length,
-      matched: bundleMatchedByTab[tabId] || [],
-      targetEnv: resolvedTargetEnv
-    });
-  });
-  return true;
+handleMessage('lgt-bundle-status', async function (msg, sender) {
+  const tabId = senderTabId(sender);
+  const { rules } = await dnr.status('bundle', tabId);
+  const log = await workerStore.read('bundleMatches', tabId);
+  return { ok: true, active: rules.length > 0, ruleCount: rules.length, matched: log?.matched || [], targetEnv: bundleTargetEnvFromRules(rules) };
 });
 
 // content.js calls this on every new document, independently of whether the
 // Link Gen Tool panel is open. Session DNR rules survive an MV3 service-worker
 // restart, while MAIN-world globals do not survive a page reload; deriving the
 // target from Chrome's live rules restores the compatibility flag reliably.
-chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
-  if (!msg || msg.type !== 'lgt-bundle-sync-page-flag') return false;
-  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
-  syncBundleMfeOverrideFlag(sender.tab.id).then(function (result) {
-    sendResponse(result);
-  });
-  return true;
+handleMessage('lgt-bundle-sync-page-flag', async function (msg, sender) {
+  const tabId = senderTabId(sender);
+  return syncBundleMfeOverrideFlag(tabId);
 });
 
 // ---------------------------------------------------------------------
@@ -2151,7 +1522,7 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
 // the Bundle-override feature above (works whether or not an override is
 // active, and whether or not the user ever opens the Bundle tab) - this
 // is what should be trusted over any UI dropdown or the separate
-// "Sportsbook Tool" bookmarklet's own "SB Version" field, since both of
+// "Sportsbook Tool" legacy page-injected script's own "SB Version" field, since both of
 // those can show a stale/misconfigured value with no visible error (see
 // the 2026-08-10 Bundle-tab bug this was built in response to).
 // ---------------------------------------------------------------------
@@ -2185,9 +1556,6 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
 // committed navigation URL, used as the NodeJS layer's environment
 // source (nodeContext.environment is not guaranteed) and as a last-
 // resort hostname brand fallback.
-var runtimeMarkersByTab = {};
-var networkByTab = {};
-var frameDocByTab = {};
 
 // Resolves a brand key from either a known GUID or a free-text brand
 // name (as reported by a runtime marker's brandId/brandName - the two
@@ -2267,16 +1635,18 @@ function genericSandboxInfoFromHostname(hostname) {
 // as ALPHA. Comparing the brand/device/version against both indexers in the
 // same layer identifies the build itself. Multiple matches are retained as
 // an honest "shared build" result instead of guessing.
-function resolveDistBundleEnvironments(hostEnv, brandId, device, version) {
+async function resolveDistBundleEnvironments(hostEnv, brandId, device, version) {
   var environments = bundleEnvironmentsInLayer(hostEnv);
-  return Promise.all(environments.map(function (environment) {
-    return fetchBundleIndexer(environment).then(function (indexerData) {
-      var deviceEntry = indexerData && indexerData[brandId] && indexerData[brandId][device];
-      return deviceEntry && String(deviceEntry.version) === String(version) ? environment : null;
-    }).catch(function () { return null; });
-  })).then(function (matches) {
-    return matches.filter(function (environment) { return !!environment; });
-  });
+  const matches=await Promise.all(environments.map(async function(environment_1) {
+		try {
+			const indexerData=await fetchBundleIndexer(environment_1);
+			var deviceEntry=indexerData&&indexerData[brandId]&&indexerData[brandId][device];
+			return deviceEntry&&String(deviceEntry.version)===String(version)? environment_1:null;
+		} catch {
+			return null;
+		}
+	}));
+	return matches.filter(function(environment_2) { return !!environment_2; });
 }
 
 // Brand key -> GUID map, needed ONLY to restrict the reverse-lookup below
@@ -2329,24 +1699,23 @@ function bundleBrandKeyFromGuid(brandId) {
   return null;
 }
 
-function resolveSandboxConfigInfo(env, brandId, facadeId, versionHint) {
-  return fetchBundleIndexer(env).then(function (indexerData) {
-    var entry = indexerData && indexerData[brandId];
-    if (!entry) return null;
-    var matches = ['desktop', 'mobile'].map(function (device) {
-      var deviceEntry = entry[device];
-      if (!deviceEntry || !deviceEntry.resourcesByFacade || !deviceEntry.resourcesByFacade[facadeId]) return null;
-      var version = String(deviceEntry.version || '');
-      if (versionHint && version.indexOf(String(versionHint)) !== 0) return null;
-      return { device: device, version: version };
-    }).filter(function (match) { return !!match; });
-    if (!matches.length) return null;
-    var versions = matches.map(function (match) { return match.version; }).filter(function (version, index, all) {
-      return version && all.indexOf(version) === index;
-    });
-    if (versions.length !== 1) return null;
-    return { version: versions[0], device: matches.length === 1 ? matches[0].device : null, brandId: brandId };
-  });
+async function resolveSandboxConfigInfo(env, brandId, facadeId, versionHint) {
+  const indexerData=await fetchBundleIndexer(env);
+	var entry=indexerData&&indexerData[brandId];
+	if(!entry) return null;
+	var matches=['desktop','mobile'].map(function(device) {
+		var deviceEntry=entry[device];
+		if(!deviceEntry||!deviceEntry.resourcesByFacade||!deviceEntry.resourcesByFacade[facadeId]) return null;
+		var version=String(deviceEntry.version||'');
+		if(versionHint&&version.indexOf(String(versionHint))!==0) return null;
+		return { device: device,version: version };
+	}).filter(function(match) { return !!match; });
+	if(!matches.length) return null;
+	var versions=matches.map(function(match_1) { return match_1.version; }).filter(function(version_1,index,all) {
+		return version_1&&all.indexOf(version_1)===index;
+	});
+	if(versions.length!==1) return null;
+	return { version: versions[0],device: matches.length===1? matches[0].device:null,brandId: brandId };
 }
 
 // Reverse-lookup (2026-08-10, revised after live testing): sandbox-shape
@@ -2380,260 +1749,139 @@ function resolveSandboxConfigInfo(env, brandId, facadeId, versionHint) {
 // brand key has no known GUID (should not normally happen, since the
 // caller only proceeds after a successful playground-host brand
 // detection, but kept as a defensive fallback).
-function resolveSandboxBundleInfo(env, filename, brandKey) {
-  return fetchBundleIndexer(env).then(function (indexerData) {
-    var matches = []; // {device, version, brandId, exact}
-    var knownGuid = brandKey && BUNDLE_BRAND_GUIDS[brandKey];
-    var brandIdsToSearch = knownGuid ? [knownGuid] : Object.keys(indexerData || {});
-    brandIdsToSearch.forEach(function (brandId) {
-      var entry = indexerData[brandId];
-      ['desktop', 'mobile'].forEach(function (device) {
-        var deviceEntry = entry && entry[device];
-        if (!deviceEntry) return;
-        var exact = (deviceEntry.js || []).some(function (fileUrl) {
-          return (fileUrl || '').split('/').pop() === filename;
-        });
-        var chunkHit = false;
-        if (!exact && deviceEntry.resourcesByFacade) {
-          chunkHit = Object.keys(deviceEntry.resourcesByFacade).some(function (facadeId) {
-            var f = deviceEntry.resourcesByFacade[facadeId];
-            // scripts/links are ARRAYS of individual <script>/<link> tag
-            // strings (confirmed live 2026-08-10 via direct SW
-            // inspection) - NOT one big concatenated HTML string, so each
-            // element must be searched individually rather than calling
-            // .indexOf(filename) on the array itself (which only checks
-            // for an exact whole-element match, never a substring).
-            var inScripts = Array.isArray(f && f.scripts) && f.scripts.some(function (s) { return s.indexOf(filename) !== -1; });
-            var inLinks = Array.isArray(f && f.links) && f.links.some(function (s) { return s.indexOf(filename) !== -1; });
-            return inScripts || inLinks;
-          });
-        }
-        if (exact || chunkHit) {
-          matches.push({ device: device, version: deviceEntry.version || null, brandId: brandId, exact: exact });
-        }
-      });
-    });
-    if (!matches.length) return null;
-    // Prefer an exact entry-point match over a chunk match if both somehow
-    // occurred; otherwise use all chunk matches found.
-    var exactMatches = matches.filter(function (m) { return m.exact; });
-    var pool = exactMatches.length ? exactMatches : matches;
-    var versions = pool.map(function (m) { return m.version; }).filter(function (v, i, arr) { return v && arr.indexOf(v) === i; });
-    var devices = pool.map(function (m) { return m.device; }).filter(function (d, i, arr) { return arr.indexOf(d) === i; });
-    if (versions.length !== 1) return null; // ambiguous across brands/
-    // devices - don't show a possibly-wrong version rather than guess.
-    return {
-      version: versions[0],
-      device: devices.length === 1 ? devices[0] : null,
-      brandId: pool[0].brandId
+async function resolveSandboxBundleInfo(env, filename, brandKey) {
+  const indexerData=await fetchBundleIndexer(env);
+	var matches=[]; // {device, version, brandId, exact}
+	var knownGuid=brandKey&&BUNDLE_BRAND_GUIDS[brandKey];
+	var brandIdsToSearch=knownGuid? [knownGuid]:Object.keys(indexerData||{});
+	brandIdsToSearch.forEach(function(brandId) {
+		var entry=indexerData[brandId];
+		['desktop','mobile'].forEach(function(device) {
+			var deviceEntry=entry&&entry[device];
+			if(!deviceEntry) return;
+			var exact=(deviceEntry.js||[]).some(function(fileUrl) {
+				return (fileUrl||'').split('/').pop()===filename;
+			});
+			var chunkHit=false;
+			if(!exact&&deviceEntry.resourcesByFacade) {
+				chunkHit=Object.keys(deviceEntry.resourcesByFacade).some(function(facadeId) {
+					var f=deviceEntry.resourcesByFacade[facadeId];
+					// scripts/links are ARRAYS of individual <script>/<link> tag
+					// strings (confirmed live 2026-08-10 via direct SW
+					// inspection) - NOT one big concatenated HTML string, so each
+					// element must be searched individually rather than calling
+					// .indexOf(filename) on the array itself (which only checks
+					// for an exact whole-element match, never a substring).
+					var inScripts=Array.isArray(f&&f.scripts)&&f.scripts.some(function(s) { return s.indexOf(filename)!==-1; });
+					var inLinks=Array.isArray(f&&f.links)&&f.links.some(function(s_1) { return s_1.indexOf(filename)!==-1; });
+					return inScripts||inLinks;
+				});
+			}
+			if(exact||chunkHit) {
+				matches.push({ device: device,version: deviceEntry.version||null,brandId: brandId,exact: exact });
+			}
+		});
+	});
+	if(!matches.length) return null;
+	// Prefer an exact entry-point match over a chunk match if both somehow
+	// occurred; otherwise use all chunk matches found.
+	var exactMatches=matches.filter(function(m) { return m.exact; });
+	var pool=exactMatches.length? exactMatches:matches;
+	var versions=pool.map(function(m_1) { return m_1.version; }).filter(function(v,i,arr) { return v&&arr.indexOf(v)===i; });
+	var devices=pool.map(function(m_2) { return m_2.device; }).filter(function(d,i_1,arr_1) { return arr_1.indexOf(d)===i_1; });
+	if(versions.length!==1) return null; // ambiguous across brands/
+	return {
+		version: versions[0],
+		device: devices.length===1? devices[0]:null,
+		brandId: pool[0].brandId
+	};
+}
+
+async function observeBuildRequest(details) {
+  if (details.tabId == null || details.tabId < 0) return;
+  const hostname = new URL(details.url).hostname;
+  const hostEnv = envLabelFromHostname(hostname);
+  if (isBleExcludedRequest(details.url, hostEnv)) return;
+  const match = BUNDLE_OBSERVE_RE.exec(details.url);
+  if (match) {
+    const observation = {
+      layer: 'mfe', brandId: match[2], brand: bundleBrandKeyFromGuid(match[2]), version: match[3], device: match[4],
+      host: hostname, hostEnv, artifactEnv: null, artifactEnvs: [], artifactResolutionPending: true, url: details.url, ts: Date.now()
     };
-  });
-}
-
-if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
-  chrome.webRequest.onBeforeRequest.addListener(function (details) {
-    if (details.tabId == null || details.tabId < 0) return; // not a real tab
-    // (e.g. a service-worker/extension-initiated request) - nothing to
-    // attribute the observation to.
-    var hostname = '';
-    try { hostname = new URL(details.url).hostname; } catch (e) { /* leave empty */ }
-    var frameId = details.frameId || 0;
-
-    var m = BUNDLE_OBSERVE_RE.exec(details.url);
-    if (m) {
-      var observedTabId = details.tabId;
-      var observedFrameId = frameId;
-      var observedUrl = details.url;
-      var observedHostEnv = envLabelFromHostname(hostname);
-      if (isBleExcludedRequest(details.url, observedHostEnv)) return; // bleSource=1 ALPHA/PROD - excluded from bundle-environment computation
-      var observation = {
-        // MFE layer - the widget's own federated bundle, brandId+device
-        // encoded directly in the URL.
-        layer: 'mfe',
-        brandId: m[2],
-        brand: bundleBrandKeyFromGuid(m[2]),
-        version: m[3],
-        device: m[4],
-        host: hostname,
-        hostEnv: observedHostEnv,
-        artifactEnv: null,
-        artifactEnvs: [],
-        artifactResolutionPending: true,
-        url: details.url,
-        ts: Date.now()
-      };
-      networkByTab[observedTabId] = networkByTab[observedTabId] || {};
-      networkByTab[observedTabId][observedFrameId] = networkByTab[observedTabId][observedFrameId] || {};
-      networkByTab[observedTabId][observedFrameId].mfe = observation;
-      resolveDistBundleEnvironments(observedHostEnv, observation.brandId, observation.device, observation.version).then(function (artifactEnvs) {
-        var current = networkByTab[observedTabId] && networkByTab[observedTabId][observedFrameId] && networkByTab[observedTabId][observedFrameId].mfe;
-        if (!current || current.url !== observedUrl) return;
-        current.artifactEnvs = artifactEnvs;
-        current.artifactEnv = artifactEnvs.length === 1 ? artifactEnvs[0] : null;
-        current.artifactResolutionPending = false;
-      }).catch(function () {
-        var current = networkByTab[observedTabId] && networkByTab[observedTabId][observedFrameId] && networkByTab[observedTabId][observedFrameId].mfe;
-        if (current && current.url === observedUrl) current.artifactResolutionPending = false;
-      });
-      return;
-    }
-
-    var configMatch = BUNDLE_OBSERVE_SANDBOX_CONFIG_RE.exec(details.url);
-    if (configMatch) {
-      var configTabId = details.tabId;
-      var configFrameId = frameId;
-      var configUrl = details.url;
-      var configBrandId = configMatch[2].toLowerCase();
-      var configFacadeId = configMatch[3].toLowerCase();
-      var configVersionHint = configMatch[4];
-      var configHostEnv = envLabelFromHostname(hostname);
-      if (isBleExcludedRequest(details.url, configHostEnv)) return;
-      networkByTab[configTabId] = networkByTab[configTabId] || {};
-      networkByTab[configTabId][configFrameId] = networkByTab[configTabId][configFrameId] || {};
-      // iframe/OBGA layer - the config request is this layer's own
-      // network confirmation source (per spec: config URL brandId is
-      // also the last network fallback for brand identification, used
-      // generically here whether this is a real brand page's embed or
-      // the tool's own sandbox/Generate-tab link).
-      networkByTab[configTabId][configFrameId].iframe = {
-        layer: 'iframe',
-        brandId: configBrandId,
-        brand: bundleBrandKeyFromGuid(configBrandId),
-        version: configVersionHint,
-        device: null,
-        headerVersion: null,
-        host: hostname,
-        hostEnv: configHostEnv,
-        url: configUrl,
-        ts: Date.now()
-      };
-      resolveSandboxConfigInfo(configHostEnv, configBrandId, configFacadeId, configVersionHint).then(function (found) {
-        if (!found) return;
-        var current = networkByTab[configTabId] && networkByTab[configTabId][configFrameId] && networkByTab[configTabId][configFrameId].iframe;
-        if (!current) return;
-        current.version = found.version;
-        current.device = found.device;
-        current.matchedBrandId = found.brandId;
-        current.brand = current.brand || bundleBrandKeyFromGuid(found.brandId);
-      }).catch(function (err) {
-        console.warn('[link-gen-tool] iframe/OBGA config indexer lookup failed:', err);
-      });
-      return;
-    }
-
-    // Generic Angular-CLI-shaped `/assets/*.js` (see BUNDLE_OBSERVE_SANDBOX_RE
-    // comment): no version/brandId/device in the URL at all, so this only
-    // fires as SUPPLEMENTARY enrichment for an already brand-known iframe
-    // observation in the SAME frame (chunk hash reverse-lookup against
-    // that ONE brand's indexer entry only - never a cross-brand scan, see
-    // resolveSandboxBundleInfo's own guard). It never creates a brand-new
-    // observation by itself.
-    var sm = BUNDLE_OBSERVE_SANDBOX_RE.exec(details.url);
-    if (!sm) return;
-    var known = detectBrandAndEnvFromPlaygroundHost(hostname) || genericSandboxInfoFromHostname(hostname);
-    var priorIframe = networkByTab[details.tabId] && networkByTab[details.tabId][frameId] && networkByTab[details.tabId][frameId].iframe;
-    var lookupBrand = (known && known.brand) || (priorIframe && priorIframe.brand);
-    var lookupEnv = (known && known.environment) || (priorIframe && priorIframe.hostEnv);
-    if (!lookupBrand || !lookupEnv || !priorIframe) return; // nothing to enrich
-    var enrichTabId = details.tabId;
-    var enrichFrameId = frameId;
-    var enrichFilename = details.url.split('/').pop().split('?')[0].split('#')[0];
-    resolveSandboxBundleInfo(lookupEnv, enrichFilename, lookupBrand).then(function (found) {
-      if (!found) return;
-      var current = networkByTab[enrichTabId] && networkByTab[enrichTabId][enrichFrameId] && networkByTab[enrichTabId][enrichFrameId].iframe;
-      if (!current) return;
-      current.version = current.version || found.version;
-      current.device = current.device || found.device;
-      current.matchedBrandId = current.matchedBrandId || found.brandId;
-    }).catch(function (err) {
-      console.warn('[link-gen-tool] iframe/OBGA sandbox chunk reverse-lookup failed:', err);
+    const token = await detection.observe(details, 'mfe', observation);
+    let artifactEnvs = [];
+    try { artifactEnvs = await resolveDistBundleEnvironments(hostEnv, observation.brandId, observation.device, observation.version); }
+    catch (error) { console.warn('[link-gen-tool] artifact lookup failed:', error); }
+    await detection.enrich(details, 'mfe', token, current => {
+      current.artifactEnvs = artifactEnvs;
+      current.artifactEnv = artifactEnvs.length === 1 ? artifactEnvs[0] : null;
+      current.artifactResolutionPending = false;
     });
-  }, { urls: ['*://*/dist/*/xp/widgets/sportsbook/*', '*://*/dist/*/config/*', '*://*/assets/*'], types: ['script', 'xmlhttprequest'] });
-}
-
-// x-sb-app-version response header - a VERSION-only source for the
-// iframe/OBGA layer (per spec, the API URL that carries this header must
-// never be used as an environment source - only its config/bundle-URL
-// hostname evidence above may supply environment). Restricted to the
-// same `sb/fe-api/` and `/api/sb/v1/` path conventions already used
-// elsewhere in this file for other SB-specific header capture, so this
-// never fires (and never pays the `extraHeaders` cost) on arbitrary
-// third-party sites.
-if (chrome.webRequest && chrome.webRequest.onHeadersReceived) {
-  chrome.webRequest.onHeadersReceived.addListener(function (details) {
-    if (details.tabId == null || details.tabId < 0) return;
-    var hostname = '';
-    try { hostname = new URL(details.url).hostname; } catch (e) { /* leave empty */ }
-    var hostEnv = envLabelFromHostname(hostname);
-    if (isBleExcludedRequest(details.url, hostEnv)) return; // bleSource=1 ALPHA/PROD backend - excluded entirely
-    var headerValue = null;
-    (details.responseHeaders || []).forEach(function (h) {
-      if (String(h.name || '').toLowerCase() === 'x-sb-app-version') headerValue = h.value;
+    return;
+  }
+  const config = BUNDLE_OBSERVE_SANDBOX_CONFIG_RE.exec(details.url);
+  if (config) {
+    const brandId = config[2].toLowerCase();
+    const token = await detection.observe(details, 'iframe', {
+      layer: 'iframe', brandId, brand: bundleBrandKeyFromGuid(brandId), version: config[4], device: null,
+      headerVersion: null, host: hostname, hostEnv, url: details.url, ts: Date.now()
     });
-    if (headerValue == null) return;
-    var frameId = details.frameId || 0;
-    var frameEntry = networkByTab[details.tabId] && networkByTab[details.tabId][frameId];
-    if (frameEntry && frameEntry.iframe) frameEntry.iframe.headerVersion = headerValue;
-  }, { urls: ['*://*/*sb/fe-api/*', '*://*/*api/sb/v1/*'] }, ['responseHeaders', 'extraHeaders']);
-}
-
-// The frame's own committed navigation URL - the NodeJS layer's
-// environment source (nodeContext.environment is explicitly NOT
-// guaranteed by the spec), and a last-resort hostname brand fallback for
-// any layer. Recorded for every frame, not just the top one, since the
-// SB app frequently runs inside an iframe on a real brand site.
-if (chrome.webNavigation && chrome.webNavigation.onCommitted) {
-  chrome.webNavigation.onCommitted.addListener(function (details) {
-    var hostname = '';
-    try { hostname = new URL(details.url).hostname; } catch (e) { /* leave empty */ }
-    if (!hostname) return;
-    frameDocByTab[details.tabId] = frameDocByTab[details.tabId] || {};
-    var fromPlayground = detectBrandAndEnvFromPlaygroundHost(hostname);
-    frameDocByTab[details.tabId][details.frameId] = {
-      url: details.url,
-      hostname: hostname,
-      env: (fromPlayground && fromPlayground.environment) || envLabelFromHostname(hostname),
-      brand: fromPlayground && fromPlayground.brand
-    };
+    const found = await resolveSandboxConfigInfo(hostEnv, brandId, config[3].toLowerCase(), config[4]);
+    if (found) await detection.enrich(details, 'iframe', token, current => {
+      current.version = found.version; current.device = found.device; current.matchedBrandId = found.brandId;
+      current.brand = current.brand || bundleBrandKeyFromGuid(found.brandId);
+    });
+    return;
+  }
+  if (!BUNDLE_OBSERVE_SANDBOX_RE.exec(details.url)) return;
+  const prior = await detection.current(details, 'iframe');
+  if (!prior) return;
+  const known = detectBrandAndEnvFromPlaygroundHost(hostname) || genericSandboxInfoFromHostname(hostname);
+  const lookupBrand = known?.brand || prior.observation.brand;
+  const lookupEnv = known?.environment || prior.observation.hostEnv;
+  if (!lookupBrand || !lookupEnv) return;
+  const filename = details.url.split('/').pop().split('?')[0].split('#')[0];
+  const found = await resolveSandboxBundleInfo(lookupEnv, filename, lookupBrand);
+  if (found) await detection.enrich(details, 'iframe', prior.token, current => {
+    current.version = current.version || found.version;
+    current.device = current.device || found.device;
+    current.matchedBrandId = current.matchedBrandId || found.brandId;
   });
 }
 
-// Runtime marker relay (see layer-detect.js / layer-relay.js) - one entry
-// per frame per layer, last-write-wins (a fresh navigation re-injects
-// layer-detect.js fresh into that frame, so a later report always
-// reflects the frame's current reality).
-chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
-  if (!msg || msg.type !== 'lgt-layer-marker') return false;
-  if (!sender.tab || sender.tab.id == null) return false;
-  var tabId = sender.tab.id;
-  var frameId = sender.frameId || 0;
-  runtimeMarkersByTab[tabId] = runtimeMarkersByTab[tabId] || {};
-  runtimeMarkersByTab[tabId][frameId] = runtimeMarkersByTab[tabId][frameId] || {};
-  (msg.markers || []).forEach(function (marker) {
-    if (!marker || !marker.layer) return;
-    runtimeMarkersByTab[tabId][frameId][marker.layer] = Object.assign({ ts: Date.now() }, marker);
-  });
-  return false;
+chrome.webRequest.onBeforeRequest.addListener(details => {
+  void observeTask(observeBuildRequest(details), 'build observation');
+}, { urls: ['*://*/dist/*/xp/widgets/sportsbook/*', '*://*/dist/*/config/*', '*://*/assets/*'], types: ['script', 'xmlhttprequest'] });
+
+chrome.webRequest.onHeadersReceived.addListener(details => {
+  if (details.tabId == null || details.tabId < 0) return;
+  const hostEnv = envLabelFromHostname(new URL(details.url).hostname);
+  if (isBleExcludedRequest(details.url, hostEnv)) return;
+  const header = (details.responseHeaders || []).find(value => String(value.name).toLowerCase() === 'x-sb-app-version');
+  if (header?.value != null) void observeTask(detection.header(details, header.value), 'version header');
+}, { urls: ['*://*/*sb/fe-api/*', '*://*/*api/sb/v1/*'] }, ['responseHeaders', 'extraHeaders']);
+
+chrome.webNavigation.onCommitted.addListener(details => {
+  let hostname;
+  try { hostname = new URL(details.url).hostname; } catch (_) { return; }
+  if (!hostname) return;
+  const info = detectBrandAndEnvFromPlaygroundHost(hostname);
+  void observeTask(detection.committed(details, {
+    url: details.url, hostname, env: info?.environment || envLabelFromHostname(hostname), brand: info?.brand
+  }), 'committed document');
 });
 
-// Clear a frame's observations on its own navigation - without this,
-// navigating away would leave stale evidence visible. A top-level
-// (frameId 0) navigation clears the WHOLE tab (subframes are about to be
-// torn down and re-created anyway); a subframe navigation only clears
-// that one frameId, leaving sibling frames/layers untouched.
-if (chrome.webNavigation && chrome.webNavigation.onBeforeNavigate) {
-  chrome.webNavigation.onBeforeNavigate.addListener(function (details) {
-    if (details.frameId === 0) {
-      delete runtimeMarkersByTab[details.tabId];
-      delete networkByTab[details.tabId];
-      delete frameDocByTab[details.tabId];
-      return;
-    }
-    if (runtimeMarkersByTab[details.tabId]) delete runtimeMarkersByTab[details.tabId][details.frameId];
-    if (networkByTab[details.tabId]) delete networkByTab[details.tabId][details.frameId];
-    if (frameDocByTab[details.tabId]) delete frameDocByTab[details.tabId][details.frameId];
-  });
-}
+handleMessage('lgt-layer-marker', async function (msg, sender) {
+  senderTabId(sender);
+  // Reject reports from a document that has navigated away, even if its relay
+  // was queued before Chrome delivered our onCommitted event.
+  if (sender.documentId) {
+    const current = await chromeCall(chrome.webNavigation, 'getFrame', { tabId: sender.tab.id, frameId: sender.frameId || 0 });
+    if (!current || current.documentId !== sender.documentId) return { ok: true, ignored: true };
+  }
+  await detection.markers(sender, msg.markers);
+  return { ok: true };
+});
 
 function normalizeVersion(value) { return String(value == null ? '' : value).trim().replace(/^v/i, ''); }
 function normalizeEnv(value) { return String(value == null ? '' : value).trim().toLowerCase(); }
@@ -2643,10 +1891,10 @@ function normalizeEnv(value) { return String(value == null ? '' : value).trim().
 // never causes cross-brand mixing because every network observation is
 // already scoped to the ONE brandId the indexer/config request itself
 // named (see resolveSandboxBundleInfo's own single-brand restriction).
-function computeDetectionRows(tabId) {
-  var runtimeByFrame = runtimeMarkersByTab[tabId] || {};
-  var networkByFrame = networkByTab[tabId] || {};
-  var docByFrame = frameDocByTab[tabId] || {};
+function computeDetectionRows(snapshot) {
+  var runtimeByFrame = snapshot.runtimeByFrame || {};
+  var networkByFrame = snapshot.networkByFrame || {};
+  var docByFrame = snapshot.docByFrame || {};
   var frameIds = Object.keys(Object.assign({}, runtimeByFrame, networkByFrame));
   var rows = [];
 
@@ -2700,7 +1948,7 @@ function computeDetectionRows(tabId) {
       // pattern here means it is explained instead of raised as an
       // unexplained Mismatch - see bundleOverrideExplainsEnvDivergence.
       var overrideExplainsEnvDivergence = !!(runtime && net &&
-        bundleOverrideExplainsEnvDivergence(tabId, runtimeEnv, networkEnv));
+        bundleOverrideExplainsEnvDivergence(snapshot.bundleTargetEnv, runtimeEnv, networkEnv));
 
       var conflicts = [];
       if (runtimeBrandKey && networkBrandKey && runtimeBrandKey !== networkBrandKey) conflicts.push('brand: runtime=' + runtimeBrandKey + ' vs network=' + networkBrandKey);
@@ -2768,7 +2016,7 @@ function computeDetectionRows(tabId) {
       // headline value itself no longer flips between two different
       // selection rules depending on which bucket a row lands in.
       var bundleOverrideNote = overrideExplainsEnvDivergence
-        ? ('Bundle Override active (target ' + bundleTargetEnvByTab[tabId].toUpperCase() + '): runtime marker still reports the base build v' +
+        ? ('Bundle Override active (target ' + snapshot.bundleTargetEnv.toUpperCase() + '): runtime marker still reports the base build v' +
           runtimeVersion + '/' + runtimeEnv.toUpperCase() + ' - this brand\'s startup context stays pinned to its base environment even once overridden; network evidence v' +
           networkVersion + '/' + networkEnv.toUpperCase() + ' reflects what is actually running and is shown here.')
         : null;
@@ -2840,47 +2088,26 @@ function computeDetectionRows(tabId) {
   return rows;
 }
 
-chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
-  if (!msg || msg.type !== 'lgt-detection-rows') return false;
-  if (!sender.tab || sender.tab.id == null) { sendResponse({ ok: false, error: 'no tab' }); return false; }
-  sendResponse({ ok: true, rows: computeDetectionRows(sender.tab.id) });
-  return false;
+handleMessage('lgt-detection-rows', async function (msg, sender) {
+  const tabId = senderTabId(sender);
+  const snapshot = await detection.snapshot(tabId);
+  snapshot.bundleTargetEnv = bundleTargetEnvFromRules((await dnr.status('bundle', tabId)).rules);
+  return { ok: true, rows: computeDetectionRows(snapshot) };
 });
 
 // Opens a NEW tab for the given generated link with Sportradar spoofing
 // already active before the page starts loading (unlike "Embed here",
 // this acts on a brand-new tab it creates itself, not the current one -
 // the widget needs to run on the generated link's OWN page).
-chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
-  if (!msg || msg.type !== 'lgt-open-with-sr-spoof') return false;
-  var url = msg.url;
-  var spoofOrigin = msg.spoofOrigin;
-  if (!url || !spoofOrigin) { sendResponse({ ok: false, error: 'missing url or spoofOrigin' }); return false; }
-  // IMPORTANT: do NOT pass `url` to tabs.create directly. Doing so starts the
-  // real navigation (and therefore the page's first Sportradar /licensing
-  // request) IMMEDIATELY, in parallel with this extension call - the
-  // declarativeNetRequest rule below was only being added inside the
-  // tabs.create callback, i.e. AFTER that navigation had already started, so
-  // the page's very first load routinely beat the rule and rendered the
-  // licensing error before the spoof ever took effect (confirmed by the
-  // user: page loads with the error before the addon "does its job" -
-  // 2026-08-07). Fix: open a blank tab first, register the session rule for
-  // that tabId while nothing has requested anything yet, THEN navigate the
-  // (still-blank) tab to the real URL via tabs.update - guaranteeing the
-  // rule is already active before the first Sportradar request fires.
-  chrome.tabs.create({ url: 'about:blank', active: true }, function (tab) {
-    if (chrome.runtime.lastError || !tab) { sendResponse({ ok: false, error: (chrome.runtime.lastError && chrome.runtime.lastError.message) || 'failed to open tab' }); return; }
-    try { srSpoofExpectedOriginByTab[tab.id] = new URL(url).origin; } catch (e) { /* leave unset - cleanup listener degrades to "never auto-stop" */ }
-    startSrSpoofRule(tab.id, spoofOrigin).then(function () {
-      chrome.tabs.update(tab.id, { url: url }, function () {
-        if (chrome.runtime.lastError) { sendResponse({ ok: false, error: chrome.runtime.lastError.message }); return; }
-        sendResponse({ ok: true, tabId: tab.id });
-      });
-    }).catch(function (err) {
-      sendResponse({ ok: false, error: String(err && err.message || err) });
-    });
-  });
-  return true;
+handleMessage('lgt-open-with-sr-spoof', async function (msg, sender) {
+  if (!msg.url || !msg.spoofOrigin) throw new Error('missing url or spoofOrigin');
+  const origin = new URL(msg.url).origin;
+  const tab = await chromeCall(chrome.tabs, 'create', { url: 'about:blank', active: true });
+  try {
+    await startSrSpoofRule(tab.id, msg.spoofOrigin, undefined, origin);
+    await chromeCall(chrome.tabs, 'update', tab.id, { url: msg.url });
+    return { ok: true, tabId: tab.id };
+  } catch (error) { await stopSrSpoofRule(tab.id); throw error; }
 });
 
 // Toolbar icon click toggles the panel in the active tab's content script.

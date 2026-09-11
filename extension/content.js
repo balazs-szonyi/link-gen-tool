@@ -1,13 +1,13 @@
 /*
  * Link Gen Tool extension - content script.
  *
- * Ported from the link-gen-tool bookmarklet (link-gen-tool.js), adapted to
+ * Ported from the link-gen-tool legacy page-injected script (the extension), adapted to
  * an extension's naturally different lifecycle:
  *
  *  - This script runs automatically on every page load AND every
  *    navigation (content_scripts auto-inject, no window.open/injection/
  *    sessionStorage-breadcrumb tricks needed at all to "survive" a hard
- *    page navigation the way the bookmarklet had to work around).
+ *    page navigation the way the legacy page-injected script had to work around).
  *  - Passive capture itself does not happen here at all - it happens in
  *    background.js via chrome.webRequest, at the network layer, so it
  *    works even on the very first request a page makes, before this
@@ -17,10 +17,10 @@
  *    instead of per-origin localStorage, so it is automatically shared
  *    across every brand domain - no manual Export/Import sync-code step
  *    needed (that UI is intentionally dropped here; it remains in the
- *    bookmarklet, which still needs it).
+ *    legacy page-injected script, which still needs it).
  *  - The panel is hidden by default and shown via the toolbar icon (or
  *    automatically, mid-flow, if an auto-login resume is pending) rather
- *    than being built only on an explicit bookmarklet click.
+ *    than being built only on an explicit legacy page-injected script click.
  */
 (function () {
   'use strict';
@@ -78,7 +78,7 @@
   }
 
   // ---------------------------------------------------------------------
-  // Config / data (kept in sync with the bookmarklet's own copy)
+  // Config / data (kept in sync with the legacy page-injected script's own copy)
   // ---------------------------------------------------------------------
 
   var BRANDS = {
@@ -166,7 +166,7 @@
     triobet: 'triobet.com'
   };
 
-  // See link-gen-tool.js for the same table and its caveats (best-effort,
+  // See the extension for the same table and its caveats (best-effort,
   // brand markup can go stale, submit may not complete a real login on
   // brands with fraud-detection that rejects synthetic clicks).
   // sportsbookNavPattern: matched against the trimmed visible text of an
@@ -356,7 +356,7 @@
 
   // ---------------------------------------------------------------------
   // Vault - chrome.storage.local, extension-scoped so it is automatically
-  // shared across every brand domain (unlike the bookmarklet's per-origin
+  // shared across every brand domain (unlike the legacy page-injected script's per-origin
   // localStorage, which needed a manual Export/Import sync code). No
   // separate sync UI is needed here as a result.
   // ---------------------------------------------------------------------
@@ -434,7 +434,7 @@
           writeAll(filtered, cb);
         });
       },
-      // Async (unlike the bookmarklet's synchronous version) since
+      // Async (unlike the legacy page-injected script's synchronous version) since
       // chrome.storage.local has no synchronous read API.
       getDefault: function (cb) {
         readAll(function (list) {
@@ -460,7 +460,7 @@
   })();
 
   // ---------------------------------------------------------------------
-  // Mode A: Generate Link (identical to the bookmarklet - no vault/capture
+  // Mode A: Generate Link (identical to the legacy page-injected script - no vault/capture
   // dependency, calls the open-CORS internal.{env}.sbplayground1.net APIs
   // directly from the page).
   // ---------------------------------------------------------------------
@@ -486,17 +486,19 @@
   // call - tags a classified connectivity failure with isVpnRequired so
   // callers can show the "First connect VPN!" popup without each having
   // to re-implement isVpnLikeNetworkError's detection themselves.
-  function fetchInternal(url) {
-    return fetch(url).catch(function (err) {
-      if (isVpnLikeNetworkError(err)) {
-        var host = (url.match(/^https:\/\/([^/]+)/) || [])[1] || url;
-        var vpnErr = new Error('Could not reach ' + host + ' - not connected to the VPN?');
-        vpnErr.isVpnRequired = true;
-        vpnErr.vpnHost = host;
-        throw vpnErr;
-      }
-      throw err;
-    });
+  async function fetchInternal(url) {
+    try {
+			return await fetch(url);
+		} catch(err) {
+			if(isVpnLikeNetworkError(err)) {
+				var host=(url.match(/^https:\/\/([^/]+)/)||[])[1]||url;
+				var vpnErr=new Error('Could not reach '+host+' - not connected to the VPN?');
+				vpnErr.isVpnRequired=true;
+				vpnErr.vpnHost=host;
+				throw vpnErr;
+			}
+			throw err;
+		}
   }
 
   // Upfront check so the Generate tab's live-login fallback (see
@@ -505,27 +507,26 @@
   // Per the sbplayground-link-generator skill's REFERENCE.md, only 4/34
   // brands (firestorm, firestormsg, playgurus, sandbox) currently have
   // one - every other brand always resolves false here.
-  function hasLoggedInCustomerKey(brand, environment) {
+  async function hasLoggedInCustomerKey(brand, environment) {
     var brandGuid = BRANDS[brand];
     if (!brandGuid) return Promise.resolve(false);
-    return fetchInternal(apiBase(environment) + '/api/customers/' + brandGuid)
-      .then(function (r) { return r.ok ? r.json() : {}; })
-      .then(function (customers) {
-        return Object.keys(customers || {}).some(function (k) { return k.toLowerCase().indexOf('logged-in') === 0; });
-      })
-      .catch(function (err) {
-        // A VPN-connectivity failure is NOT "this brand has no logged-in
-        // key" - swallowing it here would silently mislead
-        // runGenerateFlow into wastefully attempting a live-login
-        // fallback instead of surfacing the real problem immediately.
-        // Any other (non-network) error keeps today's conservative
-        // silent-false fallback.
-        if (err && err.isVpnRequired) throw err;
-        return false;
-      });
+    try {
+			const r=await fetchInternal(apiBase(environment)+'/api/customers/'+brandGuid);
+			const customers=await (r.ok? r.json():{});
+			return Object.keys(customers||{}).some(function(k) { return k.toLowerCase().indexOf('logged-in')===0; });
+		} catch(err) {
+			// A VPN-connectivity failure is NOT "this brand has no logged-in
+			// key" - swallowing it here would silently mislead
+			// runGenerateFlow into wastefully attempting a live-login
+			// fallback instead of surfacing the real problem immediately.
+			// Any other (non-network) error keeps today's conservative
+			// silent-false fallback.
+			if(err&&err.isVpnRequired) throw err;
+			return false;
+		}
   }
 
-  function generateLink(opts) {
+  async function generateLink(opts) {
     var brandGuid = BRANDS[opts.brand];
     if (!brandGuid) return Promise.reject(new Error('Unknown brand: ' + opts.brand));
 
@@ -534,33 +535,26 @@
     var prefix = opts.loggedIn ? 'logged-in' : 'logged-out';
     var filter = (opts.customerKeyFilter || '').toLowerCase();
 
-    return fetchInternal(base + '/api/customers/' + brandGuid)
-      .then(function (r) {
-        if (!r.ok) throw new Error('customers fetch failed: HTTP ' + r.status);
-        return r.json();
-      })
-      .then(function (customers) {
-        var keys = Object.keys(customers).filter(function (k) {
-          return k.toLowerCase().indexOf(prefix) === 0 && k.toLowerCase().indexOf(filter) !== -1;
-        });
-        if (keys.length === 0) {
-          var available = Object.keys(customers).filter(function (k) { return k.toLowerCase().indexOf(prefix) === 0; });
-          throw new Error('No customer key matched prefix "' + prefix + '" + filter "' + filter + '". Available: ' + available.join(', '));
-        }
-        var customerKey = keys[0];
-        var uri = base + '/api/user-context/' + customerKey +
-          '?brand=' + brandGuid + '&shouldUseSbIl=false&generateLinksPage=true&overrideIFrameBaseUrlWith=';
-        return fetchInternal(uri).then(function (r) {
-          if (!r.ok) throw new Error('user-context fetch failed: HTTP ' + r.status);
-          return r.json();
-        }).then(function (data) {
-          return buildLinksFromContext(data, opts);
-        }).then(function (links) {
-          links.customerKey = customerKey;
-          links.customerLabel = (customers[customerKey] || {}).label || customerKey;
-          return links;
-        });
-      });
+    const r=await fetchInternal(base+'/api/customers/'+brandGuid);
+		if(!r.ok) throw new Error('customers fetch failed: HTTP '+r.status);
+		const customers=await r.json();
+		var keys=Object.keys(customers).filter(function(k) {
+			return k.toLowerCase().indexOf(prefix)===0&&k.toLowerCase().indexOf(filter)!==-1;
+		});
+		if(keys.length===0) {
+			var available=Object.keys(customers).filter(function(k_1) { return k_1.toLowerCase().indexOf(prefix)===0; });
+			throw new Error('No customer key matched prefix "'+prefix+'" + filter "'+filter+'". Available: '+available.join(', '));
+		}
+		var customerKey=keys[0];
+		var uri=base+'/api/user-context/'+customerKey+
+			'?brand='+brandGuid+'&shouldUseSbIl=false&generateLinksPage=true&overrideIFrameBaseUrlWith=';
+		const r_1=await fetchInternal(uri);
+		if(!r_1.ok) throw new Error('user-context fetch failed: HTTP '+r_1.status);
+		const data=await r_1.json();
+		const links=buildLinksFromContext(data,opts);
+		links.customerKey=customerKey;
+		links.customerLabel=(customers[customerKey]||{}).label||customerKey;
+		return links;
   }
 
   function buildLinksFromContext(resp, opts) {
@@ -677,48 +671,42 @@
   // actually running as mobile (or vice versa) risks the same kind of
   // failure, so the caller must mint for whichever device the override is
   // actually being applied to.
-  function fetchFreshBleContext(brand, device, loggedIn, customerKeyFilter) {
+  async function fetchFreshBleContext(brand, device, loggedIn, customerKeyFilter) {
     var brandGuid = BRANDS[brand];
     if (!brandGuid) return Promise.reject(new Error('Unknown brand: ' + brand));
     var base = apiBase('prod');
     var prefix = loggedIn ? 'logged-in' : 'logged-out';
     var filter = (customerKeyFilter || '').toLowerCase();
-    return fetchInternal(base + '/api/customers/' + brandGuid)
-      .then(function (r) {
-        if (!r.ok) throw new Error('customers fetch failed: HTTP ' + r.status);
-        return r.json();
-      })
-      .then(function (customers) {
-        var keys = Object.keys(customers).filter(function (k) {
-          return k.toLowerCase().indexOf(prefix) === 0 && k.toLowerCase().indexOf(filter) !== -1;
-        });
-        if (keys.length === 0) {
-          var available = Object.keys(customers).filter(function (k) { return k.toLowerCase().indexOf(prefix) === 0; });
-          throw new Error('No customer key matched prefix "' + prefix + '" + filter "' + filter + '". Available: ' + available.join(', '));
-        }
-        var customerKey = keys[0];
-        var uri = base + '/api/user-context/' + customerKey +
-          '?brand=' + brandGuid + '&shouldUseSbIl=false&generateLinksPage=true&overrideIFrameBaseUrlWith=';
-        return fetchInternal(uri).then(function (r) {
-          if (!r.ok) throw new Error('user-context fetch failed: HTTP ' + r.status);
-          return r.json();
-        }).then(function (data) {
-          var contexts = ((data.data || {}).context || {});
-          var contextPrefix = BRAND_CONTEXT_PREFIXES[brand];
-          var namedContextKey = contextPrefix && Object.keys(contexts).filter(function (key) {
-            return key.toLowerCase() === (contextPrefix + ' ' + device).toLowerCase();
-          })[0];
-          var ctxNode = contexts[namedContextKey || device] || {};
-          var stc = (ctxNode.customerContext || {}).staticContextId;
-          var ctx = (ctxNode.customerContext || {}).userContextId;
-          if (!stc || !ctx) throw new Error('No BLE context found for device "' + device + '" in the user-context response.');
-          return { stc: stc, ctx: ctx, customerKey: customerKey };
-        });
-      });
+    const r=await fetchInternal(base+'/api/customers/'+brandGuid);
+		if(!r.ok) throw new Error('customers fetch failed: HTTP '+r.status);
+		const customers=await r.json();
+		var keys=Object.keys(customers).filter(function(k) {
+			return k.toLowerCase().indexOf(prefix)===0&&k.toLowerCase().indexOf(filter)!==-1;
+		});
+		if(keys.length===0) {
+			var available=Object.keys(customers).filter(function(k_1) { return k_1.toLowerCase().indexOf(prefix)===0; });
+			throw new Error('No customer key matched prefix "'+prefix+'" + filter "'+filter+'". Available: '+available.join(', '));
+		}
+		var customerKey=keys[0];
+		var uri=base+'/api/user-context/'+customerKey+
+			'?brand='+brandGuid+'&shouldUseSbIl=false&generateLinksPage=true&overrideIFrameBaseUrlWith=';
+		const r_1=await fetchInternal(uri);
+		if(!r_1.ok) throw new Error('user-context fetch failed: HTTP '+r_1.status);
+		const data=await r_1.json();
+		var contexts=((data.data||{}).context||{});
+		var contextPrefix=BRAND_CONTEXT_PREFIXES[brand];
+		var namedContextKey=contextPrefix&&Object.keys(contexts).filter(function(key) {
+			return key.toLowerCase()===(contextPrefix+' '+device).toLowerCase();
+		})[0];
+		var ctxNode=contexts[namedContextKey||device]||{};
+		var stc=(ctxNode.customerContext||{}).staticContextId;
+		var ctx=(ctxNode.customerContext||{}).userContextId;
+		if(!stc||!ctx) throw new Error('No BLE context found for device "'+device+'" in the user-context response.');
+		return { stc: stc,ctx: ctx,customerKey: customerKey };
   }
 
   // ---------------------------------------------------------------------
-  // Mode B: Live-Login Capture. Unlike the bookmarklet, capture itself
+  // Mode B: Live-Login Capture. Unlike the legacy page-injected script, capture itself
   // happens in background.js via chrome.webRequest (network layer) - this
   // module just reads chrome.storage.local (per-origin key) and reacts to
   // chrome.storage.onChanged for live updates, no in-page fetch/XHR patch
@@ -741,7 +729,7 @@
     return {
       // No-op: background.js captures unconditionally via webRequest,
       // independent of whether/when this content script has run. Kept for
-      // API-shape parity with the bookmarklet's Capture module.
+      // API-shape parity with the legacy page-injected script's Capture module.
       start: function () {},
       onCapture: function (cb) { listeners.push(cb); },
       get: function (cb) {
@@ -1001,7 +989,7 @@
   }
 
   // ---------------------------------------------------------------------
-  // Auto-login helpers (DOM-only, unchanged from the bookmarklet).
+  // Auto-login helpers (DOM-only, unchanged from the legacy page-injected script).
   // ---------------------------------------------------------------------
 
   function simulateTyping(el, text) {
@@ -1247,23 +1235,18 @@
   // what actually catches and self-heals the "click landed on an
   // unrelated element" failure mode instead of silently typing into the
   // void.
-  function clickFieldAndVerifyFocus(el, fieldLabel, log) {
-    function attempt(retriesLeft) {
-      var c = centerOf(el);
-      return sendTrustedSequence([{ type: 'click', x: c.x, y: c.y }]).then(function (response) {
-        if (!response || !response.ok) return { ok: false, error: response && response.error };
-        return new Promise(function (resolve) { setTimeout(resolve, 120); }).then(function () {
-          if (activeElementDeep() === el) return { ok: true };
-          if (retriesLeft > 0) {
-            log(fieldLabel + ' click landed on an unrelated element instead of the field (possibly a cookie banner or an animating overlay) - retrying...');
-            return new Promise(function (resolve) { setTimeout(resolve, 250); }).then(function () { return attempt(retriesLeft - 1); });
-          }
-          return { ok: false, error: 'focus did not land on ' + fieldLabel + ' field after retrying' };
-        });
-      });
+  async function clickFieldAndVerifyFocus(el, fieldLabel, log) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const c = centerOf(el);
+      const response = await sendTrustedSequence([{ type: 'click', x: c.x, y: c.y }]);
+      if (!response?.ok) return { ok: false, error: response?.error };
+      await delay(120);
+      if (activeElementDeep() === el) return { ok: true };
+      if (attempt === 0) { log(fieldLabel + ' click missed the field - retrying...'); await delay(250); }
     }
-    return attempt(1);
+    return { ok: false, error: 'focus did not land on ' + fieldLabel + ' field after retrying' };
   }
+  function delay(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
   // Ask the background service worker to run a chrome.debugger (CDP)
   // input sequence - see background.js for why this exists (trusted
@@ -1284,19 +1267,17 @@
     });
   }
 
-  // DOM-simulation fallback (the original bookmarklet-era approach) -
+  // DOM-simulation fallback (the original legacy page-injected script-era approach) -
   // only used if chrome.debugger couldn't attach (e.g. real DevTools is
   // already attached to this tab, which blocks a second debugger client).
-  function domFallbackSubmit(userEl, username, passEl, password, submitEl, log) {
-    log('Trusted input unavailable - falling back to synthetic DOM events (may be rejected by this brand\'s fraud checks, same limitation the bookmarklet had).');
-    return simulateTyping(userEl, username).then(function (userResult) {
-      if (userResult !== 'ok') { log('Username field ' + userResult + ' while typing (fallback path). Log in manually.'); return false; }
-      return simulateTyping(passEl, password).then(function (passResult) {
-        if (passResult !== 'ok') { log('Password field ' + passResult + ' while typing (fallback path). Log in manually.'); return false; }
-        simulateClick(submitEl);
-        return true;
-      });
-    });
+  async function domFallbackSubmit(userEl, username, passEl, password, submitEl, log) {
+    log('Trusted input unavailable - falling back to synthetic DOM events (may be rejected by this brand\'s fraud checks, same limitation the legacy page-injected script had).');
+    const userResult=await simulateTyping(userEl,username);
+		if(userResult!=='ok') { log('Username field '+userResult+' while typing (fallback path). Log in manually.'); return false; }
+		const passResult=await simulateTyping(passEl,password);
+		if(passResult!=='ok') { log('Password field '+passResult+' while typing (fallback path). Log in manually.'); return false; }
+		simulateClick(submitEl);
+		return true;
   }
 
   function isDisabled(el) {
@@ -1331,21 +1312,19 @@
   // correctly but e.g. the field's own JS reset/reformatted the value
   // mid-type, in addition to the focus-miss case already handled by
   // clickFieldAndVerifyFocus.
-  function fillFieldVerified(el, text, fieldLabel, log, retriesLeft) {
-    if (retriesLeft == null) retriesLeft = 1;
-    return clickFieldAndVerifyFocus(el, fieldLabel, log).then(function (clickResult) {
-      if (!clickResult.ok) return clickResult;
-      return sendTrustedSequence([{ type: 'type', text: text }]).then(function (typeResponse) {
-        if (!typeResponse || !typeResponse.ok) return { ok: false, error: typeResponse && typeResponse.error };
-        if (el.value === text) return { ok: true };
-        if (retriesLeft > 0) {
-          log(fieldLabel + ' field value didn\'t match what was typed (got ' + JSON.stringify(el.value) + ') - clearing and retrying...');
-          clearFieldValue(el);
-          return fillFieldVerified(el, text, fieldLabel, log, retriesLeft - 1);
-        }
-        return { ok: false, error: fieldLabel + ' field value still doesn\'t match after retrying (got ' + JSON.stringify(el.value) + ')' };
-      });
-    });
+  async function fillFieldVerified(el, text, fieldLabel, log, retriesLeft = 1) {
+    const click = await clickFieldAndVerifyFocus(el, fieldLabel, log);
+    if (!click.ok) return click;
+    const typed = await sendTrustedSequence([{ type: 'type', text }]);
+    if (!typed?.ok) return { ok: false, error: typed?.error };
+    if (el.value === text) return { ok: true };
+    if (retriesLeft > 0) {
+      // Never log a typed value: this helper also handles passwords.
+      log(fieldLabel + ' field value did not match - clearing and retrying...');
+      clearFieldValue(el);
+      return fillFieldVerified(el, text, fieldLabel, log, retriesLeft - 1);
+    }
+    return { ok: false, error: fieldLabel + ' field value still does not match after retrying' };
   }
 
   // Two round trips to the background's chrome.debugger session, split
@@ -1355,74 +1334,53 @@
   // validation, (2) once the button looks enabled, click it. If the click
   // doesn't lead anywhere, attemptAutoLogin retries with a trusted Enter
   // keypress in the password field as a button-independent fallback.
-  function trustedAutoLoginSubmit(userEl, username, passEl, password, submitEl, log, retried) {
-    clearFieldValue(userEl);
-    clearFieldValue(passEl);
-    return waitForStableRect(function () { return userEl; }, 800).then(function () {
-      return fillFieldVerified(userEl, username, 'Username', log);
-    }).then(function (userResult) {
-      if (!userResult.ok) return { ok: false, error: userResult.error };
-      return waitForStableRect(function () { return passEl; }, 800).then(function () {
-        return fillFieldVerified(passEl, password, 'Password', log);
-      }).then(function (passResult) {
-        if (!passResult.ok) return { ok: false, error: passResult.error };
-        return sendTrustedSequence([{ type: 'key', key: 'Tab' }]);
-      });
-    }).then(function (response) {
-      if (!response || !response.ok) {
-        // chrome.debugger can occasionally detach mid-sequence for
-        // reasons outside this extension's control (observed 2026-08-06
-        // on NordicBet: "Detached while handling command" partway
-        // through typing), and a click can also simply land on the wrong
-        // element (observed the same day: an intervening cookie-consent
-        // banner button stole focus meant for the username field, which
-        // fillFieldVerified above now catches and retries on its own -
-        // this outer retry is for everything else, e.g. the CDP detach
-        // case). One retry (re-clearing both fields first, so characters
-        // aren't doubled up on top of a partial value) is far more likely
-        // to actually succeed than immediately giving up on trusted
-        // input, since the untrusted DOM fallback is known to be
-        // silently ignored by brands that gate their submit handler on
-        // event.isTrusted (the whole reason trusted input exists here).
-        if (!retried) {
-          log('Trusted input failed (' + (response && response.error || 'unknown reason') + ') - retrying once...');
-          return trustedAutoLoginSubmit(userEl, username, passEl, password, submitEl, log, true);
-        }
-        log('Trusted input failed (' + (response && response.error || 'unknown reason') + ').');
-        return domFallbackSubmit(userEl, username, passEl, password, submitEl, log);
+  async function trustedAutoLoginSubmit(userEl, username, passEl, password, submitEl, log, retried) {
+    clearFieldValue(userEl); clearFieldValue(passEl);
+    await waitForStableRect(() => userEl, 800);
+    let response = await fillFieldVerified(userEl, username, 'Username', log);
+    if (response.ok) {
+      await waitForStableRect(() => passEl, 800);
+      response = await fillFieldVerified(passEl, password, 'Password', log);
+      if (response.ok) response = await sendTrustedSequence([{ type: 'key', key: 'Tab' }]);
+    }
+    if (!response?.ok) {
+      const reason = response?.error || 'unknown reason';
+      // An interrupted input job must not replay itself after detach/restart.
+      if (/detach|cancel|message port closed|channel closed|receiving end does not exist/i.test(reason)) {
+        log('Trusted input interrupted (' + reason + '). Continue manually or start a new attempt.');
+        return false;
       }
-      return waitForEnabled(submitEl, 3000).then(function (enabled) {
-        if (!enabled) log('Submit button still looks disabled after filling both fields - clicking anyway (may be a false read on a custom component).');
-        var sc = centerOf(submitEl);
-        return sendTrustedSequence([{ type: 'click', x: sc.x, y: sc.y }]).then(function (clickResponse) {
-          if (clickResponse && clickResponse.ok) return true;
-          log('Trusted submit click failed (' + (clickResponse && clickResponse.error || 'unknown reason') + ').');
-          return domFallbackSubmit(userEl, username, passEl, password, submitEl, log);
-        });
-      });
-    });
+      if (!retried) { log('Trusted input failed (' + reason + ') - retrying once...'); return trustedAutoLoginSubmit(userEl, username, passEl, password, submitEl, log, true); }
+      return domFallbackSubmit(userEl, username, passEl, password, submitEl, log);
+    }
+    if (!await waitForEnabled(submitEl, 3000)) log('Submit button still looks disabled after filling both fields - clicking anyway (may be a custom component).');
+    const c = centerOf(submitEl);
+    const clicked = await sendTrustedSequence([{ type: 'click', x: c.x, y: c.y }]);
+    if (clicked?.ok) return true;
+    log('Trusted submit click failed (' + (clicked?.error || 'unknown reason') + ').');
+    if (/detach|cancel|closed/i.test(clicked?.error || '')) return false;
+    return domFallbackSubmit(userEl, username, passEl, password, submitEl, log);
   }
 
   // Button-independent fallback: press Enter while focused in the
   // password field, which most login forms treat as "submit the
   // enclosing form" regardless of whether our submitSelector guess
   // found (or clicked) the actual right element.
-  function trustedEnterKeySubmit(passEl, log) {
+  async function trustedEnterKeySubmit(passEl, log) {
     var pc = centerOf(passEl);
-    return sendTrustedSequence([{ type: 'click', x: pc.x, y: pc.y }, { type: 'key', key: 'Enter' }]).then(function (response) {
-      if (!response || !response.ok) {
-        log('Enter-key submit fallback failed (' + (response && response.error || 'unknown reason') + ').');
-        return false;
-      }
-      return true;
-    });
+    const response=await sendTrustedSequence([{ type: 'click',x: pc.x,y: pc.y },{ type: 'key',key: 'Enter' }]);
+		if(!response||!response.ok) {
+			log('Enter-key submit fallback failed ('+(response&&response.error||'unknown reason')+').');
+			return false;
+		}
+		return true;
   }
 
   // Same-tab breadcrumb only - a normal same-origin navigation (no popup
   // involved) keeps sessionStorage intact by spec, and the content script
   // is guaranteed to run again on the destination page automatically, so
   // no window.open/injectScriptInto/watchForLoginSuccessAndReinject
-  // machinery is needed here at all (unlike the bookmarklet's v10/v13).
+  // machinery is needed here at all (unlike the legacy page-injected script's v10/v13).
   var RESUME_KEY = '__lgtExtAutoLoginResume';
 
   // Closes the loop after a successful auto-login: passive capture only
@@ -1432,7 +1390,7 @@
   // click (trusted, via CDP) rather than a hard navigation, per the
   // documented "hard navigation breaks the session" pitfall (see the
   // sportsbookNavPattern comment on LOGIN_SELECTORS).
-  function navigateToSportsbookAndAwaitCapture(brandKey, log) {
+  async function navigateToSportsbookAndAwaitCapture(brandKey, log) {
     var sel = LOGIN_SELECTORS[brandKey];
     var pattern = sel && sel.sportsbookNavPattern;
 
@@ -1472,74 +1430,30 @@
       });
     }
 
-    return new Promise(function (resolve) {
-      // Give the just-landed post-login page a head start: for brands
-      // where that landing page already IS the Sportsbook section, no
-      // click is needed at all, and waiting for one would only risk
-      // missing the capture window. Bumped from 2500ms - real-world
-      // testing 2026-08-06 showed a genuinely successful login/navigation
-      // (confirmed via screenshot: real balance, full Sportsbook lobby
-      // loaded) still reporting "no stc/ctx captured", and a live
-      // end-to-end test of this exact extension code against the real
-      // site succeeded but took ~12s total for the whole login+capture
-      // sequence in a fast test environment - a real user's slower
-      // network/machine could plausibly exceed the old, tighter budgets.
-      // The post-login landing page (e.g. NordicBet's plain "/en") can show
-      // its own cookie-consent banner even when the earlier login-page
-      // dismissal already ran - it's a different route/component tree, and
-      // some consent SDKs re-check per-page. An undismissed banner can
-      // silently intercept the click meant for the Sportsbook nav link
-      // exactly like the already-documented login-form case
-      // (tryDismissCookieBanner's comment) - looks identical to "capture is
-      // just slow" in the logs, so dismiss proactively before searching.
+    tryDismissCookieBanner(log);
+    if (await awaitCapture(5000)) return true;
+    if (!pattern) { log('No known Sportsbook nav link pattern for "' + brandKey + '" - navigate to Sportsbook manually.'); return false; }
+    const startPath = location.pathname;
+    const started = Date.now();
+    let link;
+    while (!(link = findSportsbookNavLink(pattern))) {
+      if (Date.now() - started > 7000) { log('Could not find a Sportsbook nav link - navigate to Sportsbook manually.'); return false; }
+      await delay(200);
+    }
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const c = centerOf(link);
+      const result = await sendTrustedSequence([{ type: 'click', x: c.x, y: c.y }]);
+      if (!result?.ok) { log('Sportsbook navigation click failed: ' + (result?.error || 'no response')); return false; }
+      await delay(1500);
+      if (attempt || location.pathname !== startPath) break;
+      log('Sportsbook click has not navigated yet - dismissing overlays and retrying once...');
       tryDismissCookieBanner(log);
-      awaitCapture(5000).then(function (already) {
-        if (already) return resolve(true);
-        if (!pattern) {
-          log('No known Sportsbook nav link pattern for "' + brandKey + '" - click into the Sportsbook section yourself so stc/ctx capture can complete.');
-          resolve(false);
-          return;
-        }
-        var startPath = location.pathname;
-        var start = Date.now();
-        function clickAndAwait(linkEl, allowRetry) {
-          var c = centerOf(linkEl);
-          sendTrustedSequence([{ type: 'click', x: c.x, y: c.y }]).then(function () {
-            // Verify the click actually navigated somewhere before waiting
-            // the full capture budget - a banner/overlay intercepting the
-            // click leaves location.pathname unchanged, which otherwise
-            // isn't distinguishable from "the capture is just slow" in the
-            // logs. One retry (with a fresh banner-dismiss attempt) covers
-            // a banner that only appeared after the first search/click.
-            setTimeout(function () {
-              if (allowRetry && location.pathname === startPath) {
-                log('Click on the Sportsbook nav link did not navigate anywhere yet (still on ' + startPath + ') - a cookie banner or overlay may have intercepted it; retrying once...');
-                tryDismissCookieBanner(log);
-                var retryEl = findSportsbookNavLink(pattern);
-                if (retryEl) return clickAndAwait(retryEl, false);
-              }
-              awaitCapture(20000).then(function (ok) {
-                if (!ok) log('Navigated to Sportsbook, but no stc/ctx captured yet - it may still be loading; check the Live Login tab.');
-                resolve(ok);
-              });
-            }, 1500);
-          });
-        }
-        (function pollNav() {
-          var linkEl = findSportsbookNavLink(pattern);
-          if (linkEl) {
-            clickAndAwait(linkEl, true);
-            return;
-          }
-          if (Date.now() - start > 7000) {
-            log('Could not find a Sportsbook nav link to click - click into the Sportsbook section yourself so stc/ctx capture can complete.');
-            resolve(false);
-            return;
-          }
-          setTimeout(pollNav, 200);
-        })();
-      });
-    });
+      link = findSportsbookNavLink(pattern);
+      if (!link) break;
+    }
+    const captured = await awaitCapture(20000);
+    if (!captured) log('Navigated to Sportsbook, but no stc/ctx captured yet - check the Live Login tab.');
+    return captured;
   }
 
   // Some brands show a cookie-consent banner (OneTrust, confirmed on
@@ -1564,124 +1478,56 @@
     } catch (e) {}
   }
 
-  function attemptAutoLogin(brandKey, username, password, log, isSilentWindow) {
-    var sel = LOGIN_SELECTORS[brandKey];
-    if (!sel) {
-      log('No known login selectors for brand "' + brandKey + '". Log in manually - capture stays passive and automatic.');
-      return Promise.resolve(false);
-    }
-    if (location.pathname.indexOf(sel.loginPath) === -1) {
-      try {
-        sessionStorage.setItem(RESUME_KEY, JSON.stringify({ brand: brandKey, ts: Date.now() }));
-      } catch (e) {}
-      log('Navigating to the login page - this continues automatically once it loads (no extra click needed).');
+  async function attemptAutoLogin(brandKey, username, password, log, isSilentWindow) {
+    const sel = LOGIN_SELECTORS[brandKey];
+    if (!sel) { log('No known login selectors for brand "' + brandKey + '". Log in manually - capture stays passive.'); return false; }
+    if (!location.pathname.includes(sel.loginPath)) {
+      try { sessionStorage.setItem(RESUME_KEY, JSON.stringify({ brand: brandKey, ts: Date.now() })); } catch (_) {}
+      log('Navigating to the login page - this continues once it loads.');
       location.href = location.origin + sel.loginPath;
-      return Promise.resolve(false);
+      return false;
     }
     tryDismissCookieBanner(log);
     log('Looking for username field...');
-    // 6000ms was too tight for this environment - observed 2026-08-06 a
-    // "Username field not found" failure where a follow-up screenshot
-    // showed the field WAS present (and even auto-filled by Chrome's own
-    // password manager) shortly after, implying the modal simply hadn't
-    // finished mounting yet on a slow alpha-environment page load. Bumped
-    // again from 15000ms after a qa-environment failure the same day -
-    // NordicBet's qa login page loads an additional Group-IB
-    // fraud-detection iframe (eu.id.group-ib.com) not observed on alpha,
-    // which can meaningfully delay when the (deeply shadow-DOM-nested,
-    // depth 6+ observed) login widget actually mounts and becomes
-    // queryable.
-    // Even 25000ms occasionally isn't enough - reported 2026-08-06 as an
-    // INTERMITTENT failure (works most of the time, dies occasionally),
-    // consistent with the Group-IB iframe delay above being variable
-    // (network/server load dependent) rather than a hard "never mounts"
-    // case. Rather than pushing the single timeout even higher (which
-    // delays every real "not supported here" case too), give the page one
-    // more, shorter, second chance below - re-running the cookie-banner
-    // dismissal too, in case a banner appeared only after the first wait
-    // elapsed and was itself blocking the modal.
-    return waitForUsernameFieldOrAlreadyLoggedIn(sel, 25000).then(function (result) {
-      if (result.alreadyLoggedIn || result.field) return result;
-      log('Still waiting for the username field (this environment can be slow to mount the login form) - trying a bit longer...');
+    let result = await waitForUsernameFieldOrAlreadyLoggedIn(sel, 25000);
+    if (!result.alreadyLoggedIn && !result.field) {
+      log('Still waiting for the username field - trying a bit longer...');
       tryDismissCookieBanner(log);
-      // Nudge: if this job is running in the silent/minimized background
-      // window, a minimized page's document.visibilityState is 'hidden',
-      // which Chrome uses to pause/heavily throttle
-      // requestAnimationFrame - and this modal's own mount/animate-in
-      // apparently depends on rAF timing (confirmed by a 2026-08-07
-      // screenshot: the field WAS present once the window got
-      // un-minimized for the failure view, despite "not found" during the
-      // minimized wait). Briefly restoring 'normal' state (still
-      // unfocused - doesn't steal input focus or flash to the front) for
-      // just this second, slower-mount wait gives rAF a chance to run at
-      // full rate without giving up full invisibility for the common/fast
-      // case above. Re-minimized again once this second wait resolves,
-      // regardless of outcome - see the .then below. Guarded by
-      // isSilentWindow (only true for the actual background-window job -
-      // see resumeLiveLoginJobIfPending's call site) since the manual
-      // "Auto-login" button in the Live Login tab runs in the user's own
-      // CURRENT foreground window, where forcing state:'normal'+
-      // focused:false would defocus whatever the user is actively doing.
-      if (isSilentWindow) {
-        try { chrome.runtime.sendMessage({ type: 'lgt-window-set-state', state: 'normal' }); } catch (e) {}
-      }
-      return waitForUsernameFieldOrAlreadyLoggedIn(sel, 15000).then(function (secondResult) {
-        if (isSilentWindow) {
-          try { chrome.runtime.sendMessage({ type: 'lgt-window-set-state', state: 'minimized' }); } catch (e) {}
-        }
-        return secondResult;
-      });
-    }).then(function (result) {
-      if (result.alreadyLoggedIn) {
-        log('Already logged in (redirected away from the login page before any form appeared, most likely because a valid session already existed here from earlier browsing) - skipping straight to Sportsbook capture.');
-        return navigateToSportsbookAndAwaitCapture(brandKey, log).then(function () { return true; });
-      }
-      var userEl = result.field;
-      if (!userEl) {
-        log('Stopped: Username field not found. Log in manually - capture stays passive and automatic either way.');
-        return false;
-      }
-      warnIfMultipleMatches(sel.usernameSelector, userEl, 'Username', log);
-      log('Username field found. Looking for password field...');
-      return waitForElement(sel.passwordSelector, 4000).then(function (passEl) {
-        if (!passEl) {
-          log('Stopped: Password field not found. Log in manually - capture stays passive and automatic either way.');
-          return false;
-        }
-        warnIfMultipleMatches(sel.passwordSelector, passEl, 'Password', log);
-        log('Password field found. Looking for submit button...');
-        var scopedSubmit = findSubmitNear(passEl, sel.submitSelector);
-        var submitPromise = scopedSubmit ? Promise.resolve(scopedSubmit) : waitForElement(sel.submitSelector, 3000);
-        if (!scopedSubmit) {
-          log('No submit button found near the password field (unusual) - falling back to a page-wide search, which risks matching an unrelated button.');
-        }
-        return submitPromise.then(function (submitEl) {
-          if (!submitEl) {
-            log('Stopped: submit button not found. Fields located - click Log In yourself to finish.');
-            return false;
-          }
-          log('Filling fields and submitting with trusted input (you may briefly see a "started debugging this browser" banner - expected, it\'s what lets the click bypass isTrusted/fraud checks; it disappears on its own).');
-          return trustedAutoLoginSubmit(userEl, username, passEl, password, submitEl, log).then(function (submitted) {
-            if (!submitted) return false;
-            return watchForSubmitOutcome(sel.loginPath, 4000).then(function (outcome) {
-              if (outcome !== 'stuck') {
-                log('Submitted - navigated away from the login page. Heading to Sportsbook to complete capture...');
-                return navigateToSportsbookAndAwaitCapture(brandKey, log).then(function () { return true; });
-              }
-              log('Still on the login page after clicking submit - trying a trusted Enter keypress in the password field as a button-independent fallback...');
-              return trustedEnterKeySubmit(passEl, log).then(function () {
-                return watchForSubmitOutcome(sel.loginPath, 3000).then(function (outcome2) {
-                  if (outcome2 === 'stuck') {
-                    log('Still on the login page - likely a real login rejection (wrong credential, captcha, etc) rather than a click-trust issue at this point. Check manually.');
-                    return false;
-                  }
-                  log('Submitted via Enter key - navigated away from the login page. Heading to Sportsbook to complete capture...');
-                  return navigateToSportsbookAndAwaitCapture(brandKey, log).then(function () { return true; });
-                });
-              });
-            });
-          });
-        });
+      try {
+        if (isSilentWindow) await sendExtensionMessage({ type: 'lgt-window-set-state', state: 'normal' });
+        result = await waitForUsernameFieldOrAlreadyLoggedIn(sel, 15000);
+      } finally { if (isSilentWindow) await sendExtensionMessage({ type: 'lgt-window-set-state', state: 'minimized' }); }
+    }
+    if (result.alreadyLoggedIn) { log('Already logged in - proceeding to Sportsbook capture.'); await navigateToSportsbookAndAwaitCapture(brandKey, log); return true; }
+    const userEl = result.field;
+    if (!userEl) { log('Stopped: Username field not found. Log in manually.'); return false; }
+    warnIfMultipleMatches(sel.usernameSelector, userEl, 'Username', log);
+    log('Username field found. Looking for password field...');
+    const passEl = await waitForElement(sel.passwordSelector, 4000);
+    if (!passEl) { log('Stopped: Password field not found. Log in manually.'); return false; }
+    warnIfMultipleMatches(sel.passwordSelector, passEl, 'Password', log);
+    log('Password field found. Looking for submit button...');
+    let submitEl = findSubmitNear(passEl, sel.submitSelector);
+    if (!submitEl) { log('No submit button near the password field - falling back to a page-wide search.'); submitEl = await waitForElement(sel.submitSelector, 3000); }
+    if (!submitEl) { log('Stopped: submit button not found. Click Log In yourself to finish.'); return false; }
+    log('Filling fields and submitting with trusted input.');
+    if (!await trustedAutoLoginSubmit(userEl, username, passEl, password, submitEl, log)) return false;
+    if (await watchForSubmitOutcome(sel.loginPath, 4000) === 'stuck') {
+      log('Still on login page - trying Enter as a submit fallback...');
+      if (!await trustedEnterKeySubmit(passEl, log)) return false;
+      if (await watchForSubmitOutcome(sel.loginPath, 3000) === 'stuck') { log('Still on login page - check credentials, captcha or other login requirements manually.'); return false; }
+    }
+    log('Submitted - heading to Sportsbook to complete capture...');
+    await navigateToSportsbookAndAwaitCapture(brandKey, log);
+    return true;
+  }
+  function sendExtensionMessage(message) {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage(message, response => {
+        const error = chrome.runtime.lastError;
+        if (error) reject(new Error(error.message));
+        else if (response?.ok === false) reject(new Error(response.error));
+        else resolve(response);
       });
     });
   }
@@ -2389,9 +2235,11 @@
       if (!brandGuid) { customerWrap.style.display = 'none'; return; }
       var apiEnv = bleChk.checked ? 'prod' : envSel.value;
       var prefix = loginSel.value === 'in' ? 'logged-in' : 'logged-out';
-      fetchInternal(apiBase(apiEnv) + '/api/customers/' + brandGuid)
-        .then(function (r) { return r.ok ? r.json() : {}; })
-        .then(function (customers) {
+      (async () => {
+try {
+const r = await fetchInternal(apiBase(apiEnv) + '/api/customers/' + brandGuid);
+const customers = r.ok ? await r.json() : {};
+
           if (token !== customerFetchToken) return; // superseded by a newer selection
           var keys = Object.keys(customers || {}).filter(function (k) {
             return k.toLowerCase().indexOf(prefix) === 0;
@@ -2425,11 +2273,13 @@
           }
           pendingRestoreCustomerKey = null;
           customerWrap.style.display = '';
-        })
-        .catch(function () {
+
+} catch (error) {
           if (token !== customerFetchToken) return;
           customerWrap.style.display = 'none';
-        });
+
+}
+})();
     }
 
     brandSel.addEventListener('change', function () { saveGenState({ brand: brandSel.value }); refreshCustomerOptions(); });
@@ -2545,7 +2395,10 @@
         // left as-is (untouched, whatever a previous click rendered for
         // it), never cleared.
         function spliceAndRender(stcDesktop, ctxDesktop, stcMobile, ctxMobile, bleSourceWanted) {
-          generateLink({ brand: brand, environment: environment, loggedIn: false, customerKeyFilter: '', bleSource: bleSourceWanted }).then(function (links) {
+          (async () => {
+try {
+const links = await generateLink({ brand: brand, environment: environment, loggedIn: false, customerKeyFilter: '', bleSource: bleSourceWanted });
+
             var suffix = bleSourceWanted ? ' + BLE' : '';
             // Keep the Local Links panel's matching named entries (see
             // spliceLocalLinkEntry) showing the SAME context as whatever
@@ -2568,7 +2421,8 @@
               log.textContent += ' (BLE source applied: logged in for real on prod - prod always serves live BLE events - rendered on the ' + environment + ' frontend with bleSource=1.)';
             }
             setBtnBusy(false);
-          }).catch(function (err) {
+
+} catch (err) {
             log.textContent = 'Error building final link: ' + friendlyErrorMessage(err);
             setBtnBusy(false);
             // Cheap retry: the live-login capture already succeeded, so
@@ -2581,7 +2435,9 @@
                 spliceAndRender(stcDesktop, ctxDesktop, stcMobile, ctxMobile, bleSourceWanted);
               });
             }
-          });
+
+}
+})();
         }
 
         // Runs the live-login capture(s) (cache -> background-tab job)
@@ -2917,13 +2773,16 @@
           // Logged-out (with or without BLE) - unchanged path, BLE is
           // handled entirely inside generateLink() via the static
           // registry, no live-login involved either way.
-          generateLink({ brand: brand, environment: environment, loggedIn: false, customerKeyFilter: selectedCustomerKeyFilter(), bleSource: bleSource })
-            .then(renderLinks)
-            .catch(function (err) {
+          (async () => {
+try {
+return renderLinks(await generateLink({ brand: brand, environment: environment, loggedIn: false, customerKeyFilter: selectedCustomerKeyFilter(), bleSource: bleSource }));
+} catch (err) {
               log.textContent = 'Error: ' + friendlyErrorMessage(err);
               setBtnBusy(false);
               if (err && err.isVpnRequired) showVpnRequiredPopup(err.message, attempt);
-            });
+
+}
+})();
           return;
         }
 
@@ -2940,15 +2799,21 @@
         // for a brand with no logged-in key would go straight to
         // generateLink() and fail immediately instead of falling back to
         // live-login like the non-BLE case already did.
-        hasLoggedInCustomerKey(brand, bleSource ? 'prod' : environment).then(function (hasKey) {
+        (async () => {
+try {
+const hasKey = await hasLoggedInCustomerKey(brand, bleSource ? 'prod' : environment);
+
           if (hasKey) {
-            generateLink({ brand: brand, environment: environment, loggedIn: true, customerKeyFilter: selectedCustomerKeyFilter(), bleSource: bleSource })
-              .then(renderLinks)
-              .catch(function (err) {
+            (async () => {
+try {
+return renderLinks(await generateLink({ brand: brand, environment: environment, loggedIn: true, customerKeyFilter: selectedCustomerKeyFilter(), bleSource: bleSource }));
+} catch (err) {
                 log.textContent = 'Error: ' + friendlyErrorMessage(err);
                 setBtnBusy(false);
                 if (err && err.isVpnRequired) showVpnRequiredPopup(err.message, attempt);
-              });
+
+}
+})();
             return;
           }
           // Item 14: brands with no plain user/pass login (BankID, MitID,
@@ -2980,11 +2845,14 @@
           resolveCredentialForLogin(brand, function (credentialId) {
             runLiveLoginFallback(bleSource, forceFresh, credentialId, devices);
           });
-        }).catch(function (err) {
+
+} catch (err) {
           log.textContent = 'Error: ' + friendlyErrorMessage(err);
           setBtnBusy(false);
           if (err && err.isVpnRequired) showVpnRequiredPopup(err.message, attempt);
-        });
+
+}
+})();
       };
     }
 
@@ -3030,15 +2898,21 @@
       var bleSource = bleChk.checked;
       var token = ++genModeToken;
       if (!loggedIn) { applyGenButtonMode(false); return; }
-      hasLoggedInCustomerKey(brand, bleSource ? 'prod' : environment).then(function (hasKey) {
+      (async () => {
+try {
+const hasKey = await hasLoggedInCustomerKey(brand, bleSource ? 'prod' : environment);
+
         if (token !== genModeToken) return; // superseded by a newer selection
         if (hasKey || SPECIAL_AUTH_BRANDS[brand]) { applyGenButtonMode(false); return; }
         var sel = LOGIN_SELECTORS[brand];
         applyGenButtonMode(!!(sel && sel.sportsbookNavPattern));
-      }).catch(function () {
+
+} catch (error) {
         if (token !== genModeToken) return;
         applyGenButtonMode(false);
-      });
+
+}
+})();
     }
     brandSel.addEventListener('change', refreshGenerateButtonMode);
     envSel.addEventListener('change', refreshGenerateButtonMode);
@@ -3172,16 +3046,22 @@
     // continuously and unconditionally in the background.
     function buildFinalLink(c) {
       if (!detected.brand) { status.textContent = status.textContent + ' (brand not recognized - cannot build base link automatically)'; return; }
-      generateLink({ brand: detected.brand, environment: detected.environment, loggedIn: false }).then(function (links) {
+      (async () => {
+try {
+const links = await generateLink({ brand: detected.brand, environment: detected.environment, loggedIn: false });
+
         result.style.display = '';
         result.innerHTML = '';
         result.appendChild(renderLinkRow('Desktop', spliceContext(links.desktop, c.stc, c.ctx), detected.brand, detected.environment));
         result.appendChild(renderLinkRow('Mobile', spliceContext(links.mobile, c.stc, c.ctx), detected.brand, detected.environment));
         result.appendChild(renderLinkRow('Brand page', realBrandOrigin(detected.brand, detected.environment), detected.brand, detected.environment));
-      }).catch(function (err) {
+
+} catch (err) {
         status.textContent = 'Error building final link: ' + friendlyErrorMessage(err);
         if (err && err.isVpnRequired) showVpnRequiredPopup(err.message, function () { buildFinalLink(c); });
-      });
+
+}
+})();
     }
 
     // Reflect whatever's already captured immediately (covers both a
@@ -3203,13 +3083,18 @@
     function doLogin(cred) {
       pickerArea.innerHTML = '';
       status.textContent = 'Logging in with "' + cred.label + '"...';
-      attemptAutoLogin(detected.brand, cred.username, cred.password, function (m) { status.textContent = m; }).then(function (ok) {
+      (async () => {
+try {
+const ok = await attemptAutoLogin(detected.brand, cred.username, cred.password, function (m) { status.textContent = m; });
+
         // Item 9: only second-guess a credential that was actually
         // matrix-linked to this brand - one used via "try anyway" failing
         // isn't evidence the matrix is wrong, just that the guess was bad.
         if (ok || (cred.brands || []).indexOf(detected.brand) === -1) return;
         renderFailurePrompt(cred);
-      });
+
+} catch (error) { console.warn('[link-gen-tool] UI operation failed:', error); }
+})();
     }
 
     function renderFailurePrompt(cred) {
@@ -3860,7 +3745,10 @@
         var alphaHost = alphaHostForBrand(brand);
         if (!alphaHost) { status.textContent = 'This brand has no known playground host - cannot resolve an ALPHA target.'; return; }
         status.textContent = 'Fetching a fresh BLE context from PROD...';
-        fetchFreshBleContext(brand, device, loggedInChk.checked, '').then(function (result) {
+        (async () => {
+try {
+const result = await fetchFreshBleContext(brand, device, loggedInChk.checked, '');
+
           status.textContent = 'Applying (' + result.customerKey + ')...';
           var bootstrapUrl = maintenanceBootstrapUrl(brand);
           chrome.runtime.sendMessage({
@@ -3880,10 +3768,13 @@
             }
             status.textContent = 'Active - ' + device + ' context ' + result.stc + ' -> ' + alphaHost + '. Reload the page if it was already loaded.';
           });
-        }).catch(function (err) {
+
+} catch (err) {
           if (err && err.isVpnRequired) { showVpnRequiredPopup(err.message, function () { applyBtn.click(); }); status.textContent = err.message; return; }
           status.textContent = 'Failed: ' + (err && err.message || err);
-        });
+
+}
+})();
       }
     }, ['Apply']);
 
@@ -4224,17 +4115,21 @@
   // Bootstrap
   // ---------------------------------------------------------------------
 
-  Capture.start();
-  var panelEl = buildPanel();
-
+  var panelEl = null;
+  var pendingToggle = Number(globalThis.__lgtToggleQueue || 0);
+  // Register this listener before constructing the relatively large panel so
+  // a toolbar click immediately after document_idle cannot be lost.
   chrome.runtime.onMessage.addListener(function (msg) {
-    if (msg && msg.type === 'lgt-toggle-panel') {
-      panelEl.__lgtToggle();
-    }
+    if (!msg || msg.type !== 'lgt-toggle-panel') return;
+    if (panelEl && panelEl.__lgtToggle) panelEl.__lgtToggle();
+    else pendingToggle += 1;
   });
+  Capture.start();
+  panelEl = buildPanel();
+  if (pendingToggle) panelEl.__lgtToggle();
 
   // Resume an auto-login that was interrupted by navigating to the brand's
-  // login page (see attemptAutoLogin). Unlike the bookmarklet, this needs
+  // login page (see attemptAutoLogin). Unlike the legacy page-injected script, this needs
   // no window-handle/popup logic at all: the content script simply runs
   // again automatically on the destination page, and sessionStorage
   // survives a normal same-tab, same-origin navigation by spec.
@@ -4318,7 +4213,10 @@
             }
           }
           Capture.reset(function () {
-            navigateToSportsbookAndAwaitCapture(job.brand, log).then(function () {
+            (async () => {
+try {
+await navigateToSportsbookAndAwaitCapture(job.brand, log);
+
               Capture.get(function (c) {
                 stopKeepAlive();
                 stopDebuggerKeepalive();
@@ -4334,7 +4232,9 @@
                   LiveLoginJob.update({ status: 'failed', error: 'Navigated to Sportsbook, but no stc/ctx was captured. Steps: ' + steps.join(' > ') }, focusThisTab);
                 }
               });
-            });
+
+} catch (error) { console.warn('[link-gen-tool] UI operation failed:', error); }
+})();
           });
         });
         return;
@@ -4432,7 +4332,10 @@
           }
 
           Capture.reset(function () {
-            attemptAutoLogin(job.brand, cred.username, cred.password, log, !job.visible).then(function (loginOk) {
+            (async () => {
+try {
+const loginOk = await attemptAutoLogin(job.brand, cred.username, cred.password, log, !job.visible);
+
               // Item 0c fix (2026-08-07): mark this brand "silent verified"
               // as soon as the trusted-input login sequence ITSELF
               // succeeded (real submission navigated away, or an
@@ -4497,7 +4400,9 @@
                   LiveLoginJob.update({ status: 'failed', error: 'Login/Sportsbook navigation completed but no stc/ctx was captured. Steps: ' + steps.join(' > '), credentialSuspected: false }, focusThisTab);
                 }
               });
-            });
+
+} catch (error) { console.warn('[link-gen-tool] UI operation failed:', error); }
+})();
           });
         });
       });

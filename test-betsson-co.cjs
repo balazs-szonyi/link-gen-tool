@@ -9,7 +9,6 @@ const path = require('path');
 const { chromium } = require('playwright');
 
 const EXT_PATH = path.resolve(__dirname, 'extension');
-const BOOKMARKLET_PATH = path.resolve(__dirname, 'link-gen-tool.js');
 const TARGET_URL = 'https://www.test.betsson.co/';
 
 async function testExtension() {
@@ -109,54 +108,8 @@ async function testExtension() {
   }
 }
 
-async function testBookmarklet() {
-  const browser = await chromium.launch({ channel: 'chromium', headless: true });
-  try {
-    const page = await browser.newPage();
-    await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await page.addScriptTag({ path: BOOKMARKLET_PATH });
-
-    const panel = page.locator('#lgt-panel');
-    await panel.waitFor({ state: 'visible', timeout: 10000 });
-    const brandSelect = panel.locator('select').nth(0);
-    await brandSelect.selectOption('betssonco');
-    await panel.locator('select').nth(1).selectOption('test');
-    await panel.locator('select').nth(2).selectOption('out');
-    await page.waitForTimeout(1000);
-
-    const contextRequest = page.waitForRequest((request) => {
-      const url = new URL(request.url());
-      return url.hostname === 'internal.test.sbplayground1.net' && url.pathname.includes('/api/user-context/');
-    }, { timeout: 60000 });
-
-    await panel.getByRole('button', { name: 'Generate', exact: true }).click();
-    const request = await contextRequest;
-    const requestUrl = new URL(request.url());
-    assert.strictEqual(requestUrl.searchParams.get('segmentId'), null, 'betsson.co must keep the API default segment');
-    const responseBody = await (await request.response()).json();
-    const namedDesktop = responseBody.data.context['Betsson.co Desktop'].customerContext;
-    const namedMobile = responseBody.data.context['Betsson.co Mobile'].customerContext;
-    const result = panel.locator('.lgt-result').first();
-    await result.getByText(/d-cf\.test\.btsplayground\.net/i).first().waitFor({ timeout: 60000 });
-    const resultText = (await result.textContent()) || '';
-    assert(resultText.includes('/' + namedDesktop.staticContextId + '/' + namedDesktop.userContextId + '/'));
-    assert(resultText.includes('/' + namedMobile.staticContextId + '/' + namedMobile.userContextId + '/'));
-
-    await page.goto('https://www.test.betsson.com/', { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await page.addScriptTag({ path: BOOKMARKLET_PATH });
-    const comDetectedText = await page.locator('#lgt-panel').getByText(/Detected:/).first().textContent();
-    assert.match(comDetectedText || '', /Detected:\s*betsson\s*\/\s*test/i);
-    assert.doesNotMatch(comDetectedText || '', /betssonco/i);
-
-    console.log('PASS: bookmarklet generated the dedicated Betsson.co context without overriding the default segment.');
-  } finally {
-    await browser.close();
-  }
-}
-
 async function main() {
   await testExtension();
-  await testBookmarklet();
 }
 
 main().catch((error) => {
