@@ -28,9 +28,10 @@ us whether a given brand's **real, live website** actually embeds that
 iframe, embeds an MFE widget instead, runs a NodeJS-rendered integration,
 or some combination — that can only be observed by visiting the brand's
 real domain (`BRAND_DOMAINS` in `content.js`) directly. Several known
-brand keys (`firestorm`, `firestormsg`, `sandbox`, `spino`) have no real
-domain at all (QA/synthetic brands only), and real brand sites can be
-geo-blocked or require the VPN flow already documented for
+brand keys (`firestorm`, `firestormsg`, `sandbox`) have no real domain at
+all (QA/synthetic brands only). Spino is supported on `www.test.spino.com`,
+although its production-domain stability remains unconfirmed. Real brand
+sites can be geo-blocked or require the VPN flow already documented for
 `test-vpn-popup.cjs` — so a scripted crawl of all ~42 QA-indexer brands
 is not reliable to fully automate and is treated as a manual task here,
 consistent with the project's live-test-execution policy (local/mock

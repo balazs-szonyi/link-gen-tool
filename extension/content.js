@@ -163,6 +163,7 @@
     rexbet: 'rexbet.com',
     rizk: 'rizk.com',
     spelklubben: 'spelklubben.se',
+    spino: 'spino.com',
     triobet: 'triobet.com'
   };
 
