@@ -40,3 +40,10 @@ test('content script and service worker recognize test.spino.com as Spino', () =
 
   assert.equal(strippedHost, 'spino.com');
 });
+
+test('Spino is configured for credential-backed live login', () => {
+  assert.match(
+    contentSource,
+    /spino:\s*\{\s*loginPath:\s*'\/en\/login',[\s\S]*?usernameSelector:[\s\S]*?passwordSelector:[\s\S]*?submitSelector:\s*'\[data-test-id="btn-1"\]',[\s\S]*?sportsbookNavPattern:\s*\/\^sports\$\/i\s*\}/,
+  );
+});
