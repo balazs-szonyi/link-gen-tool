@@ -260,6 +260,17 @@
       passwordSelector: 'input[name="password"], input[type="password"]',
       submitSelector: '[data-test-id="account-login-btn-1-button"], button[type="submit"]',
       sportsbookNavPattern: /^sportsbook$/i
+    },
+    // Live-verified 2026-09-21 on www.test.spino.com. Spino uses the
+    // same open-shadow-root FDS inputs as the OBG brands above, but its
+    // submit control is an fds-button custom element and the top-nav
+    // destination is labelled "Sports" rather than "Sportsbook".
+    spino: {
+      loginPath: '/en/login',
+      usernameSelector: 'input[name="email"], input#email-input, input[type="email"]',
+      passwordSelector: 'input[name="password"], input#password-input, input[type="password"]',
+      submitSelector: '[data-test-id="btn-1"]',
+      sportsbookNavPattern: /^sports$/i
     }
   };
 
