@@ -593,10 +593,18 @@
       var ctx = (ctxNode.customerContext || {}).userContextId;
       if (!base || !stc || !ctx) return null;
 
-      if (opts.bleSource) {
+      if (opts.bleSource && opts.environment !== 'prod') {
         base = base.replace(/^(https:\/\/[^.]+\.)/, '$1' + opts.environment + '.');
         return base + '/' + stc + '/' + ctx + '/?bleSource=1&exposeObgState=true&exposeObgRt=true&sealStore=false';
       }
+      // When the target environment IS prod, apiEnv already forced the
+      // customer/context lookup to prod (see generateLink's apiEnv rule),
+      // so `base` here is already the real, env-segment-free prod host
+      // (e.g. "https://d-cf.ndbplayground.net") - there's no separate
+      // "prod BLE source" concept (prod IS BLE), so no host-rewrite or
+      // bleSource=1 param is needed. Doing the rewrite unconditionally
+      // used to insert a bogus ".prod." segment into the domain
+      // (e.g. "d-cf.prod.ndbplayground.net"), which doesn't resolve.
       return base + '/' + stc + '/' + ctx + '/?exposeObgState=true&exposeObgRt=true&sealStore=false';
     }
 
@@ -1623,7 +1631,7 @@
       style.id = 'lgt-vpn-popup-style';
       style.textContent = [
         '#lgt-vpn-popup-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:2147483647;',
-        'display:flex;align-items:center;justify-content:center;font:.8125rem/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}',
+        'display:flex;align-items:center;justify-content:center;font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}',
         '#lgt-vpn-popup{background:#101320;color:#f6f7fb;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.5);',
         'padding:20px;width:320px;text-align:center;border:1px solid #ff6600}',
         '#lgt-vpn-popup h4{margin:0 0 8px;font-size:16px}',
@@ -1884,7 +1892,10 @@
       '#lgt-panel::-webkit-scrollbar-thumb,#lgt-local-links-panel::-webkit-scrollbar-thumb,#lgt-panel .lgt-brand-matrix::-webkit-scrollbar-thumb{background:var(--lgt-scroll-thumb);border:2px solid var(--lgt-scroll-track);border-radius:10px}',
       '#lgt-panel::-webkit-scrollbar-thumb:hover,#lgt-local-links-panel::-webkit-scrollbar-thumb:hover,#lgt-panel .lgt-brand-matrix::-webkit-scrollbar-thumb:hover{background:var(--lgt-scroll-thumb-hover)}',
       '#lgt-panel{position:fixed;top:20px;right:20px;inline-size:min(360px,calc(100vw - 2rem));max-block-size:88dvh;overflow:auto;',
-      'overscroll-behavior:contain;scrollbar-gutter:stable;background:var(--lgt-bg);color:var(--lgt-fg);font:.8125rem/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;',
+      // Fixed px (not rem): rem is relative to the HOST page's <html>
+      // font-size, which some sportsbook pages reset (e.g. to 10px for
+      // their own rem-scaling), silently shrinking this panel's text.
+      'overscroll-behavior:contain;scrollbar-gutter:stable;background:var(--lgt-bg);color:var(--lgt-fg);font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;',
       'border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.4);z-index:2147483647;padding:14px;}',
       '#lgt-panel h3{margin:0 0 8px;font-size:15px;display:flex;justify-content:space-between;align-items:center}',
       '#lgt-panel .lgt-header-actions{display:flex;align-items:center;gap:10px;flex:none}',
@@ -1958,7 +1969,7 @@
       '#lgt-panel .lgt-build-strip .lgt-build-actions{display:flex;gap:6px;flex:none}',
       '#lgt-panel .lgt-build-detail{margin-top:2px;font-size:10px;color:var(--lgt-muted);white-space:pre-wrap;width:100%}',
       '#lgt-local-links-panel{position:fixed;inline-size:min(360px,calc(100vw - 2rem));max-block-size:88dvh;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;background:var(--lgt-bg);color:var(--lgt-fg);',
-      'font:.8125rem/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;border-radius:10px;',
+      'font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;border-radius:10px;',
       'box-shadow:0 8px 30px rgba(0,0,0,.4);z-index:2147483646;padding:14px;box-sizing:border-box}',
       '#lgt-local-links-panel h3{margin:0 0 8px;font-size:15px;display:flex;justify-content:space-between;align-items:center}',
       '#lgt-local-links-panel .lgt-header-actions{display:flex;align-items:center;gap:10px;flex:none}',
