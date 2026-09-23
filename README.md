@@ -5,6 +5,7 @@ Internal Manifest V3 Chrome extension for generating environment-correct Betsson
 ## Features
 
 - Generate desktop/mobile test, QA, alpha and production links for supported brands, including dedicated `betsson.co` contexts.
+- Choose brand- and environment-supported Language/Currency values for logged-out links; the generated customer context is validated against both selections.
 - Show local developer links in a detachable, minimizable desktop-only panel.
 - Capture live `stc`/`ctx` context at the network layer.
 - Apply tab-scoped Bundle, BLE Data, BLE CORS, Embed, Sportradar and Oddin overrides.
@@ -23,8 +24,12 @@ Internal Manifest V3 Chrome extension for generating environment-correct Betsson
 
 ```powershell
 npm test
+npm run test:generate-context
+npm run audit:brand-options
 node --test test/worker-state.test.cjs
 ```
+
+`audit:brand-options` prints the live language/currency inventory for all 34 unique brand registries in TEST, QA, ALPHA and PROD. Sandbox ALPHA/PROD uses the same explicit QA metadata fallback shown by the extension because its own metadata endpoint currently returns HTTP 500.
 
 The GitHub Pages site publishes only the extension download page. `sync-onedrive.ps1` mirrors the unpacked extension to both Chrome-loaded OneDrive copies and verifies recursive hashes.
 

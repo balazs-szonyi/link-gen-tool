@@ -1,7 +1,7 @@
 {
   "name": "link-gen-tool",
   "private": true,
-  "version": "1.22.38",
+  "version": "1.22.39",
   "scripts": {
     "test": "node --test cross-layer-lab/test/*.test.cjs",
     "test:betsson-co": "node test-betsson-co.cjs",
@@ -13,7 +13,9 @@
     "test:bundle-navigation": "node --test test/bundle-navigation.test.cjs && node test-bundle-navigation-e2e.cjs",
     "test:action-launcher": "node --test test/action-launcher.test.cjs && node test-action-launcher-e2e.cjs",
     "test:spino": "node --test test/spino-host-support.test.cjs",
-    "test:spino:live": "node test-spino-live.cjs"
+    "test:spino:live": "node test-spino-live.cjs",
+    "test:generate-context": "node test-generate-language-currency.cjs",
+    "audit:brand-options": "node audit-brand-language-currency.cjs"
   },
   "devDependencies": {
     "playwright": "^1.62.1"
