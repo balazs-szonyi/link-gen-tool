@@ -80,6 +80,9 @@ async function main() {
   // the user reported (env down -> borrow another env's build).
   await panel.locator('.lgt-tab').filter({ hasText: 'Bundle', exact: false }).first().click();
   log('Switched to Bundle tab');
+  const bundleTargetEnvSel = panel.locator('select:visible').nth(2);
+  await bundleTargetEnvSel.selectOption(BUNDLE_TARGET_ENV);
+  log('Selected Bundle target environment: ' + BUNDLE_TARGET_ENV.toUpperCase());
   const bundleApplyBtn = panel.getByRole('button', { name: 'Apply', exact: true });
   const bundleReload = page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 });
   await bundleApplyBtn.click();
@@ -229,6 +232,15 @@ async function main() {
     throw new Error('REGRESSION: Bundle Override was cleared by the BLE Data Override apply/reload sequence - the two features are not independent.');
   }
   log('PASS: Bundle Override is still active alongside BLE Data Override.');
+
+  await page.addScriptTag({ url: 'https://betssongroup.github.io/sportsbook/qa/sportsbook-tool/sportsbookTool.min.js' });
+  const sportsbookToolEnvironment = page.locator('#environment');
+  await sportsbookToolEnvironment.waitFor({ state: 'attached', timeout: 15000 });
+  const sportsbookToolEnvironmentText = (await sportsbookToolEnvironment.textContent() || '').trim();
+  if (!/^TEST, using ALPHA API/i.test(sportsbookToolEnvironmentText)) {
+    throw new Error('Sportsbook Tool did not report the combined TEST bundle + ALPHA API state. Environment text: ' + sportsbookToolEnvironmentText);
+  }
+  log('PASS: Sportsbook Tool environment reads "' + sportsbookToolEnvironmentText + '".');
 
   const bodyText = await page.locator('body').innerText().catch(() => '');
   log('Body text length after combined override + reload: ' + bodyText.length);

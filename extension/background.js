@@ -879,6 +879,52 @@ function bleDataSourceHostRegex(currentHost) {
   return '(?:www\\.)?' + escapeRegexLiteral(baseHost);
 }
 
+async function setBleDataAlphaApiMarker(tabId, enabled) {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tabId },
+      world: 'MAIN',
+      args: [enabled],
+      func: function (shouldEnable) {
+        var ownerKey = '__linkGenToolOwnsBleSourceExperiment';
+        var startupContext = window.obgClientEnvironmentConfig && window.obgClientEnvironmentConfig.startupContext;
+        var experiments = startupContext && startupContext.activeExperiments;
+        if (!Array.isArray(experiments)) return { ready: false, enabled: false, owned: false };
+
+        if (shouldEnable) {
+          if (experiments.indexOf('bleSource') === -1) {
+            try { experiments.push('bleSource'); }
+            catch (e) {
+              try { startupContext.activeExperiments = experiments.concat(['bleSource']); }
+              catch (ignored) {}
+            }
+            if (startupContext.activeExperiments.indexOf('bleSource') !== -1) window[ownerKey] = true;
+          }
+        } else if (window[ownerKey]) {
+          var index = startupContext.activeExperiments.indexOf('bleSource');
+          if (index !== -1) {
+            try { startupContext.activeExperiments.splice(index, 1); }
+            catch (e) {
+              try { startupContext.activeExperiments = startupContext.activeExperiments.filter(function (item) { return item !== 'bleSource'; }); }
+              catch (ignored) {}
+            }
+          }
+          delete window[ownerKey];
+        }
+
+        return {
+          ready: true,
+          enabled: startupContext.activeExperiments.indexOf('bleSource') !== -1,
+          owned: window[ownerKey] === true
+        };
+      }
+    });
+    return { ok: true, state: results && results[0] ? results[0].result : null };
+  } catch (error) {
+    return { ok: false, error: String(error && error.message || error), state: null };
+  }
+}
+
 async function startBleDataOverrideRule(tabId, currentHost, alphaHost, stc, ctx, expectedOrigin) {
   return dnr.apply('bleData', tabId, { scope: { kind: 'origin', value: expectedOrigin || 'https://' + currentHost } }, async () => allocate => {
     const ruleIds = allocate(2);
@@ -965,13 +1011,16 @@ handleMessage('lgt-ble-data-start', async function (msg, sender) {
 handleMessage('lgt-ble-data-stop', async function (msg, sender) {
   const tabId = senderTabId(sender);
   await stopBleDataOverrideRule(tabId);
+  await setBleDataAlphaApiMarker(tabId, false);
   return { ok: true };
 });
 
 handleMessage('lgt-ble-data-status', async function (msg, sender) {
   const tabId = senderTabId(sender);
   const { rules } = await dnr.status('bleData', tabId);
-  return { ok: true, active: rules.length > 0 };
+  const active = rules.length > 0;
+  const marker = await setBleDataAlphaApiMarker(tabId, active);
+  return { ok: true, active: active, alphaApiMarker: marker.state };
 });
 
 // ---------------------------------------------------------------------
