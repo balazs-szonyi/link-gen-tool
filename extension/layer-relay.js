@@ -11,6 +11,7 @@
   'use strict';
 
   var MESSAGE_TYPE = 'lgt-layer-marker';
+  var REQUEST_TYPE = 'lgt-layer-marker-request';
 
   window.addEventListener('message', function (event) {
     if (event.source !== window) return;
@@ -22,4 +23,9 @@
       });
     } catch (e) { /* extension context invalidated (reload) - ignore */ }
   });
+
+  // MAIN-world detection may have run before this isolated-world listener.
+  // postMessage is asynchronous, so the detector has already registered its
+  // request listener by the time this handshake is delivered.
+  try { window.postMessage({ source: REQUEST_TYPE }, '*'); } catch (e) { /* frame is unloading */ }
 })();

@@ -27,6 +27,7 @@
   'use strict';
 
   var MESSAGE_TYPE = 'lgt-layer-marker';
+  var REQUEST_TYPE = 'lgt-layer-marker-request';
   var POLL_INTERVAL_MS = 1000;
   var MAX_POLL_ATTEMPTS = 20; // give up after ~20s if nothing ever appears
 
@@ -101,6 +102,17 @@
     // on `event.source === window && event.data.source === MESSAGE_TYPE`.
     try { window.postMessage({ source: MESSAGE_TYPE, href: location.href, markers: markers }, '*'); } catch (e) { /* give up silently */ }
   }
+
+  // MAIN and ISOLATED content scripts are scheduled independently even at
+  // the same run_at. The first immediate post can therefore happen before
+  // layer-relay.js has installed its listener. Let the relay explicitly ask
+  // for the current snapshot once it is ready so stable runtime globals do
+  // not get lost forever merely because their signature never changes.
+  window.addEventListener('message', function (event) {
+    if (event.source !== window || !event.data || event.data.source !== REQUEST_TYPE) return;
+    var markers = collect();
+    if (markers.length) post(markers);
+  });
 
   var attempts = 0;
   var lastSignature = '';
