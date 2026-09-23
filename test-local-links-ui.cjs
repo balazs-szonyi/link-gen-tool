@@ -10,7 +10,10 @@ const EXT_PATH = path.resolve(__dirname, 'extension');
 const contextFixture = {
   data: {
     user: {
-      desktop: { iFrameSetup: { overrideIFrameBaseUrlWith: 'https://d-cf.test.btsplayground.net' } },
+      desktop: {
+        iFrameSetup: { overrideIFrameBaseUrlWith: 'https://d-cf.test.btsplayground.net' },
+        loggedOutCustomer: { languageCode: 'en', customerWallets: { activeWalletCurrency: 'EUR' } }
+      },
       mobile: { iFrameSetup: { overrideIFrameBaseUrlWith: 'https://m-cf.test.btsplayground.net' } }
     },
     context: {
@@ -78,6 +81,16 @@ async function testExtension() {
       contentType: 'application/json',
       body: JSON.stringify({
         'logged-out-en-eur-mga-restofworld': { label: 'Logged out' }
+      })
+    }));
+    await page.route('https://internal.test.sbplayground1.net/api/brands/**', (route) => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        data: {
+          supportedLanguages: [{ languageCode: 'en', name: 'English' }],
+          supportedCurrencies: [{ currencyCode: 'EUR', name: 'Euro' }]
+        }
       })
     }));
     let userContextUrl = null;
