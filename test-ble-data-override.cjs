@@ -32,6 +32,12 @@ async function main() {
   const context = await chromium.launchPersistentContext(userDataDir, {
     channel: 'chromium',
     headless: process.env.LGT_HEADFUL ? false : true,
+    viewport: DEVICE === 'mobile' ? { width: 390, height: 844 } : { width: 1280, height: 900 },
+    userAgent: DEVICE === 'mobile'
+      ? 'Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36'
+      : undefined,
+    isMobile: DEVICE === 'mobile',
+    hasTouch: DEVICE === 'mobile',
     args: [
       `--disable-extensions-except=${EXT_PATH}`,
       `--load-extension=${EXT_PATH}`,
@@ -101,9 +107,14 @@ async function main() {
     log('WARNING: auto-detect did not match expected brand "' + BRAND + '" - forcing selection.');
     await brandSel.selectOption(BRAND);
   }
-  const deviceSel = panel.locator('select:visible').nth(1);
-  await deviceSel.selectOption(DEVICE);
-  log('Selected device: ' + DEVICE);
+  const detectedDeviceText = (await panel.locator('.lgt-result:visible').filter({ hasText: 'Detected device:' }).textContent() || '').trim();
+  if (detectedDeviceText.toLowerCase() !== 'detected device: ' + DEVICE) {
+    throw new Error('BLE Data device auto-detection mismatch. Expected ' + DEVICE + ', got: ' + detectedDeviceText);
+  }
+  if (await panel.locator('select:visible').count() !== 1) {
+    throw new Error('BLE Data should expose only the Brand select; the manual Device dropdown still exists.');
+  }
+  log('PASS: auto-detected device: ' + DEVICE + '; no manual Device dropdown is rendered.');
 
   const applyBtn = panel.getByRole('button', { name: 'Apply', exact: true });
   apiHits.length = 0;
