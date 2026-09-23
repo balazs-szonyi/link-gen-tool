@@ -1023,6 +1023,44 @@ handleMessage('lgt-ble-data-status', async function (msg, sender) {
   return { ok: true, active: active, alphaApiMarker: marker.state };
 });
 
+handleMessage('lgt-detect-sportsbook-device', async function (msg, sender) {
+  const tabId = senderTabId(sender);
+  const results = await chrome.scripting.executeScript({
+    target: { tabId: tabId },
+    world: 'MAIN',
+    func: function () {
+      var candidates = [
+        ['sbMfeStartupContext.appContext.deviceType', window.sbMfeStartupContext && window.sbMfeStartupContext.appContext && window.sbMfeStartupContext.appContext.deviceType],
+        ['obgClientEnvironmentConfig.startupContext.appContext.deviceType', window.obgClientEnvironmentConfig && window.obgClientEnvironmentConfig.startupContext && window.obgClientEnvironmentConfig.startupContext.appContext && window.obgClientEnvironmentConfig.startupContext.appContext.deviceType],
+        ['xSbState.appContext.device.deviceType', window.xSbState && window.xSbState.appContext && window.xSbState.appContext.device && window.xSbState.appContext.device.deviceType],
+        ['xSbState.appContext.deviceType', window.xSbState && window.xSbState.appContext && window.xSbState.appContext.deviceType],
+        ['nodeContext.deviceType', window.nodeContext && window.nodeContext.deviceType]
+      ];
+      for (var i = 0; i < candidates.length; i += 1) {
+        var raw = candidates[i][1];
+        if (typeof raw !== 'string') continue;
+        var normalized = raw.toLowerCase();
+        if (normalized.indexOf('mobile') !== -1 || normalized.indexOf('tablet') !== -1) {
+          return { device: 'mobile', source: candidates[i][0], raw: raw };
+        }
+        if (normalized.indexOf('desktop') !== -1) {
+          return { device: 'desktop', source: candidates[i][0], raw: raw };
+        }
+      }
+
+      var mobileBrowser = navigator.userAgentData && typeof navigator.userAgentData.mobile === 'boolean'
+        ? navigator.userAgentData.mobile
+        : /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+      return { device: mobileBrowser ? 'mobile' : 'desktop', source: 'browser rendering context', raw: null };
+    }
+  });
+  const detected = results && results[0] ? results[0].result : null;
+  if (!detected || (detected.device !== 'desktop' && detected.device !== 'mobile')) {
+    return { ok: false, error: 'Could not detect whether this page renders the desktop or mobile sportsbook.' };
+  }
+  return { ok: true, device: detected.device, source: detected.source, raw: detected.raw };
+});
+
 // ---------------------------------------------------------------------
 // Bundle override - redirects a brand's sportsbook bundle (main-*.js, and
 // any other per-device file the target env's indexer.json lists) to a

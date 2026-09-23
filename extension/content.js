@@ -3670,8 +3670,10 @@ const ok = await attemptAutoLogin(detected.brand, cred.username, cred.password, 
     return wrap;
   }
 
-  // Persists the BLE Data tab's own form controls (brand / device /
-  // logged-in), same rationale as BUNDLE_STATE_KEY above.
+  // Persists the BLE Data tab's own form controls (brand / logged-in),
+  // same rationale as BUNDLE_STATE_KEY above. Device is deliberately not
+  // persisted or user-selectable: it is detected from the live sportsbook
+  // runtime on every page because desktop/mobile contexts are different.
   var BLE_DATA_STATE_KEY = 'lgt-ble-data-state-v1';
 
   function saveBleDataState(partial) {
@@ -3705,14 +3707,28 @@ const ok = await attemptAutoLogin(detected.brand, cred.username, cred.password, 
     var detected = detectBrandAndEnv();
 
     var brandSel = el('select', {}, brandOptions(detected.brand || undefined));
-    var deviceSel = el('select', {}, [
-      el('option', { value: 'desktop' }, ['Desktop']),
-      el('option', { value: 'mobile' }, ['Mobile'])
-    ]);
+    var detectedDevice = null;
+    var deviceState = el('div', { class: 'lgt-result', 'aria-live': 'polite' }, ['Detecting page device…']);
     var loggedInChk = el('input', { type: 'checkbox' });
     var loggedInLabel = el('label', { style: 'display:flex;align-items:center;gap:6px;justify-content:flex-start' }, [loggedInChk, 'Logged in (only if this brand has a logged-in prod customer key)']);
 
     var status = el('div', { class: 'lgt-log' }, ['Not active on this tab.']);
+
+    async function refreshDetectedDevice() {
+      try {
+        var result = await sendExtensionMessage({ type: 'lgt-detect-sportsbook-device' });
+        detectedDevice = result.device;
+        deviceState.textContent = 'Detected device: ' + (detectedDevice === 'mobile' ? 'Mobile' : 'Desktop');
+        deviceState.title = result.source ? ('Source: ' + result.source + (result.raw ? ' (' + result.raw + ')' : '')) : '';
+        return detectedDevice;
+      } catch (error) {
+        detectedDevice = null;
+        deviceState.textContent = 'Device detection unavailable';
+        deviceState.title = friendlyErrorMessage(error);
+        throw error;
+      }
+    }
+    void refreshDetectedDevice().catch(function () {});
 
     function alphaHostForBrand(brand) {
       var suffix = PLAYGROUND_HOST_SUFFIX[brand];
@@ -3756,12 +3772,12 @@ const ok = await attemptAutoLogin(detected.brand, cred.username, cred.password, 
     var applyBtn = el('button', {
       onclick: function () {
         var brand = brandSel.value;
-        var device = deviceSel.value;
         var alphaHost = alphaHostForBrand(brand);
         if (!alphaHost) { status.textContent = 'This brand has no known playground host - cannot resolve an ALPHA target.'; return; }
         status.textContent = 'Fetching a fresh BLE context from PROD...';
         (async () => {
 try {
+const device = await refreshDetectedDevice();
 const result = await fetchFreshBleContext(brand, device, loggedInChk.checked, '');
 
           status.textContent = 'Applying (' + result.customerKey + ')...';
@@ -3809,13 +3825,11 @@ const result = await fetchFreshBleContext(brand, device, loggedInChk.checked, ''
     }, ['Disable']);
 
     brandSel.addEventListener('change', function () { saveBleDataState({ brand: brandSel.value }); });
-    deviceSel.addEventListener('change', function () { saveBleDataState({ device: deviceSel.value }); });
     loggedInChk.addEventListener('change', function () { saveBleDataState({ loggedIn: loggedInChk.checked }); });
 
     wrap.appendChild(el('label', {}, ['Brand']));
     wrap.appendChild(brandSel);
-    wrap.appendChild(el('label', {}, ['Device (must match how this page actually renders - desktop vs mobile context are different registrations)']));
-    wrap.appendChild(deviceSel);
+    wrap.appendChild(deviceState);
     wrap.appendChild(loggedInLabel);
     wrap.appendChild(el('div', { style: 'display:flex;gap:6px;margin-top:6px' }, [applyBtn, disableBtn]));
     wrap.appendChild(status);
@@ -3845,7 +3859,6 @@ const result = await fetchFreshBleContext(brand, device, loggedInChk.checked, ''
       // brand's ALPHA host, so restoring a stale brand from a different
       // real brand domain would silently target the wrong brand.
       if (!detected.brand && saved && saved.brand && BRANDS[saved.brand]) brandSel.value = saved.brand;
-      if (saved && saved.device) deviceSel.value = saved.device;
       if (saved && saved.loggedIn) loggedInChk.checked = true;
     });
 
