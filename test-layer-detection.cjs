@@ -7,7 +7,7 @@
 // Chromium profile (chromium.launchPersistentContext), Playwright's
 // context.route() to serve a fully local fixture page with NO real
 // network access, and serviceWorker.evaluate() to seed background.js's
-// own in-memory detection stores directly - this exercises the exact
+// persisted per-tab detection state directly - this exercises the exact
 // same computeDetectionRows() classifier and buildDetectionHeader() UI
 // the real extension uses, without depending on any live brand/QA host.
 
@@ -52,23 +52,40 @@ async function main() {
       await serviceWorker.evaluate(async ({ runtimeMarkers, network, frameDoc }) => {
         const tabs = await chrome.tabs.query({ active: true });
         const tabId = tabs[0].id;
-        runtimeMarkersByTab[tabId] = runtimeMarkers;
-        networkByTab[tabId] = network;
-        frameDocByTab[tabId] = frameDoc;
+        const frameIds = new Set([...Object.keys(runtimeMarkers), ...Object.keys(network), ...Object.keys(frameDoc)]);
+        const frames = {};
+        for (const frameId of frameIds) {
+          frames[frameId] = {
+            generation: crypto.randomUUID(),
+            runtime: runtimeMarkers[frameId] || {},
+            network: network[frameId] || {},
+            document: frameDoc[frameId] || null,
+            documentId: null
+          };
+        }
+        await workerStore.update('detection', tabId, () => ({ generation: crypto.randomUUID(), frames }));
       }, { runtimeMarkers, network, frameDoc });
     }
 
-    // Seeds/clears the synchronous "Bundle Override is active on this tab"
-    // cache directly (background.js normally sets this from the Bundle
-    // tab's Apply/Stop handlers and the lgt-bundle-status poll) so the
-    // classifier's bundleOverrideExplainsEnvDivergence check can be
+    // Seeds/clears one real tab-scoped session DNR redirect rule so the
+    // same live-rule lookup used by the production message handler can
+    // determine the Bundle Override target environment. This lets the
+    // classifier's bundleOverrideExplainsEnvDivergence check to be
     // exercised without actually driving the Bundle UI end-to-end.
     async function setBundleOverrideTarget(targetEnv) {
       await serviceWorker.evaluate(async (targetEnv) => {
         const tabs = await chrome.tabs.query({ active: true });
         const tabId = tabs[0].id;
-        if (targetEnv) bundleTargetEnvByTab[tabId] = targetEnv;
-        else delete bundleTargetEnvByTab[tabId];
+        const ruleId = 930001;
+        await chrome.declarativeNetRequest.updateSessionRules({
+          removeRuleIds: [ruleId],
+          addRules: targetEnv ? [{
+            id: ruleId,
+            priority: 1,
+            action: { type: 'redirect', redirect: { url: `https://bundle.${targetEnv}.example.invalid/main.js` } },
+            condition: { urlFilter: '||bundle-source.example.invalid/', resourceTypes: ['script'], tabIds: [tabId] }
+          }] : []
+        });
       }, targetEnv);
     }
 
@@ -99,13 +116,6 @@ async function main() {
       await new Promise((resolve) => chrome.tabs.sendMessage(tabs[0].id, { type: 'lgt-toggle-panel' }, resolve));
     });
 
-    // Scenario 1: MFE layer Confirmed - runtime marker and network
-    // observation agree on version+environment for the SAME brand.
-    await seed(
-      { 0: { mfe: { brandId: '11111111-1111-1111-1111-111111111111', brandName: 'Firestorm', version: '8.2.3.4918-re0ade7b', environment: 'qa', ts: Date.now() } } },
-      { 0: { mfe: { brandId: '11111111-1111-1111-1111-111111111111', brand: 'firestorm', device: 'desktop', version: '8.2.3.4918-re0ade7b', hostEnv: 'qa', artifactEnv: 'qa', artifactEnvs: ['qa'], url: PAGE_URL, ts: Date.now() } } },
-      {}
-    );
     // Scenario 1: MFE layer Confirmed - runtime marker and network
     // observation agree on version+environment for the SAME brand.
     let panel = page.locator('#lgt-panel');

@@ -13,7 +13,7 @@
 // first - sometimes incomplete - snapshot forever. This test serves a
 // fixture page whose inline script mutates window.sbMfeStartupContext in
 // two stages (partial, then complete) and asserts background.js's
-// runtimeMarkersByTab eventually reflects the COMPLETE second stage, not
+// the per-tab detection snapshot eventually reflects the COMPLETE second stage, not
 // just the first partial one.
 
 const assert = require('node:assert/strict');
@@ -75,8 +75,8 @@ async function main() {
       return serviceWorker.evaluate(async () => {
         const tabs = await chrome.tabs.query({ active: true });
         const tabId = tabs[0].id;
-        const byFrame = runtimeMarkersByTab[tabId];
-        return byFrame && byFrame[0] && byFrame[0].mfe;
+        const snapshot = await detection.snapshot(tabId);
+        return snapshot.runtimeByFrame[0] && snapshot.runtimeByFrame[0].mfe;
       });
     }
 
@@ -115,6 +115,24 @@ async function main() {
     assert.equal(stage2.brandId, 'cfe0dfc1-9a3c-41cb-8817-7b3e71fddc9f');
     assert.equal(stage2.brandName, 'betsafe');
     console.log('PASS: a later tick picks up the completed marker snapshot (brandId+environment) instead of staying frozen on the first partial one.');
+
+    // Clear the stored result, then explicitly exercise the startup
+    // handshake. A stable marker must be re-posted even though its signature
+    // has not changed since the previous poll.
+    await serviceWorker.evaluate(async () => {
+      const tabs = await chrome.tabs.query({ active: true });
+      await workerStore.update('detection', tabs[0].id, () => null);
+    });
+    await page.evaluate(() => window.postMessage({ source: 'lgt-layer-marker-request' }, '*'));
+    const handshakeDeadline = Date.now() + 10000;
+    let handshakeMarker;
+    for (;;) {
+      handshakeMarker = await readMfeMarker();
+      if (handshakeMarker && handshakeMarker.environment === 'qa') break;
+      if (Date.now() > handshakeDeadline) throw new Error('Timed out waiting for the detector-relay handshake to re-post a stable marker.');
+      await page.waitForTimeout(200);
+    }
+    console.log('PASS: detector-relay startup handshake re-posts an unchanged runtime marker after the relay is ready.');
 
     console.log('ALL PASS: layer-detect.js keeps polling past the first successful read so progressively-hydrated runtime contexts are eventually captured in full.');
   } finally {

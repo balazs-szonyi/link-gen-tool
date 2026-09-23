@@ -1545,14 +1545,14 @@ handleMessage('lgt-bundle-sync-page-flag', async function (msg, sender) {
 // layer ('mfe'|'iframe'|'nodejs') so two layers on one page, or the same
 // layer in two frames, never overwrite each other's evidence.
 //
-// runtimeMarkersByTab[tabId][frameId][layer] = {brandId, brandName,
+// detection-state runtimeByFrame[frameId][layer] = {brandId, brandName,
 //   version, environment, appHash, versionSource, environmentSource, ts}
 //   - populated by the 'lgt-layer-marker' message from layer-relay.js
 //     (itself just forwarding layer-detect.js's MAIN-world reads of
 //     window.sbMfeStartupContext/sbXpSportsbookAppVersion,
 //     window.obgClientEnvironmentConfig.startupContext, window.nodeContext).
 //
-// networkByTab[tabId][frameId][layer] = {brandId, brand, matchedBrandId,
+// detection-state networkByFrame[frameId][layer] = {brandId, brand, matchedBrandId,
 //   device, version, headerVersion, hostEnv, artifactEnv, artifactEnvs,
 //   url, ts} - the independent, network-observed side of the same
 // evidence. Last-write-wins per layer on purpose: every fresh page
@@ -1560,7 +1560,7 @@ handleMessage('lgt-bundle-sync-page-flag', async function (msg, sender) {
 // not cached across deploys), so the most recent observation IS the
 // current truth for that frame+layer.
 //
-// frameDocByTab[tabId][frameId] = {url, hostname, env} - the frame's own
+// detection-state docByFrame[frameId] = {url, hostname, env} - the frame's own
 // committed navigation URL, used as the NodeJS layer's environment
 // source (nodeContext.environment is not guaranteed) and as a last-
 // resort hostname brand fallback.
@@ -1899,7 +1899,7 @@ function normalizeEnv(value) { return String(value == null ? '' : value).trim().
 // never causes cross-brand mixing because every network observation is
 // already scoped to the ONE brandId the indexer/config request itself
 // named (see resolveSandboxBundleInfo's own single-brand restriction).
-function computeDetectionRows(snapshot) {
+function computeDetectionRows(snapshot, tabId) {
   var runtimeByFrame = snapshot.runtimeByFrame || {};
   var networkByFrame = snapshot.networkByFrame || {};
   var docByFrame = snapshot.docByFrame || {};
@@ -2100,7 +2100,7 @@ handleMessage('lgt-detection-rows', async function (msg, sender) {
   const tabId = senderTabId(sender);
   const snapshot = await detection.snapshot(tabId);
   snapshot.bundleTargetEnv = bundleTargetEnvFromRules((await dnr.status('bundle', tabId)).rules);
-  return { ok: true, rows: computeDetectionRows(snapshot) };
+  return { ok: true, rows: computeDetectionRows(snapshot, tabId) };
 });
 
 // Opens a NEW tab for the given generated link with Sportradar spoofing
