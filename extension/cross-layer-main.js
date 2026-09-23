@@ -233,17 +233,7 @@
   if (!config || !config.enabled || !config.expectedUrl) return;
   function sameConfiguredPage(actualValue, expectedValue) {
     try {
-      var actual = new URL(actualValue);
-      var expected = new URL(expectedValue);
-      var normalizePath = function (path) { return path.length > 1 ? path.replace(/\/$/, '') : path; };
-      if (actual.origin !== expected.origin || normalizePath(actual.pathname) !== normalizePath(expected.pathname) || actual.hash !== expected.hash) return false;
-      ['exposeObgState', 'exposeObgRt', 'sealStore'].forEach(function (key) {
-        actual.searchParams.delete(key);
-        expected.searchParams.delete(key);
-      });
-      actual.searchParams.sort();
-      expected.searchParams.sort();
-      return actual.search === expected.search;
+      return LgtBundleNavigation.matches(LgtBundleNavigation.scopeForUrl(expectedValue), actualValue);
     } catch (e) { return false; }
   }
   if (!sameConfiguredPage(location.href, config.expectedUrl)) return;

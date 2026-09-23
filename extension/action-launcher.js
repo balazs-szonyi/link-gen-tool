@@ -7,7 +7,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
 
-  var PANEL_FILES = ['bonus-mock.js', 'bet-void-mock.js', 'content.js'];
+  var PANEL_FILES = ['bonus-mock.js', 'bet-void-mock.js', 'bundle-navigation.js', 'content.js'];
   var STANDALONE_PATH = 'standalone.html';
 
   function sendPanelMessage(chromeApi, tabId, type) {

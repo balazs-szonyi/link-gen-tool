@@ -23,7 +23,7 @@
  */
 'use strict';
 
-importScripts('worker-state.js', 'detection-state.js', 'debugger-session.js', 'oddin-fix.js', 'action-launcher.js');
+importScripts('worker-state.js', 'detection-state.js', 'debugger-session.js', 'oddin-fix.js', 'bundle-navigation.js', 'action-launcher.js');
 var workerStore = LgtWorkerState.createStore(chrome);
 var dnr = LgtWorkerState.createDnr(chrome, workerStore);
 var detection = LgtDetectionState.create(workerStore);
@@ -748,6 +748,15 @@ if (chrome.webNavigation?.onBeforeNavigate) {
   });
 }
 
+if (chrome.webNavigation?.onHistoryStateUpdated) {
+  chrome.webNavigation.onHistoryStateUpdated.addListener(function (details) {
+    if (details.frameId !== 0) return;
+    chrome.tabs.sendMessage(details.tabId, { type: 'lgt-restore-bundle-diagnostics' }, function () {
+      void chrome.runtime.lastError;
+    });
+  });
+}
+
 // ---------------------------------------------------------------------
 // bleSource=1 mobile CORS fix - when a bleSource=1 link's frontend routes
 // certain REST calls (e.g. /api/sb/v1/competitions) to the brand's alpha
@@ -1414,7 +1423,7 @@ function buildBundleRedirectRules(indexerData, layerIndexerData, brandId, target
 async function startBundleOverrideRule(tabId, targetEnv, brandId, currentEnv, pageOrigin, expectedUrl) {
   const crossLayer = !!currentEnv && BUNDLE_ENV_LAYERS[currentEnv] !== BUNDLE_ENV_LAYERS[targetEnv];
   const environments = crossLayer ? Object.keys(BUNDLE_INDEXER_URLS) : bundleEnvironmentsInLayer(targetEnv);
-  return dnr.apply('bundle', tabId, { targetEnv: targetEnv, scope: { kind: 'url', value: expectedUrl } }, async () => {
+  return dnr.apply('bundle', tabId, { targetEnv: targetEnv, scope: LgtBundleNavigation.scopeForUrl(expectedUrl) }, async () => {
     const results = await Promise.all(environments.map(async environment => {
       try { return { environment, data: await fetchBundleIndexer(environment) }; }
       catch (error) { if (environment === targetEnv) throw error; return { environment, data: null }; }
@@ -1462,12 +1471,11 @@ handleMessage('lgt-bundle-start', async function (msg, sender) {
       return { ok: false, error: 'cross-layer bundle override requires an authorized Cross-Layer Lab session (' + currentEnv + ' -> ' + targetEnv + ')' };
     }
   }
-  // Remember the exact URL the override was applied for (see the
-  // stale-cleanup logic in chrome.webNavigation.onBeforeNavigate above,
-  // and the comment on bundleExpectedUrlByTab above for why this is the
-  // whole URL, not just the origin) - Bundle Override is meant to be tied
-  // to one specific tested link, unlike the Sportradar-spoof/BLE-CORS
-  // domain-wide fixes.
+  // Keep the requested URL as the source for a narrow navigation scope.
+  // Real-brand Sportsbook routes share their /sportsbook prefix so header
+  // menu navigation and query normalization survive; generated playground
+  // links retain only their exact origin+pathname. Leaving that scope still
+  // triggers stale cleanup in webNavigation.onBeforeNavigate above.
   var expectedUrl = sender.tab.url || null;
   if (sender.tab.url) {
     if (msg.expectedUrl) {

@@ -37,18 +37,17 @@
 
   // Brand shells may normalize the address bar after bootstrap and remove
   // diagnostics parameters even though they were present on the actual
-  // navigation request. Restore them without another reload, but only for
-  // the exact origin+path where Bundle Apply stored the marker. A real page
-  // navigation therefore cannot leak these parameters onto another route.
+  // navigation request. Restore them without another reload across the same
+  // sportsbook route family (e.g. Sportsbook <-> Live Betting), while still
+  // clearing the marker when navigation leaves Sportsbook or changes origin.
   function restoreBundleDiagnosticsParams() {
     var raw;
     try { raw = sessionStorage.getItem(BUNDLE_DIAGNOSTICS_KEY); } catch (e) { return; }
     if (!raw) return;
     try {
       var marker = JSON.parse(raw);
-      var expected = new URL(marker.expectedUrl);
-      var normalizePath = function (path) { return path.length > 1 ? path.replace(/\/$/, '') : path; };
-      if (expected.origin !== location.origin || normalizePath(expected.pathname) !== normalizePath(location.pathname)) {
+      var scope = LgtBundleNavigation.scopeForUrl(marker.expectedUrl);
+      if (!LgtBundleNavigation.matches(scope, location.href)) {
         sessionStorage.removeItem(BUNDLE_DIAGNOSTICS_KEY);
         return;
       }
@@ -4158,6 +4157,9 @@ const result = await fetchFreshBleContext(brand, device, loggedInChk.checked, ''
     } else if (msg.type === 'lgt-hide-panel') {
       if (panelEl && panelEl.__lgtHide) panelEl.__lgtHide();
       else pendingToggle = 0;
+      sendResponse({ ok: true });
+    } else if (msg.type === 'lgt-restore-bundle-diagnostics') {
+      restoreBundleDiagnosticsParams();
       sendResponse({ ok: true });
     }
   });

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Link Gen Tool",
-  "version": "1.22.29",
+  "version": "1.22.30",
   "description": "Generate environment-correct Betsson sportsbook QA links and capture live-login session context directly in Chrome.",
   "permissions": ["activeTab", "storage", "webRequest", "webNavigation", "debugger", "tabs", "declarativeNetRequest", "declarativeNetRequestFeedback", "scripting"],
   "host_permissions": [
@@ -77,7 +77,7 @@
     "https://disir.oddin.gg/*", "https://*.oddin.gg/*",
     "https://*.sportradar.com/*", "https://*.betradar.com/*"
       ],
-      "js": ["bonus-mock.js", "bet-void-mock.js", "cross-layer-main.js"],
+      "js": ["bonus-mock.js", "bet-void-mock.js", "bundle-navigation.js", "cross-layer-main.js"],
       "run_at": "document_start",
       "world": "MAIN",
       "all_frames": false
@@ -106,7 +106,7 @@
         "*://*.playgurus.com/*", "*://*.rexbet.com/*", "*://*.rizk.com/*",
         "*://*.spelklubben.se/*", "*://*.spino.com/*", "*://*.triobet.com/*"
       ],
-      "js": ["bonus-mock.js", "bet-void-mock.js", "content-bridge.js", "content.js"],
+      "js": ["bonus-mock.js", "bet-void-mock.js", "bundle-navigation.js", "content-bridge.js", "content.js"],
       "run_at": "document_idle",
       "all_frames": false
     },
