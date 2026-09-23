@@ -28,8 +28,10 @@
 
   var MESSAGE_TYPE = 'lgt-layer-marker';
   var REQUEST_TYPE = 'lgt-layer-marker-request';
-  var POLL_INTERVAL_MS = 1000;
-  var MAX_POLL_ATTEMPTS = 20; // give up after ~20s if nothing ever appears
+  var FAST_POLL_INTERVAL_MS = 1000;
+  var SLOW_POLL_INTERVAL_MS = 3000;
+  var FAST_POLL_ATTEMPTS = 30;
+  var HEARTBEAT_ATTEMPTS = 5;
 
   function safeGet(obj, path) {
     try {
@@ -116,17 +118,29 @@
 
   var attempts = 0;
   var lastSignature = '';
+  var ticksSincePost = 0;
   function tick() {
     attempts += 1;
+    ticksSincePost += 1;
     var markers = collect();
     if (markers.length) {
       var signature = JSON.stringify(markers);
-      if (signature !== lastSignature) {
+      // Re-send an unchanged snapshot periodically. The MV3 service worker
+      // may be suspended and lose its in-memory detection state while this
+      // page stays alive; without a heartbeat the UI would then remain on
+      // "Detecting..." forever because the page marker did not change.
+      if (signature !== lastSignature || ticksSincePost >= HEARTBEAT_ATTEMPTS) {
         lastSignature = signature;
+        ticksSincePost = 0;
         post(markers);
       }
     }
-    // Keep polling for the FULL budget even after a first successful read
+    // Keep polling for the full lifetime of this document. A brand shell can
+    // load the sportsbook only after a much later SPA navigation, so a fixed
+    // startup budget makes runtime detection permanently miss that layer.
+    // Poll quickly while the page boots, then fall back to a cheap slow poll.
+    //
+    // Keep polling after a first successful read too
     // - runtime contexts hydrate progressively within the same page load
     // (e.g. appContext.environment/brandId can populate a tick or two
     // after the object first appears with only a version, or a second
@@ -140,7 +154,7 @@
     // window.sbMfeStartupContext/obgClientEnvironmentConfig on a real
     // brand page, which had complete brandId+version+environment on both
     // markers all along.
-    if (attempts < MAX_POLL_ATTEMPTS) setTimeout(tick, POLL_INTERVAL_MS);
+    setTimeout(tick, attempts < FAST_POLL_ATTEMPTS ? FAST_POLL_INTERVAL_MS : SLOW_POLL_INTERVAL_MS);
   }
 
   tick();

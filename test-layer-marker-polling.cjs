@@ -22,6 +22,7 @@ const path = require('node:path');
 const { chromium } = require('playwright');
 
 const PAGE_URL = 'https://d-cf.qa.sbplayground1.net/layer-marker-polling-fixture/';
+const LATE_PAGE_URL = 'https://d-cf.qa.sbplayground1.net/layer-marker-late-fixture/';
 
 // Stage 1 (present immediately): version only, no environment/brandId -
 // exactly the kind of incomplete first snapshot the old code would have
@@ -42,6 +43,10 @@ const FIXTURE_HTML = `<!doctype html>
   }, 1200);
 </script>`;
 
+const LATE_FIXTURE_HTML = `<!doctype html>
+<title>Late sportsbook runtime fixture</title>
+<main>brand shell first</main>`;
+
 async function main() {
   const extensionPath = path.resolve(__dirname, 'extension');
   const context = await chromium.launchPersistentContext(
@@ -61,6 +66,10 @@ async function main() {
     await context.route('https://d-cf.qa.sbplayground1.net/**', async (route) => {
       if (route.request().url() === PAGE_URL) {
         await route.fulfill({ contentType: 'text/html', body: FIXTURE_HTML });
+        return;
+      }
+      if (route.request().url() === LATE_PAGE_URL) {
+        await route.fulfill({ contentType: 'text/html', body: LATE_FIXTURE_HTML });
         return;
       }
       await route.abort();
@@ -116,6 +125,23 @@ async function main() {
     assert.equal(stage2.brandName, 'betsafe');
     console.log('PASS: a later tick picks up the completed marker snapshot (brandId+environment) instead of staying frozen on the first partial one.');
 
+    // Simulate the MV3 worker losing its in-memory state while the document
+    // and its unchanged runtime globals remain alive. The detector heartbeat
+    // must repopulate the snapshot without a reload or marker mutation.
+    await serviceWorker.evaluate(async () => {
+      const tabs = await chrome.tabs.query({ active: true });
+      await workerStore.update('detection', tabs[0].id, () => null);
+    });
+    const heartbeatDeadline = Date.now() + 10000;
+    let heartbeatMarker;
+    for (;;) {
+      heartbeatMarker = await readMfeMarker();
+      if (heartbeatMarker && heartbeatMarker.environment === 'qa') break;
+      if (Date.now() > heartbeatDeadline) throw new Error('Timed out waiting for the periodic marker heartbeat to restore lost worker state.');
+      await page.waitForTimeout(200);
+    }
+    console.log('PASS: periodic marker heartbeat restores detection after worker state is lost.');
+
     // Clear the stored result, then explicitly exercise the startup
     // handshake. A stable marker must be re-posted even though its signature
     // has not changed since the previous poll.
@@ -134,7 +160,37 @@ async function main() {
     }
     console.log('PASS: detector-relay startup handshake re-posts an unchanged runtime marker after the relay is ready.');
 
-    console.log('ALL PASS: layer-detect.js keeps polling past the first successful read so progressively-hydrated runtime contexts are eventually captured in full.');
+    // A brand shell may stay open for longer than the old 20-second polling
+    // budget before an SPA navigation loads Sportsbook. The detector must
+    // still notice a runtime marker that appears after that old cutoff.
+    const latePage = await context.newPage();
+    await latePage.goto(LATE_PAGE_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await latePage.waitForTimeout(21000);
+    await latePage.evaluate(() => {
+      window.sbMfeStartupContext = {
+        brandId: 'cfe0dfc1-9a3c-41cb-8817-7b3e71fddc9f',
+        brandName: 'betsafe',
+        appContext: { version: '8.2.5.4941-reba6fd9', environment: 'qa' }
+      };
+    });
+    const lateTabId = await serviceWorker.evaluate(async (url) => {
+      const tabs = await chrome.tabs.query({});
+      return tabs.find((tab) => tab.url === url).id;
+    }, LATE_PAGE_URL);
+    const lateDeadline = Date.now() + 10000;
+    let lateMarker;
+    for (;;) {
+      lateMarker = await serviceWorker.evaluate(async (tabId) => {
+        const snapshot = await detection.snapshot(tabId);
+        return snapshot.runtimeByFrame[0] && snapshot.runtimeByFrame[0].mfe;
+      }, lateTabId);
+      if (lateMarker && lateMarker.environment === 'qa') break;
+      if (Date.now() > lateDeadline) throw new Error('Detector stopped before a sportsbook runtime appeared after the former 20-second cutoff.');
+      await latePage.waitForTimeout(250);
+    }
+    console.log('PASS: runtime detection remains active when Sportsbook appears after a late SPA navigation.');
+
+    console.log('ALL PASS: layer-detect.js survives progressive hydration, relay timing, and late SPA sportsbook startup.');
   } finally {
     await context.close();
   }
