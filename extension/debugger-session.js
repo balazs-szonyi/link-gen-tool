@@ -17,8 +17,8 @@
     }
     async function migrate() {
       const key = 'lgt-debugger-attached-tabs';
-      const legacy = await core.call(chrome, chrome.storage.session, 'get', key);
-      for (const tabId of Object.keys(legacy[key] || {}).map(Number)) {
+      const previousState = await core.call(chrome, chrome.storage.session, 'get', key);
+      for (const tabId of Object.keys(previousState[key] || {}).map(Number)) {
         if (await connected(tabId)) await store.update('debugger', tabId, () => ({ held: true }));
       }
       await core.call(chrome, chrome.storage.session, 'remove', key);

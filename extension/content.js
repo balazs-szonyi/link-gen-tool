@@ -1,13 +1,10 @@
 /*
  * Link Gen Tool extension - content script.
  *
- * Ported from the link-gen-tool legacy page-injected script (the extension), adapted to
- * an extension's naturally different lifecycle:
+ * Runs as the UI/content layer of the Manifest V3 extension:
  *
  *  - This script runs automatically on every page load AND every
- *    navigation (content_scripts auto-inject, no window.open/injection/
- *    sessionStorage-breadcrumb tricks needed at all to "survive" a hard
- *    page navigation the way the legacy page-injected script had to work around).
+ *    navigation through manifest-declared content scripts.
  *  - Passive capture itself does not happen here at all - it happens in
  *    background.js via chrome.webRequest, at the network layer, so it
  *    works even on the very first request a page makes, before this
@@ -15,12 +12,9 @@
  *    only *reads* the already-captured state from chrome.storage.local.
  *  - The Credentials vault lives in chrome.storage.local (extension-scoped)
  *    instead of per-origin localStorage, so it is automatically shared
- *    across every brand domain - no manual Export/Import sync-code step
- *    needed (that UI is intentionally dropped here; it remains in the
- *    legacy page-injected script, which still needs it).
+ *    across every brand domain without a manual Export/Import sync step.
  *  - The panel is hidden by default and shown via the toolbar icon (or
- *    automatically, mid-flow, if an auto-login resume is pending) rather
- *    than being built only on an explicit legacy page-injected script click.
+ *    automatically mid-flow if an auto-login resume is pending).
  */
 (function () {
   'use strict';
@@ -73,7 +67,7 @@
   }
 
   // ---------------------------------------------------------------------
-  // Config / data (kept in sync with the legacy page-injected script's own copy)
+  // Config / data
   // ---------------------------------------------------------------------
 
   var BRANDS = {
@@ -363,9 +357,8 @@
 
   // ---------------------------------------------------------------------
   // Vault - chrome.storage.local, extension-scoped so it is automatically
-  // shared across every brand domain (unlike the legacy page-injected script's per-origin
-  // localStorage, which needed a manual Export/Import sync code). No
-  // separate sync UI is needed here as a result.
+  // shared across every brand domain. No separate credential sync UI is
+  // needed as a result.
   // ---------------------------------------------------------------------
 
   var VAULT_KEY = 'lgt-credentials-v1';
@@ -441,8 +434,7 @@
           writeAll(filtered, cb);
         });
       },
-      // Async (unlike the legacy page-injected script's synchronous version) since
-      // chrome.storage.local has no synchronous read API.
+      // Async because chrome.storage.local has no synchronous read API.
       getDefault: function (cb) {
         readAll(function (list) {
           cb(list.find(function (c) { return c.isDefault; }) || list[0] || null);
@@ -467,9 +459,8 @@
   })();
 
   // ---------------------------------------------------------------------
-  // Mode A: Generate Link (identical to the legacy page-injected script - no vault/capture
-  // dependency, calls the open-CORS internal.{env}.sbplayground1.net APIs
-  // directly from the page).
+  // Mode A: Generate Link. No vault/capture dependency; calls the
+  // open-CORS internal.{env}.sbplayground1.net APIs directly from the page.
   // ---------------------------------------------------------------------
 
   function apiBase(env) {
@@ -721,8 +712,8 @@
   }
 
   // ---------------------------------------------------------------------
-  // Mode B: Live-Login Capture. Unlike the legacy page-injected script, capture itself
-  // happens in background.js via chrome.webRequest (network layer) - this
+  // Mode B: Live-Login Capture. Capture happens in background.js via
+  // chrome.webRequest (network layer); this
   // module just reads chrome.storage.local (per-origin key) and reacts to
   // chrome.storage.onChanged for live updates, no in-page fetch/XHR patch
   // at all, and no polling loop needed for "did anything new arrive".
@@ -743,8 +734,8 @@
 
     return {
       // No-op: background.js captures unconditionally via webRequest,
-      // independent of whether/when this content script has run. Kept for
-      // API-shape parity with the legacy page-injected script's Capture module.
+      // independent of whether/when this content script has run. Kept as
+      // the stable interface consumed by the panel bootstrap.
       start: function () {},
       onCapture: function (cb) { listeners.push(cb); },
       get: function (cb) {
@@ -1004,7 +995,7 @@
   }
 
   // ---------------------------------------------------------------------
-  // Auto-login helpers (DOM-only, unchanged from the legacy page-injected script).
+  // Auto-login helpers (DOM-only fallback path).
   // ---------------------------------------------------------------------
 
   function simulateTyping(el, text) {
@@ -1282,11 +1273,11 @@
     });
   }
 
-  // DOM-simulation fallback (the original legacy page-injected script-era approach) -
-  // only used if chrome.debugger couldn't attach (e.g. real DevTools is
+  // DOM-simulation fallback - only used if chrome.debugger could not
+  // attach (e.g. real DevTools is
   // already attached to this tab, which blocks a second debugger client).
   async function domFallbackSubmit(userEl, username, passEl, password, submitEl, log) {
-    log('Trusted input unavailable - falling back to synthetic DOM events (may be rejected by this brand\'s fraud checks, same limitation the legacy page-injected script had).');
+    log('Trusted input unavailable - falling back to synthetic DOM events (may be rejected by this brand\'s fraud checks).');
     const userResult=await simulateTyping(userEl,username);
 		if(userResult!=='ok') { log('Username field '+userResult+' while typing (fallback path). Log in manually.'); return false; }
 		const passResult=await simulateTyping(passEl,password);
@@ -1394,8 +1385,7 @@
   // Same-tab breadcrumb only - a normal same-origin navigation (no popup
   // involved) keeps sessionStorage intact by spec, and the content script
   // is guaranteed to run again on the destination page automatically, so
-  // no window.open/injectScriptInto/watchForLoginSuccessAndReinject
-  // machinery is needed here at all (unlike the legacy page-injected script's v10/v13).
+  // no popup or reinjection coordination is needed here.
   var RESUME_KEY = '__lgtExtAutoLoginResume';
 
   // Closes the loop after a successful auto-login: passive capture only
@@ -3323,7 +3313,7 @@ const ok = await attemptAutoLogin(detected.brand, cred.username, cred.password, 
   // that is the identifier the original spec used for whatever exposes
   // `obgClientEnvironmentConfig` - but that marker is NOT a check for a
   // literal DOM <iframe> element, only a JS global read. The actual dev
-  // team's own name for this legacy shell/wrapper runtime is "Fabric"
+  // team's own name for this shell/wrapper runtime is "Fabric"
   // (confirmed directly by a developer, and matching the third-party
   // Sportsbook Tool extension's own "(Fabric + mFE)" label) - and per
   // that same confirmation, "Fabric" and "iframe" are NOT two different
@@ -4164,8 +4154,8 @@ const result = await fetchFreshBleContext(brand, device, loggedInChk.checked, ''
   if (pendingToggle) panelEl.__lgtToggle();
 
   // Resume an auto-login that was interrupted by navigating to the brand's
-  // login page (see attemptAutoLogin). Unlike the legacy page-injected script, this needs
-  // no window-handle/popup logic at all: the content script simply runs
+  // login page (see attemptAutoLogin). No window-handle/popup logic is
+  // needed: the content script simply runs
   // again automatically on the destination page, and sessionStorage
   // survives a normal same-tab, same-origin navigation by spec.
   (function resumeAutoLoginIfPending() {
