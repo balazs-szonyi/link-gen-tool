@@ -348,7 +348,11 @@ async function main() {
     const generateHelp = panel.locator('.lgt-generate-help');
     assert.equal(await generateHelp.evaluate((node) => node.open), false);
     const generateText = await panel.locator('#lgt-body-generate').innerText();
-    assert.match(generateText, /BLE source\s+Force fresh live-login\s+Show login tab/s);
+    assert.match(generateText, /Local links\s+Sportradar Statistics fix\s+BLE source\s+Oddin Statistics fix/s);
+    assert.doesNotMatch(generateText, /Force fresh live-login|Show login tab/);
+    await panel.locator('#lgt-gen-login-state').selectOption('in');
+    const loggedInGenerateText = await panel.locator('#lgt-body-generate').innerText();
+    assert.match(loggedInGenerateText, /Force fresh live-login\s+Show login tab/s);
     assert.doesNotMatch(generateText, /skip 30-min cache|spoofs Origin\/Referer/);
 
     await panel.locator('.lgt-tab').filter({ hasText: 'Live Login' }).click();

@@ -64,7 +64,12 @@ function contextFixture(customerKey, environment) {
   const match = /^logged-out-([a-z]{2})-([a-z0-9]{3})-/i.exec(customerKey);
   const languageCode = match ? match[1].toLowerCase() : 'en';
   const currencyCode = match ? match[2].toUpperCase() : 'EUR';
-  const host = `https://d-cf.${environment}.exampleplayground.net`;
+  const host = environment === 'prod'
+    ? 'https://7f2b8e.784b554.net'
+    : `https://d-cf.${environment}.exampleplayground.net`;
+  const mobileHost = environment === 'prod'
+    ? 'https://d4a9c1.784b554.net'
+    : host.replace('d-cf', 'm-cf');
   return {
     data: {
       user: {
@@ -80,7 +85,7 @@ function contextFixture(customerKey, environment) {
             languageCode,
             customerWallets: { activeWalletCurrency: currencyCode }
           },
-          iFrameSetup: { overrideIFrameBaseUrlWith: host.replace('d-cf', 'm-cf') }
+          iFrameSetup: { overrideIFrameBaseUrlWith: environment === 'prod' ? '' : mobileHost }
         }
       },
       context: {
@@ -92,7 +97,7 @@ function contextFixture(customerKey, environment) {
         mobile: {
           responseCode: 100,
           customerContext: { staticContextId: `mstc-${languageCode}-${currencyCode}`, userContextId: `mctx-${languageCode}-${currencyCode}` },
-          iFrameHelper: { baseUri: host.replace('d-cf', 'm-cf') }
+          iFrameHelper: { baseUri: mobileHost }
         }
       }
     }
@@ -165,15 +170,24 @@ async function main() {
     await panel.locator('#lgt-gen-currency').waitFor({ state: 'visible' });
     assert.strictEqual(await panel.locator('#lgt-gen-language option').count(), 3);
     assert.strictEqual(await panel.locator('#lgt-gen-currency option').count(), 2);
-    if (process.env.LGT_SCREENSHOT) {
-      await panel.screenshot({ path: process.env.LGT_SCREENSHOT });
-      console.log(`Screenshot: ${process.env.LGT_SCREENSHOT}`);
-    }
     await panel.locator('#lgt-gen-language').selectOption('tr');
     await panel.locator('#lgt-gen-currency').selectOption('TRY');
     await panel.getByRole('button', { name: 'Generate', exact: true }).click();
     await panel.getByText(/Turkish \(TR\).*New Turkish Lira \(TRY\).*Logged Out/).waitFor();
     assert(requestedContextKeys.includes('logged-out-tr-try-tgc'), 'Generate did not request the exact TR/TRY context key');
+    if (process.env.LGT_SCREENSHOT) {
+      await panel.screenshot({ path: process.env.LGT_SCREENSHOT });
+      console.log(`Screenshot: ${process.env.LGT_SCREENSHOT}`);
+    }
+
+    const bleForBets10 = panel.getByText('BLE source', { exact: true }).locator('input');
+    await bleForBets10.check();
+    await panel.locator('#lgt-gen-language').selectOption('tr');
+    await panel.locator('#lgt-gen-currency').selectOption('TRY');
+    await panel.getByRole('button', { name: 'Generate', exact: true }).click();
+    await panel.getByText('https://d-cf.test.exampleplayground.net/stc-tr-TRY/ctx-tr-TRY/?bleSource=1', { exact: false }).waitFor();
+    await panel.getByText('https://m-cf.test.exampleplayground.net/mstc-tr-TRY/mctx-tr-TRY/?bleSource=1', { exact: false }).waitFor();
+    assert.strictEqual(await panel.getByText(/784b554\.net/).count(), 0, 'Opaque PROD host leaked into a TEST BLE link');
 
     await page.reload({ waitUntil: 'domcontentloaded' });
     await page.locator('#lgt-panel').waitFor({ state: 'attached', timeout: 15000 });
@@ -196,7 +210,7 @@ async function main() {
 
     await panel.locator('#lgt-gen-brand').selectOption('sandbox');
     const ble = panel.getByText('BLE source', { exact: true }).locator('input');
-    await ble.check();
+    if (!(await ble.isChecked())) await ble.check();
     await panel.getByText(/QA metadata fallback/).waitFor();
     await panel.locator('#lgt-gen-language').waitFor({ state: 'visible' });
     await panel.locator('#lgt-gen-currency').waitFor({ state: 'visible' });

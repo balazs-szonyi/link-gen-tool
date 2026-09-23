@@ -551,11 +551,23 @@
 		if(customerKey.toLowerCase().indexOf(prefix)!==0) {
 			throw new Error('Customer key "'+customerKey+'" does not match login state "'+prefix+'".');
 		}
-		var uri=base+'/api/user-context/'+customerKey+
-			'?brand='+brandGuid+'&shouldUseSbIl=false&generateLinksPage=true&overrideIFrameBaseUrlWith=';
-		const r_1=await fetchInternal(uri);
-		if(!r_1.ok) throw new Error('user-context fetch failed: HTTP '+r_1.status);
-		const data=await r_1.json();
+		async function fetchUserContext(environment) {
+			var uri=apiBase(environment)+'/api/user-context/'+customerKey+
+				'?brand='+brandGuid+'&shouldUseSbIl=false&generateLinksPage=true&overrideIFrameBaseUrlWith=';
+			const response=await fetchInternal(uri);
+			if(!response.ok) throw new Error('user-context fetch failed ('+environment+'): HTTP '+response.status);
+			return response.json();
+		}
+		const data=await fetchUserContext(apiEnv);
+		// BLE contexts must be minted on PROD, but PROD is allowed to return
+		// opaque CDN hosts (for example *.784b554.net). Those hosts do not
+		// support the old "insert .test/.qa" rewrite and produce an invalid
+		// DNS name. Fetch the same customer once from the selected target
+		// environment and use only its environment-correct iframe base; the
+		// stc/ctx pair continues to come from PROD.
+		const targetHostData=opts.bleSource&&opts.environment!=='prod'
+			? await fetchUserContext(opts.environment)
+			: data;
 		if(opts.requestedLanguageCode||opts.requestedCurrencyCode) {
 			var users=((data.data||{}).user||{});
 			var userNode=users.desktop||users['Default Desktop']||Object.keys(users).map(function(key) { return users[key]; })[0]||{};
@@ -569,7 +581,7 @@
 					', backend returned '+(actualLanguage||'-')+'/'+(actualCurrency||'-')+'.');
 			}
 		}
-		const links=buildLinksFromContext(data,opts);
+		const links=buildLinksFromContext(data,opts,targetHostData);
 		links.customerKey=customerKey;
 		links.customerLabel=opts.customerLabel||(customers[customerKey]||{}).label||customerKey;
 		return links;
@@ -593,32 +605,34 @@
       parsed.jurisdictionCode + parsed.suffix;
   }
 
-  function buildLinksFromContext(resp, opts) {
+  function buildLinksFromContext(resp, opts, hostResp) {
     var contexts = ((resp.data || {}).context || {});
+    var hostContexts = (((hostResp || resp).data || {}).context || {});
 
-    function contextFor(device) {
+    function contextFor(collection, device) {
       var prefix = BRAND_CONTEXT_PREFIXES[opts.brand];
       if (prefix) {
         var wanted = (prefix + ' ' + device).toLowerCase();
-        var namedKey = Object.keys(contexts).filter(function (key) {
+        var namedKey = Object.keys(collection).filter(function (key) {
           return key.toLowerCase() === wanted;
         })[0];
-        if (namedKey) return contexts[namedKey];
+        if (namedKey) return collection[namedKey];
       }
-      return contexts[device] || {};
+      return collection[device] || {};
     }
 
     function buildFor(device) {
-      var userNode = ((resp.data || {}).user || {})[device] || {};
-      var ctxNode = contextFor(device);
+      var hostResponse = hostResp || resp;
+      var userNode = ((hostResponse.data || {}).user || {})[device] || {};
+      var hostCtxNode = contextFor(hostContexts, device);
+      var ctxNode = contextFor(contexts, device);
       var base = (userNode.iFrameSetup || {}).overrideIFrameBaseUrlWith;
-      if (!base) base = (ctxNode.iFrameHelper || {}).baseUri;
+      if (!base) base = (hostCtxNode.iFrameHelper || {}).baseUri;
       var stc = (ctxNode.customerContext || {}).staticContextId;
       var ctx = (ctxNode.customerContext || {}).userContextId;
       if (!base || !stc || !ctx) return null;
 
       if (opts.bleSource && opts.environment !== 'prod') {
-        base = base.replace(/^(https:\/\/[^.]+\.)/, '$1' + opts.environment + '.');
         return base + '/' + stc + '/' + ctx + '/?bleSource=1&exposeObgState=true&exposeObgRt=true&sealStore=false';
       }
       // When the target environment IS prod, apiEnv already forced the
@@ -1914,19 +1928,20 @@
       '#lgt-panel::-webkit-scrollbar-track,#lgt-local-links-panel::-webkit-scrollbar-track,#lgt-panel .lgt-brand-matrix::-webkit-scrollbar-track{background:var(--lgt-scroll-track);border-radius:10px}',
       '#lgt-panel::-webkit-scrollbar-thumb,#lgt-local-links-panel::-webkit-scrollbar-thumb,#lgt-panel .lgt-brand-matrix::-webkit-scrollbar-thumb{background:var(--lgt-scroll-thumb);border:2px solid var(--lgt-scroll-track);border-radius:10px}',
       '#lgt-panel::-webkit-scrollbar-thumb:hover,#lgt-local-links-panel::-webkit-scrollbar-thumb:hover,#lgt-panel .lgt-brand-matrix::-webkit-scrollbar-thumb:hover{background:var(--lgt-scroll-thumb-hover)}',
-      '#lgt-panel{position:fixed;top:20px;right:20px;inline-size:min(360px,calc(100vw - 2rem));max-block-size:88dvh;overflow:auto;',
+      '#lgt-panel{position:fixed;top:20px;right:20px;inline-size:min(380px,calc(100vw - 2rem));max-block-size:88dvh;overflow:auto;',
       // Fixed px (not rem): rem is relative to the HOST page's <html>
       // font-size, which some sportsbook pages reset (e.g. to 10px for
       // their own rem-scaling), silently shrinking this panel's text.
       'overscroll-behavior:contain;scrollbar-gutter:stable;background:var(--lgt-bg);color:var(--lgt-fg);font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;',
-      'border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.4);z-index:2147483647;padding:14px;}',
-      '#lgt-panel h3{margin:0 0 8px;font-size:15px;display:flex;justify-content:space-between;align-items:center}',
+      'border:1px solid rgba(123,141,184,.14);border-radius:12px;box-shadow:0 12px 38px rgba(0,0,0,.48);z-index:2147483647;padding:14px;box-sizing:border-box}',
+      '#lgt-panel h3{margin:0 0 10px;font-size:16px;display:flex;justify-content:space-between;align-items:center;letter-spacing:-.01em}',
       '#lgt-panel .lgt-header-actions{display:flex;align-items:center;gap:10px;flex:none}',
-      '#lgt-panel .lgt-tabs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}',
-      '#lgt-panel .lgt-tab{flex:1 0 27%;min-block-size:2rem;text-align:center;padding:6px;border:0;border-radius:6px;background:var(--lgt-tab-bg);color:var(--lgt-fg);cursor:pointer;font:inherit}',
+      '#lgt-panel .lgt-tabs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin:12px 0}',
+      '#lgt-panel .lgt-tab{min-block-size:34px;text-align:center;padding:7px 5px;border:1px solid transparent;border-radius:7px;background:var(--lgt-tab-bg);color:var(--lgt-fg);cursor:pointer;font:inherit}',
+      '#lgt-panel .lgt-tab:last-child{grid-column:1/-1}',
       '#lgt-panel .lgt-tab.active{background:var(--lgt-accent);color:var(--lgt-accent-fg);font-weight:600}',
-      '#lgt-panel label{display:block;margin:8px 0 3px;color:var(--lgt-muted);font-size:11px;text-transform:uppercase}',
-      '#lgt-panel select,#lgt-panel input{width:100%;box-sizing:border-box;padding:6px;border-radius:5px;border:1px solid var(--lgt-input-border);background:var(--lgt-input-bg);color:var(--lgt-fg)}',
+      '#lgt-panel label{display:block;margin:9px 0 4px;color:var(--lgt-muted);font-size:10px;text-transform:uppercase;letter-spacing:.025em}',
+      '#lgt-panel select,#lgt-panel input{width:100%;min-block-size:34px;box-sizing:border-box;padding:7px 9px;border-radius:6px;border:1px solid var(--lgt-input-border);background:var(--lgt-input-bg);color:var(--lgt-fg);font:inherit}',
       // Checkbox rows (BLE source / Force fresh): without this, the
       // generic "select,input{width:100%}" rule above stretches the
       // checkbox itself to fill the whole row (inputs match it too),
@@ -1935,14 +1950,21 @@
       // the row out as a simple left-aligned flex row instead.
       '#lgt-panel input[type=checkbox]{width:auto;flex:0 0 auto;margin:0;accent-color:var(--lgt-accent)}',
       '#lgt-panel .lgt-checkbox-row{display:flex;align-items:center;justify-content:flex-start;gap:8px;',
-      'text-transform:none;margin-top:8px;text-align:left}',
-      '#lgt-panel button{margin-top:10px;width:100%;padding:8px;border:none;border-radius:6px;background:var(--lgt-accent);color:var(--lgt-accent-fg);font-weight:600;cursor:pointer}',
+      'text-transform:none;margin:0;text-align:left;letter-spacing:0;font-size:11px;color:var(--lgt-fg)}',
+      '#lgt-panel .lgt-option-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 12px;margin-top:10px}',
+      '#lgt-panel .lgt-option-grid .lgt-checkbox-row{min-block-size:20px}',
+      '#lgt-panel button{margin-top:10px;width:100%;min-block-size:34px;padding:8px;border:none;border-radius:7px;background:var(--lgt-accent);color:var(--lgt-accent-fg);font:inherit;font-weight:600;cursor:pointer}',
       '#lgt-panel button.secondary{background:var(--lgt-secondary-bg);color:var(--lgt-fg);margin-top:6px}',
       '#lgt-panel .lgt-row{display:flex;gap:8px}',
       '#lgt-panel .lgt-row > *{flex:1}',
-      '#lgt-panel .lgt-result{margin-top:10px;background:var(--lgt-tab-bg);border-radius:6px;padding:8px;word-break:break-all;font-size:11px}',
+      '#lgt-panel .lgt-result{margin-top:10px;background:rgba(11,14,24,.36);border:1px solid var(--lgt-input-border);border-radius:8px;padding:7px 9px;font-size:11px}',
+      '#lgt-panel .lgt-result > div:last-child .lgt-link-row{border-bottom:0}',
+      '#lgt-panel .lgt-link-row{display:grid;grid-template-columns:66px minmax(0,1fr) 48px 48px;gap:6px;align-items:center;min-block-size:34px;border-bottom:1px solid rgba(123,141,184,.1)}',
+      '#lgt-panel .lgt-link-label{font-weight:700;color:var(--lgt-fg)}',
+      '#lgt-panel .lgt-link-url{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#aebee4}',
+      '#lgt-panel .lgt-link-row button{min-block-size:28px;margin:0;padding:5px 4px;font-size:10px}',
       '#lgt-panel .lgt-log{margin-top:8px;font-size:11px;color:var(--lgt-muted);white-space:pre-wrap}',
-      '#lgt-panel .lgt-context-status{margin-top:6px;padding:6px 8px;border-radius:5px;background:var(--lgt-tab-bg);font-size:10px;line-height:1.35;color:var(--lgt-muted)}',
+      '#lgt-panel .lgt-context-status{margin-top:6px;padding:3px 0;background:transparent;font-size:10px;line-height:1.35;color:var(--lgt-muted)}',
       '#lgt-panel .lgt-context-status.warning{color:#f4a340;border:1px solid #8a5718}',
       '#lgt-panel .lgt-context-status.error{color:#ff8e8e;border:1px solid #873838}',
       '#lgt-panel .lgt-close,#lgt-panel .lgt-min,#lgt-panel .lgt-theme-toggle{cursor:pointer;color:var(--lgt-muted)}',
@@ -1983,10 +2005,10 @@
       // Automatic per brand/layer detection header - always visible above
       // the tabs, on every tab (unlike the Bundle tab's own controls).
       // See buildDetectionHeader().
-      '#lgt-panel .lgt-build-strip{background:var(--lgt-tab-bg);border-radius:6px;padding:6px 8px;margin-bottom:10px;font-size:11px}',
-      '#lgt-panel .lgt-build-row{display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;padding:2px 0}',
+      '#lgt-panel .lgt-build-strip{background:var(--lgt-tab-bg);border:1px solid var(--lgt-input-border);border-radius:8px;padding:7px 8px;margin-bottom:0;font-size:11px}',
+      '#lgt-panel .lgt-build-row{display:flex;align-items:flex-start;flex-direction:column;gap:5px;padding:1px 0}',
       '#lgt-panel .lgt-build-row + .lgt-build-row{border-top:1px solid var(--lgt-border,rgba(255,255,255,.08));margin-top:2px;padding-top:4px}',
-      '#lgt-panel .lgt-build-badge{padding:1px 6px;border-radius:8px;font-weight:700;white-space:nowrap;font-size:10px}',
+      '#lgt-panel .lgt-build-badge{padding:2px 7px;border-radius:9px;font-weight:700;white-space:nowrap;font-size:10px}',
       '#lgt-panel .lgt-build-badge.confirmed{background:#1e7e34;color:#fff}',
       '#lgt-panel .lgt-build-badge.partial{background:#c77900;color:#fff}',
       '#lgt-panel .lgt-build-badge.mismatch{background:#a02020;color:#fff}',
@@ -2008,7 +2030,7 @@
       '#lgt-panel .lgt-disclosure-body{padding:0 8px 8px;color:var(--lgt-muted);font-size:10px;white-space:pre-wrap}',
       '#lgt-panel .lgt-disclosure-body ul{margin:2px 0 0;padding-left:16px;white-space:normal}',
       '#lgt-panel .lgt-disclosure-body li + li{margin-top:4px}',
-      '#lgt-panel .lgt-build-disclosure{margin-top:3px}',
+      '#lgt-panel .lgt-build-disclosure{margin:6px -1px -1px}',
       '#lgt-panel .lgt-build-detail{width:100%}',
       '#lgt-panel .lgt-build-alert{width:100%;margin-top:2px;color:#ff9c9c;font-size:10px;font-weight:600}',
       '#lgt-panel .lgt-alert{margin-top:6px;font-size:10px;font-weight:600}',
@@ -2035,7 +2057,7 @@
       , '@media (forced-colors: active){#lgt-panel,#lgt-local-links-panel{--lgt-bg:Canvas;--lgt-fg:CanvasText;--lgt-tab-bg:Canvas;--lgt-input-bg:Canvas;--lgt-input-border:ButtonText;--lgt-secondary-bg:ButtonFace;--lgt-muted:GrayText;--lgt-scroll-track:Canvas;--lgt-scroll-thumb:ButtonText}#lgt-panel button,#lgt-local-links-panel button{border:1px solid ButtonText;forced-color-adjust:auto}}'
       , '@media (prefers-reduced-motion: reduce){#lgt-panel *,#lgt-local-links-panel *{scroll-behavior:auto;transition:none!important;animation:none!important}}'
       , 'body.lgt-standalone{margin:0;min-block-size:100vh;background:#101320}'
-      , 'body.lgt-standalone #lgt-panel{position:static;inline-size:100%;max-block-size:none;min-block-size:100vh;box-sizing:border-box;border-radius:0;box-shadow:none}'
+      , 'body.lgt-standalone #lgt-panel{position:static;inline-size:100%;max-block-size:none;min-block-size:100vh;box-sizing:border-box;border:0;border-radius:0;box-shadow:none}'
     ].join('');
     document.head.appendChild(style);
 
@@ -2289,17 +2311,17 @@
     // are loaded from the brand metadata endpoint and then applied to that
     // base profile when the exact user-context key is built.
     var customerSelect = el('select', { id: 'lgt-gen-customer', name: 'customer' });
-    var customerWrap = el('div', { style: 'display:none' }, [
+    var customerWrap = el('div', { class: 'lgt-field', style: 'display:none' }, [
       el('label', { for: 'lgt-gen-customer' }, ['Customer']),
       customerSelect
     ]);
     var languageSelect = el('select', { id: 'lgt-gen-language', name: 'language' });
-    var languageWrap = el('div', { style: 'display:none' }, [
+    var languageWrap = el('div', { class: 'lgt-field', style: 'display:none' }, [
       el('label', { for: 'lgt-gen-language' }, ['Language']),
       languageSelect
     ]);
     var currencySelect = el('select', { id: 'lgt-gen-currency', name: 'currency' });
-    var currencyWrap = el('div', { style: 'display:none' }, [
+    var currencyWrap = el('div', { class: 'lgt-field', style: 'display:none' }, [
       el('label', { for: 'lgt-gen-currency' }, ['Currency']),
       currencySelect
     ]);
@@ -2462,12 +2484,12 @@
       var hasChoice = currentBrandMetadata.languages.length > 1 || currentBrandMetadata.currencies.length > 1;
       if (currentBrandMetadata.fallback) {
         contextOptionsStatus.className = 'lgt-context-status warning';
-        contextOptionsStatus.textContent = '⚠ QA metadata fallback · ' + currentBrandMetadata.languages.length +
+        contextOptionsStatus.textContent = '⚠ QA metadata fallback for ' + (BRAND_LABELS[brandSel.value] || brandSel.value) + ': ' + currentBrandMetadata.languages.length +
           ' languages · ' + currentBrandMetadata.currencies.length + ' currencies';
         contextOptionsStatus.style.display = '';
       } else if (hasChoice) {
         contextOptionsStatus.className = 'lgt-context-status';
-        contextOptionsStatus.textContent = 'Available: ' + currentBrandMetadata.languages.length +
+        contextOptionsStatus.textContent = 'Available for ' + (BRAND_LABELS[brandSel.value] || brandSel.value) + ': ' + currentBrandMetadata.languages.length +
           ' languages · ' + currentBrandMetadata.currencies.length + ' currencies';
         contextOptionsStatus.style.display = '';
       } else {
@@ -2590,6 +2612,7 @@
       refreshContextOptions();
       if (typeof refreshCredBadge === 'function') refreshCredBadge();
       if (typeof refreshGenerateButtonMode === 'function') refreshGenerateButtonMode();
+      if (typeof refreshLoginOnlyOptions === 'function') refreshLoginOnlyOptions();
     });
 
     function selectedGeneratedCustomerKey() {
@@ -3249,14 +3272,10 @@ const hasKey = await hasLoggedInCustomerKey(brand, bleSource ? 'prod' : environm
       (function () { var d = el('div', {}); d.appendChild(el('label', { for: 'lgt-gen-login-state' }, ['Login state'])); d.appendChild(loginSel); d.appendChild(credBadge); return d; })()
     ]));
     wrap.appendChild(contextOptionsArea);
-    wrap.appendChild(el('label', { class: 'lgt-checkbox-row' }, [localLinksChk, ' Local links']));
-    wrap.appendChild(localLinksHint);
+    var localLinksWrap = el('label', { class: 'lgt-checkbox-row' }, [localLinksChk, ' Local links']);
     var bleWrap = el('label', { class: 'lgt-checkbox-row' }, [bleChk, ' BLE source']);
-    wrap.appendChild(bleWrap);
-    var forceFreshWrap = el('label', { class: 'lgt-checkbox-row' }, [forceFreshChk, ' Force fresh live-login']);
-    wrap.appendChild(forceFreshWrap);
-    var forceVisibleWrap = el('label', { class: 'lgt-checkbox-row' }, [forceVisibleChk, ' Show login tab']);
-    wrap.appendChild(forceVisibleWrap);
+    var forceFreshWrap = el('label', { class: 'lgt-checkbox-row lgt-live-login-option' }, [forceFreshChk, ' Force fresh live-login']);
+    var forceVisibleWrap = el('label', { class: 'lgt-checkbox-row lgt-live-login-option' }, [forceVisibleChk, ' Show login tab']);
     var srSpoofChk = el('input', { type: 'checkbox' });
     srSpoofChk.checked = srSpoofSettingCache;
     srSpoofChkRef = srSpoofChk;
@@ -3267,7 +3286,6 @@ const hasKey = await hasLoggedInCustomerKey(brand, bleSource ? 'prod' : environm
       chrome.storage.local.set(obj);
     });
     var srSpoofWrap = el('label', { class: 'lgt-checkbox-row' }, [srSpoofChk, ' Sportradar Statistics fix']);
-    wrap.appendChild(srSpoofWrap);
     var oddinFixChk = el('input', { type: 'checkbox' });
     oddinFixChk.checked = oddinFixSettingCache;
     oddinFixChkRef = oddinFixChk;
@@ -3278,7 +3296,23 @@ const hasKey = await hasLoggedInCustomerKey(brand, bleSource ? 'prod' : environm
       chrome.storage.local.set(obj);
     });
     var oddinFixWrap = el('label', { class: 'lgt-checkbox-row' }, [oddinFixChk, ' Oddin Statistics fix']);
-    wrap.appendChild(oddinFixWrap);
+    var optionGrid = el('div', { class: 'lgt-option-grid' }, [
+      localLinksWrap,
+      srSpoofWrap,
+      bleWrap,
+      oddinFixWrap,
+      forceFreshWrap,
+      forceVisibleWrap
+    ]);
+    wrap.appendChild(optionGrid);
+    wrap.appendChild(localLinksHint);
+    function refreshLoginOnlyOptions() {
+      var display = loginSel.value === 'in' ? '' : 'none';
+      forceFreshWrap.style.display = display;
+      forceVisibleWrap.style.display = display;
+    }
+    loginSel.addEventListener('change', refreshLoginOnlyOptions);
+    refreshLoginOnlyOptions();
     wrap.appendChild(buildDisclosure('What do these options do?', [
       el('ul', {}, [
         el('li', {}, ['BLE source: uses fresh live events from BLE on TEST/QA links.']),
@@ -3297,23 +3331,24 @@ const hasKey = await hasLoggedInCustomerKey(brand, bleSource ? 'prod' : environm
   }
 
   function renderLinkRow(label, link, brand, environment) {
-    var row = el('div', { style: 'margin-bottom:6px' });
-    row.appendChild(el('div', { style: 'color:var(--lgt-muted)' }, [label]));
-    var linkText = el('div', {}, [link || '(not available)']);
+    var row = el('div', { class: 'lgt-link-row' });
+    row.appendChild(el('div', { class: 'lgt-link-label' }, [label]));
+    var linkText = el('div', { class: 'lgt-link-url', title: link || 'Not available' }, [link || 'Not available']);
     row.appendChild(linkText);
     if (link) {
-      var btnRow = el('div', { class: 'lgt-row' });
-      btnRow.appendChild(el('button', {
-        class: 'secondary', style: 'margin-top:6px', onclick: function () {
+      row.appendChild(el('button', {
+        class: 'secondary', onclick: function () {
           navigator.clipboard.writeText(link);
         }
-      }, ['Copy ' + label]));
-      btnRow.appendChild(el('button', {
-        class: 'secondary', style: 'margin-top:6px', onclick: function () {
+      }, ['Copy']));
+      row.appendChild(el('button', {
+        class: 'secondary', onclick: function () {
           window.open(link, '_blank');
         }
       }, ['Open']));
-      row.appendChild(btnRow);
+    } else {
+      row.appendChild(el('span', {}, ['']));
+      row.appendChild(el('span', {}, ['']));
     }
     return row;
   }
@@ -3660,7 +3695,7 @@ const ok = await attemptAutoLogin(detected.brand, cred.username, cred.password, 
           ? row.layers.map(function (l) { return LAYER_LABELS[l]; }).join(' + ')
           : (row.layer ? LAYER_LABELS[row.layer] : 'Unclassified SB build');
         var titlePrefix = brandLabel(row) + ' \u00b7 ' + layerLabel;
-        var label = el('span', {}, [titlePrefix + ': ' + buildText]);
+        var label = el('span', {}, [titlePrefix + ' ' + buildText]);
         var badge = el('span', { class: 'lgt-build-badge ' + row.status }, [STATUS_LABELS[row.status] || row.status]);
         var line = el('div', { class: 'lgt-build-row' }, [label, badge]);
         wrap.appendChild(line);
