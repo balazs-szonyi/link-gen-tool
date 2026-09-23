@@ -3,11 +3,9 @@
  *
  * Captures x-sb-static-context-id / x-sb-user-context-id headers via
  * chrome.webRequest.onSendHeaders - a NETWORK-LAYER observation, entirely
- * independent of page JS timing. This closes the root cause behind the
- * legacy page-injected script's flaky passive capture: a bundled SPA that grabs a reference
- * to the native `fetch` at its own module-init time (milliseconds after
- * page load, before any legacy page-injected script click is even possible) makes an
- * in-page fetch/XHR monkey-patch structurally blind to that traffic -
+ * independent of page JS timing. A bundled SPA can retain a reference to
+ * native `fetch` during module initialization, making any later in-page
+ * fetch/XHR monkey-patch structurally blind to that traffic -
  * reassigning window.fetch afterwards has zero effect on an already-
  * captured reference. chrome.webRequest sees the real request on the wire
  * regardless of any of that, the same class of technique the project's
@@ -17,9 +15,7 @@
  * Captured state is written directly to chrome.storage.local (not held in
  * this service worker's own memory, which Chrome can terminate/restart at
  * any time under MV3) keyed per page origin - so it also survives a hard
- * full-page navigation with zero sessionStorage-breadcrumb / window.open /
- * re-injection machinery of any kind, unlike the legacy page-injected script's v10-v13
- * fixes for the same problem class.
+ * full-page navigation without page-level reinjection coordination.
  */
 'use strict';
 
@@ -82,16 +78,13 @@ chrome.webRequest.onSendHeaders.addListener(
 // `event.isTrusted` (or equivalent framework-level "was this a real user
 // gesture" heuristics) and silently ignore a content script's synthetic
 // dispatchEvent()/click() - a genuine, unavoidable limitation of DOM-level
-// simulation (this affected both the legacy page-injected script and this extension's
-// content.js equally, since content scripts run in the same "not a real
-// user" trust tier no matter how they're delivered). chrome.debugger is
+// simulation. Content scripts run in the same "not a real user" trust
+// tier regardless of their execution world. chrome.debugger is
 // different: it's a background-service-worker-only API (content scripts
 // cannot call it) that attaches Chrome DevTools Protocol to the tab and
 // injects input via the same Input.dispatchMouseEvent/dispatchKeyEvent
 // pipeline real DevTools/Playwright use - indistinguishable from a real
-// user to the page, so isTrusted-gated handlers fire normally. This is
-// the one "not the legacy page-injected script anymore" capability that actually matters
-// here.
+// user to the page, so isTrusted-gated handlers fire normally.
 //
 // Trade-off: attaching shows Chrome's built-in "<name> started debugging
 // this browser" infobar for the few hundred ms the sequence takes, then
@@ -1530,8 +1523,8 @@ handleMessage('lgt-bundle-sync-page-flag', async function (msg, sender) {
 // the Bundle-override feature above (works whether or not an override is
 // active, and whether or not the user ever opens the Bundle tab) - this
 // is what should be trusted over any UI dropdown or the separate
-// "Sportsbook Tool" legacy page-injected script's own "SB Version" field, since both of
-// those can show a stale/misconfigured value with no visible error (see
+// third-party Sportsbook Tool's own "SB Version" field, since both can
+// show a stale/misconfigured value with no visible error (see
 // the 2026-08-10 Bundle-tab bug this was built in response to).
 // ---------------------------------------------------------------------
 
@@ -2054,7 +2047,7 @@ function computeDetectionRows(snapshot, tabId) {
     // Two layers in the SAME frame that both reach Confirmed on the exact
     // same brand+version+environment+device are not two independently
     // swappable architectures - some brands run a genuinely hybrid
-    // runtime (e.g. an mFE app layered on top of the legacy OBGA/"Fabric"
+      // runtime (e.g. an mFE app layered on top of the OBGA/"Fabric"
     // context, which the mFE app deliberately also populates for
     // backward compatibility with older tooling). Since the numbers are
     // identical, showing two rows is just noise - merge them into ONE

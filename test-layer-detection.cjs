@@ -200,7 +200,7 @@ async function main() {
     // Scenario 6: hybrid runtime - MFE and iframe markers BOTH present in
     // the SAME frame and BOTH independently Confirmed on the same
     // brand+version+environment+device. This is a real, observed Betsson
-    // QA shape (mFE layered on top of the legacy Fabric/OBGA runtime).
+    // QA shape (mFE layered on top of the Fabric/OBGA runtime).
     // Since both layers report the exact same version/environment,
     // showing two duplicate-looking rows is just noise - they must be
     // merged into ONE row listing every agreeing layer, with a detail
@@ -224,7 +224,7 @@ async function main() {
     assert.match(texts[0], /Firestorm.*MFE \+ Fabric.*v8\.3\.0\.4928-b1d00c18.*QA.*Confirmed/s);
     const hybridDetailCount = await panel.locator('.lgt-build-detail').count();
     assert.strictEqual(hybridDetailCount, 0);
-    console.log('PASS: MFE and the legacy Fabric/OBGA shell both Confirmed in the same frame with matching brand+version+environment are merged into a single hybrid row (label reads "Fabric", not "iframe" - they are the same shell, not two separate layers), with no extra detail text since a merged Confirmed row needs no explanation beyond any other Confirmed row.');
+    console.log('PASS: MFE and the Fabric/OBGA shell both Confirmed in the same frame with matching brand+version+environment are merged into a single hybrid row (label reads "Fabric", not "iframe" - they are the same shell, not two separate layers), with no extra detail text since a merged Confirmed row needs no explanation beyond any other Confirmed row.');
 
     // Scenario 7: Partially verified - a runtime marker exists but there
     // is no network confirmation for this layer at all yet. The row must

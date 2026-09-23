@@ -130,7 +130,7 @@
     // - runtime contexts hydrate progressively within the same page load
     // (e.g. appContext.environment/brandId can populate a tick or two
     // after the object first appears with only a version, or a second
-    // layer - e.g. the legacy OBGA/Fabric marker in an MFE+Fabric hybrid
+    // layer - e.g. the OBGA/Fabric marker in an MFE+Fabric hybrid
     // page - can become available only after the MFE one already has).
     // Stopping as soon as ANYTHING was found used to freeze the very
     // first (sometimes incomplete) snapshot forever for the rest of the
