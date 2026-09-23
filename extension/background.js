@@ -868,6 +868,17 @@ function escapeRegexLiteral(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function bleDataSourceHostRegex(currentHost) {
+  // Brand shells commonly keep the visible page on test.brand.tld while
+  // their MFE calls www.test.brand.tld (and PROD can do the reverse). Both
+  // names are the same sportsbook source for this tab. Matching only the
+  // address-bar hostname installs valid-looking rules that never see an
+  // API request.
+  var host = String(currentHost || '').toLowerCase();
+  var baseHost = host.indexOf('www.') === 0 ? host.slice(4) : host;
+  return '(?:www\\.)?' + escapeRegexLiteral(baseHost);
+}
+
 async function startBleDataOverrideRule(tabId, currentHost, alphaHost, stc, ctx, expectedOrigin) {
   return dnr.apply('bleData', tabId, { scope: { kind: 'origin', value: expectedOrigin || 'https://' + currentHost } }, async () => allocate => {
     const ruleIds = allocate(2);
@@ -879,7 +890,7 @@ async function startBleDataOverrideRule(tabId, currentHost, alphaHost, stc, ctx,
           redirect: { regexSubstitution: 'https://' + alphaHost + '/api/sb/v1/\\1' }
         },
         condition: {
-          regexFilter: '^https?://' + escapeRegexLiteral(currentHost) + '/api/sb/v1/(.*)$',
+          regexFilter: '^https?://' + bleDataSourceHostRegex(currentHost) + '/api/sb/v1/(.*)$',
           resourceTypes: ['xmlhttprequest'],
           tabIds: [tabId]
         }

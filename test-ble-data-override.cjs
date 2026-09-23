@@ -19,10 +19,11 @@ const path = require('path');
 const { chromium } = require('playwright');
 
 const EXT_PATH = path.resolve(__dirname, 'extension');
-const BRAND = 'nordicbet';
+const BRAND = process.env.LGT_BRAND || 'nordicbet';
 const DEVICE = process.env.LGT_DEVICE || 'desktop';
 const TARGET_URL = process.env.LGT_TARGET_URL || 'https://test.nordicbet.com/en/sportsbook/live/football';
-const ALPHA_HOST = 'd-cf.alpha.ndbplayground.net';
+const ALPHA_HOST = process.env.LGT_ALPHA_HOST || 'd-cf.alpha.ndbplayground.net';
+const TARGET_HOST = new URL(TARGET_URL).hostname;
 
 function log(msg) { console.log('[test] ' + new Date().toISOString().slice(11, 19) + ' ' + msg); }
 
@@ -64,14 +65,17 @@ async function main() {
   log('Loaded ' + TARGET_URL + ' -> final URL ' + page.url());
   await page.waitForTimeout(2000);
 
-  await sw.evaluate(async () => {
-    const tabs = await chrome.tabs.query({ url: '*://*.nordicbet.com/*' });
+  await sw.evaluate(async (targetHost) => {
+    const tabs = await chrome.tabs.query({});
     for (const t of tabs) {
+      let hostname = '';
+      try { hostname = new URL(t.url).hostname; } catch (e) { continue; }
+      if (hostname !== targetHost && hostname !== 'www.' + targetHost && 'www.' + hostname !== targetHost) continue;
       await new Promise((resolve) => {
         chrome.tabs.sendMessage(t.id, { type: 'lgt-toggle-panel' }, () => { void chrome.runtime.lastError; resolve(); });
       });
     }
-  });
+  }, TARGET_HOST);
   await page.waitForSelector('#lgt-panel', { state: 'visible', timeout: 10000 });
   log('Panel is visible');
 
@@ -91,21 +95,29 @@ async function main() {
   log('Selected device: ' + DEVICE);
 
   const applyBtn = panel.getByRole('button', { name: 'Apply', exact: true });
+  apiHits.length = 0;
+  const automaticReload = page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 });
   await applyBtn.click();
-  log('Clicked Apply, waiting for status to report an active override...');
+  log('Clicked Apply, waiting for the automatic reload...');
+  await automaticReload;
+  await page.waitForTimeout(6000);
+  log('PASS: Apply automatically reloaded the same tab. URL: ' + page.url());
 
   const maintenanceScenario = /\/maintenance\/?(?:[?#]|$)/i.test(TARGET_URL);
   if (maintenanceScenario) {
     await page.waitForURL(/^https:\/\/www\.nordicbet\.com\/en\/sportsbook(?:[/?#]|$)/, { timeout: 30000 });
     log('PASS: maintenance bootstrap automatically continued on the working PROD shell: ' + page.url());
-    await sw.evaluate(async () => {
-      const tabs = await chrome.tabs.query({ url: '*://*.nordicbet.com/*' });
+    await sw.evaluate(async (targetHost) => {
+      const tabs = await chrome.tabs.query({});
       for (const t of tabs) {
+        let hostname = '';
+        try { hostname = new URL(t.url).hostname; } catch (e) { continue; }
+        if (hostname !== targetHost && hostname !== 'www.' + targetHost && 'www.' + hostname !== targetHost) continue;
         await new Promise((resolve) => {
           chrome.tabs.sendMessage(t.id, { type: 'lgt-toggle-panel' }, () => { void chrome.runtime.lastError; resolve(); });
         });
       }
-    });
+    }, TARGET_HOST);
     await page.waitForSelector('#lgt-panel', { state: 'visible', timeout: 10000 });
     await page.locator('#lgt-panel .lgt-tab').filter({ hasText: 'BLE Data' }).click();
   }
@@ -145,10 +157,7 @@ async function main() {
   }
   log('Applied stc (parsed from status): ' + appliedStc);
 
-  apiHits.length = 0;
-  await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
-  await page.waitForTimeout(6000);
-  log('/api/sb/v1/* requests observed after reload: ' + apiHits.length);
+  log('/api/sb/v1/* requests observed during the automatic reload: ' + apiHits.length);
 
   const alphaHits = apiHits.filter((h) => {
     try { return new URL(h.url).hostname === ALPHA_HOST; } catch (e) { return false; }

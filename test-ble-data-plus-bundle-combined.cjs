@@ -81,19 +81,22 @@ async function main() {
   await panel.locator('.lgt-tab').filter({ hasText: 'Bundle', exact: false }).first().click();
   log('Switched to Bundle tab');
   const bundleApplyBtn = panel.getByRole('button', { name: 'Apply', exact: true });
+  const bundleReload = page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 });
   await bundleApplyBtn.click();
-  log('Clicked Apply on Bundle tab, waiting for status to report an active override...');
+  await bundleReload;
+  await page.waitForTimeout(1500);
+  log('Clicked Apply on Bundle tab; its automatic reload completed. Waiting for active status...');
   const bundleStatusEl = panel.locator('.lgt-log:visible').first();
   const bundleDeadline = Date.now() + 20000;
   let bundleStatusText = '';
   while (Date.now() < bundleDeadline) {
     bundleStatusText = (await bundleStatusEl.textContent().catch(() => '')) || '';
-    if (/^Active \(\d+ rule/.test(bundleStatusText.trim())) break;
+    if (/^Active(?: -> [A-Z]+)? \(\d+ rule/.test(bundleStatusText.trim())) break;
     if (/^Failed:/.test(bundleStatusText.trim())) break;
     await page.waitForTimeout(1000);
   }
   log('Bundle status before BLE Data apply: ' + bundleStatusText.trim());
-  if (!/^Active \(\d+ rule/.test(bundleStatusText.trim())) {
+  if (!/^Active(?: -> [A-Z]+)? \(\d+ rule/.test(bundleStatusText.trim())) {
     throw new Error('Bundle Override did not report active state (test setup step). Last status: ' + bundleStatusText);
   }
 
@@ -106,8 +109,13 @@ async function main() {
   const detectedBrand = await brandSel.inputValue();
   if (detectedBrand !== BRAND) await brandSel.selectOption(BRAND);
   const bleApplyBtn = panel.getByRole('button', { name: 'Apply', exact: true });
+  apiHits.length = 0;
+  bundleHits.length = 0;
+  const bleAutomaticReload = page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 });
   await bleApplyBtn.click();
-  log('Clicked Apply on BLE Data tab');
+  await bleAutomaticReload;
+  await page.waitForTimeout(6000);
+  log('Clicked Apply on BLE Data tab; its automatic reload completed');
 
   const statusEl = panel.locator('.lgt-log:visible').first();
   const deadline = Date.now() + 25000;
@@ -129,20 +137,14 @@ async function main() {
     const liveRules = await new Promise((resolve) => chrome.declarativeNetRequest.getSessionRules(resolve));
     return {
       tabId: tid,
-      bleDataRuleIdsByTab: bleDataRuleIdsByTab[tid],
-      bundleRuleIdsByTab: bundleRuleIdsByTab[tid],
       allLiveRuleIdsForTab: liveRules.filter((r) => r.condition && r.condition.tabIds && r.condition.tabIds.indexOf(tid) !== -1).map((r) => r.id)
     };
   });
   log('DEBUG background state BEFORE reload: ' + JSON.stringify(debugStateBeforeReload));
 
-  // Step 3: ONE reload - the exact user repro ("apply bundle override, apply
-  // BLE data override, reload").
-  apiHits.length = 0;
-  bundleHits.length = 0;
-  await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
-  log('Reloaded. URL after reload: ' + page.url());
-  await page.waitForTimeout(6000);
+  // Step 3 is now performed automatically by BLE Data Apply. This is the
+  // exact user flow: apply Bundle Override, then apply BLE Data once.
+  log('URL after BLE Data automatic reload: ' + page.url());
 
   const panelVisibleAfterReload = await page.locator('#lgt-panel').isVisible().catch(() => false);
   log('Panel visible after reload: ' + panelVisibleAfterReload);
@@ -182,10 +184,6 @@ async function main() {
     return {
       tabId: tid,
       tabUrl: tabs[0].url,
-      bleDataRuleIdsByTab: bleDataRuleIdsByTab[tid],
-      bleDataExpectedOriginByTab: bleDataExpectedOriginByTab[tid],
-      bundleRuleIdsByTab: bundleRuleIdsByTab[tid],
-      bundleExpectedUrlByTab: bundleExpectedUrlByTab[tid],
       liveRuleIdsForTab: liveRules.filter((r) => r.condition && r.condition.tabIds && r.condition.tabIds.indexOf(tid) !== -1).map((r) => r.id)
     };
   });
@@ -219,7 +217,11 @@ async function main() {
   const bundleStatus = await sw.evaluate(async () => {
     const tabs = await chrome.tabs.query({ url: '*://*.nordicbet.com/*' });
     const tid = tabs[0].id;
-    const liveIds = await getOwnSessionRuleIdsForTab(tid, BUNDLE_RULE_ID_START, SR_SPOOF_RULE_ID_START);
+    const liveRules = await chrome.declarativeNetRequest.getSessionRules();
+    const liveIds = liveRules.filter((rule) =>
+      rule.id >= BUNDLE_RULE_ID_START && rule.id < SR_SPOOF_RULE_ID_START &&
+      rule.condition && Array.isArray(rule.condition.tabIds) && rule.condition.tabIds.includes(tid)
+    ).map((rule) => rule.id);
     return { active: liveIds.length > 0, ruleCount: liveIds.length };
   });
   log('Bundle status after reload: ' + JSON.stringify(bundleStatus));
