@@ -98,6 +98,7 @@
   }
   function scopeMatches(scope, url) {
     try {
+      if (scope?.kind === 'tab') return true;
       if (scope?.kind === 'url') return scope.value === url;
       if (scope?.kind === 'origin') return scope.value === new URL(url).origin;
       if (scope?.kind === 'hostname') return scope.value === new URL(url).hostname;

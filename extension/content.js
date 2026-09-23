@@ -37,20 +37,16 @@
 
   // Brand shells may normalize the address bar after bootstrap and remove
   // diagnostics parameters even though they were present on the actual
-  // navigation request. Restore them without another reload across the same
-  // sportsbook route family (e.g. Sportsbook <-> Live Betting), while still
-  // clearing the marker when navigation leaves Sportsbook or changes origin.
+  // navigation request. Once Bundle Apply has opted this tab in, restore the
+  // parameters after every supported same-tab navigation until Disable is
+  // clicked or the tab is closed. In particular, top-level brand navigation
+  // such as Sportsbook -> Horse Racing -> Sportsbook must not reset them.
   function restoreBundleDiagnosticsParams() {
     var raw;
     try { raw = sessionStorage.getItem(BUNDLE_DIAGNOSTICS_KEY); } catch (e) { return; }
     if (!raw) return;
     try {
-      var marker = JSON.parse(raw);
-      var scope = LgtBundleNavigation.scopeForUrl(marker.expectedUrl);
-      if (!LgtBundleNavigation.matches(scope, location.href)) {
-        sessionStorage.removeItem(BUNDLE_DIAGNOSTICS_KEY);
-        return;
-      }
+      JSON.parse(raw);
       var current = new URL(location.href);
       current.searchParams.set('exposeObgState', 'true');
       current.searchParams.set('exposeObgRt', 'true');
