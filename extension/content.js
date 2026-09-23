@@ -1952,7 +1952,24 @@
       '#lgt-panel .lgt-build-badge.unclassified{background:#555;color:#fff}',
       '#lgt-panel .lgt-build-strip button{width:auto;margin:0;padding:3px 8px;font-size:10px;flex:none}',
       '#lgt-panel .lgt-build-strip .lgt-build-actions{display:flex;gap:6px;flex:none}',
-      '#lgt-panel .lgt-build-detail{margin-top:2px;font-size:10px;color:var(--lgt-muted);white-space:pre-wrap;width:100%}',
+      // Compact, native inline disclosures for contextual help. Native
+      // <details>/<summary> provides the correct keyboard and accessibility
+      // behaviour without custom ARIA or event handlers; the explicit
+      // chevron replaces the hidden browser marker with an equally clear
+      // directional cue that fits the panel's existing visual language.
+      '#lgt-panel .lgt-disclosure{width:100%;box-sizing:border-box;margin-top:6px;border:1px solid var(--lgt-border,rgba(255,255,255,.12));border-radius:6px;background:var(--lgt-input-bg)}',
+      '#lgt-panel .lgt-disclosure summary{display:flex;align-items:center;gap:6px;padding:6px 8px;cursor:pointer;list-style:none;color:var(--lgt-fg);font-size:11px;font-weight:600;border-radius:5px}',
+      '#lgt-panel .lgt-disclosure summary::-webkit-details-marker{display:none}',
+      '#lgt-panel .lgt-disclosure summary::before{content:"\u25b6";display:inline-block;color:var(--lgt-muted);font-size:9px;transform-origin:center;transition:transform .15s ease}',
+      '#lgt-panel .lgt-disclosure[open] summary::before{transform:rotate(90deg)}',
+      '#lgt-panel .lgt-disclosure summary:hover{background:var(--lgt-secondary-bg)}',
+      '#lgt-panel .lgt-disclosure summary:focus-visible{outline:2px solid var(--lgt-accent);outline-offset:2px}',
+      '#lgt-panel .lgt-disclosure-body{padding:0 8px 8px;color:var(--lgt-muted);font-size:10px;white-space:pre-wrap}',
+      '#lgt-panel .lgt-disclosure-body ul{margin:2px 0 0;padding-left:16px;white-space:normal}',
+      '#lgt-panel .lgt-disclosure-body li + li{margin-top:4px}',
+      '#lgt-panel .lgt-build-disclosure{margin-top:3px}',
+      '#lgt-panel .lgt-build-detail{width:100%}',
+      '#lgt-panel .lgt-build-alert{width:100%;margin-top:2px;color:#ff9c9c;font-size:10px;font-weight:600}',
       '#lgt-local-links-panel{position:fixed;inline-size:min(360px,calc(100vw - 2rem));max-block-size:88dvh;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;background:var(--lgt-bg);color:var(--lgt-fg);',
       'font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;border-radius:10px;',
       'box-shadow:0 8px 30px rgba(0,0,0,.4);z-index:2147483646;padding:14px;box-sizing:border-box}',
@@ -3322,6 +3339,13 @@ const ok = await attemptAutoLogin(detected.brand, cred.username, cred.password, 
   // independent embed that doesn't exist.
   var LAYER_LABELS = { mfe: 'MFE', iframe: 'Fabric', nodejs: 'NodeJS' };
 
+  function buildDisclosure(summaryText, bodyChildren, className) {
+    return el('details', { class: 'lgt-disclosure' + (className ? ' ' + className : '') }, [
+      el('summary', {}, [summaryText]),
+      el('div', { class: 'lgt-disclosure-body' }, bodyChildren)
+    ]);
+  }
+
   function buildDetectionHeader() {
     var wrap = el('div', { class: 'lgt-build-strip' });
     var emptyLabel = el('span', {}, ['Detecting sportsbook runtime layers\u2026']);
@@ -3333,6 +3357,15 @@ const ok = await attemptAutoLogin(detected.brand, cred.username, cred.password, 
     }
 
     function render(rows) {
+      // render() runs every three seconds and replaces the strip's DOM.
+      // Preserve a user's open disclosure only while the exact same row,
+      // status and detail still exist. A status/detail change creates a new
+      // key and therefore starts collapsed; a real page reload naturally
+      // resets this in-memory/DOM-only state as requested.
+      var openDisclosureKeys = {};
+      Array.prototype.forEach.call(wrap.querySelectorAll('.lgt-build-disclosure[open][data-lgt-disclosure-key]'), function (details) {
+        openDisclosureKeys[details.getAttribute('data-lgt-disclosure-key')] = true;
+      });
       wrap.innerHTML = '';
       if (!rows || !rows.length) {
         wrap.appendChild(emptyLabel);
@@ -3348,7 +3381,29 @@ const ok = await attemptAutoLogin(detected.brand, cred.username, cred.password, 
         var badge = el('span', { class: 'lgt-build-badge ' + row.status }, [STATUS_LABELS[row.status] || row.status]);
         var line = el('div', { class: 'lgt-build-row' }, [label, badge]);
         wrap.appendChild(line);
-        if (row.detail) wrap.appendChild(el('div', { class: 'lgt-build-detail' }, [row.detail]));
+        if (row.status === 'mismatch') {
+          wrap.appendChild(el('div', { class: 'lgt-build-alert' }, ['Runtime and network evidence conflict.']));
+        }
+        if (row.detail) {
+          var summaryByStatus = {
+            confirmed: 'Why Confirmed?',
+            partial: 'Why Partially verified?',
+            mismatch: 'Show mismatch details',
+            unclassified: 'Why Unclassified?'
+          };
+          var disclosureKey = JSON.stringify([
+            row.tabId, row.frameId, row.brand, row.brandId, row.layer,
+            row.layers || null, row.device, row.status, row.detail
+          ]);
+          var disclosure = buildDisclosure(
+            summaryByStatus[row.status] || 'Show details',
+            [el('div', { class: 'lgt-build-detail' }, [row.detail])],
+            'lgt-build-disclosure'
+          );
+          disclosure.setAttribute('data-lgt-disclosure-key', disclosureKey);
+          disclosure.open = !!openDisclosureKeys[disclosureKey];
+          wrap.appendChild(disclosure);
+        }
       });
     }
 
@@ -3833,23 +3888,15 @@ const result = await fetchFreshBleContext(brand, device, loggedInChk.checked, ''
     wrap.appendChild(loggedInLabel);
     wrap.appendChild(el('div', { style: 'display:flex;gap:6px;margin-top:6px' }, [applyBtn, disableBtn]));
     wrap.appendChild(status);
-    wrap.appendChild(el('div', { class: 'lgt-hint', style: 'margin-top:8px' }, [
-      'Mints a fresh, ALPHA-valid BLE customer context from PROD and applies ' +
-      'it to THIS tab: redirects /api/sb/v1/* calls (event data, live-event ' +
-      'list, markets, etc.) to the brand\u2019s ALPHA host and rewrites the ' +
-      'context-id headers so ALPHA recognizes the request. Works on ANY ' +
-      'page - a real brand page (QA/TEST) or one of this tool\u2019s own ' +
-      'sandbox links - independently of, and combinable with, Bundle ' +
-      'Override on the same tab. If a QA/TEST shell has already entered ' +
-      'maintenance before the sportsbook starts, Apply automatically ' +
-      'continues on the equivalent working PROD shell while keeping ALPHA ' +
-      'BLE data active. Since the live-event list itself gets ' +
-      'redirected too, you don\u2019t need to manually navigate with a ' +
-      'borrowed eventId - Apply reloads the page automatically, then you ' +
-      'can browse the live section ' +
-      'normally. Does NOT restore Match/Visual/Statistics tabs (those use a ' +
-      'separate realtime channel, a known, unrelated gap - see README).'
-    ]));
+    wrap.appendChild(buildDisclosure('How BLE Data works & limitations', [
+      el('ul', {}, [
+        el('li', {}, ['Creates a fresh, ALPHA-valid BLE customer context from PROD, redirects this tab\u2019s /api/sb/v1/* calls to the brand\u2019s ALPHA host, and rewrites context-id headers.']),
+        el('li', {}, ['Works on real QA/TEST brand pages and this tool\u2019s sandbox links, independently of and together with Bundle Override on the same tab.']),
+        el('li', {}, ['If a QA/TEST shell is already in maintenance, Apply continues on the equivalent working PROD shell while keeping ALPHA BLE data active.']),
+        el('li', {}, ['Apply reloads automatically. The live-event list is redirected too, so the live section can be browsed normally without a borrowed eventId.']),
+        el('li', {}, ['Does not restore Match, Visual, or Statistics tabs; those use a separate realtime channel (a known, unrelated gap documented in the README).'])
+      ])
+    ], 'lgt-ble-help'));
 
     chrome.storage.local.get([BLE_DATA_STATE_KEY], function (res) {
       var saved = res && res[BLE_DATA_STATE_KEY];
