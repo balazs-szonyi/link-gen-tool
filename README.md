@@ -16,7 +16,8 @@ Internal Manifest V3 Chrome extension for generating environment-correct Betsson
 1. Download the latest ZIP from the [extension release](https://github.com/balazs-szonyi/link-gen-tool/releases/tag/extension-latest).
 2. Extract it.
 3. Open `chrome://extensions`, enable Developer mode, choose **Load unpacked**, and select the extracted `extension` directory.
-4. Click the toolbar icon on a supported brand or playground page.
+4. Click the toolbar icon on any normal web page. On blank/new-tab and other
+   browser-protected pages, the tool opens in its own small extension window.
 
 ## Development
 

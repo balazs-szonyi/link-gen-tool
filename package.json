@@ -1,7 +1,7 @@
 {
   "name": "link-gen-tool",
   "private": true,
-  "version": "1.22.26",
+  "version": "1.22.28",
   "scripts": {
     "test": "node --test cross-layer-lab/test/*.test.cjs",
     "test:betsson-co": "node test-betsson-co.cjs",
@@ -10,6 +10,7 @@
     "test:bet-void": "node test-bet-void-mock.cjs",
     "test:layer-detection": "node test-layer-detection.cjs && node test-layer-marker-polling.cjs",
     "test:worker-state": "node --test test/worker-state.test.cjs",
+    "test:action-launcher": "node --test test/action-launcher.test.cjs && node test-action-launcher-e2e.cjs",
     "test:spino": "node --test test/spino-host-support.test.cjs",
     "test:spino:live": "node test-spino-live.cjs"
   },

@@ -23,7 +23,7 @@
  */
 'use strict';
 
-importScripts('worker-state.js', 'detection-state.js', 'debugger-session.js', 'oddin-fix.js');
+importScripts('worker-state.js', 'detection-state.js', 'debugger-session.js', 'oddin-fix.js', 'action-launcher.js');
 var workerStore = LgtWorkerState.createStore(chrome);
 var dnr = LgtWorkerState.createDnr(chrome, workerStore);
 var detection = LgtDetectionState.create(workerStore);
@@ -2111,16 +2111,8 @@ handleMessage('lgt-open-with-sr-spoof', async function (msg, sender) {
   } catch (error) { await stopSrSpoofRule(tab.id); throw error; }
 });
 
-// Toolbar icon click toggles the panel in the active tab's content script.
-// The content script itself is always injected (document_idle, every page/
-// navigation) and always listening - it just keeps the panel hidden by
-// default until told to show, or until an in-progress auto-login resume
-// shows it automatically.
-chrome.action.onClicked.addListener(function (tab) {
-  if (!tab || tab.id == null) return;
-  chrome.tabs.sendMessage(tab.id, { type: 'lgt-toggle-panel' }, function () {
-    // Swallow "Receiving end does not exist" - happens on pages the
-    // content script can't run on (chrome://, the Web Store, etc).
-    void chrome.runtime.lastError;
-  });
-});
+// On supported sportsbook pages the panel is already present. On any other
+// normal web page the toolbar click uses activeTab to inject it on demand.
+// Chrome-owned/blank pages cannot host extension content scripts, so those
+// clicks open the same UI in a small extension-owned window instead.
+LgtActionLauncher.install(chrome);
