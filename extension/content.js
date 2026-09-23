@@ -2612,7 +2612,6 @@
       refreshContextOptions();
       if (typeof refreshCredBadge === 'function') refreshCredBadge();
       if (typeof refreshGenerateButtonMode === 'function') refreshGenerateButtonMode();
-      if (typeof refreshLoginOnlyOptions === 'function') refreshLoginOnlyOptions();
     });
 
     function selectedGeneratedCustomerKey() {
@@ -3306,13 +3305,6 @@ const hasKey = await hasLoggedInCustomerKey(brand, bleSource ? 'prod' : environm
     ]);
     wrap.appendChild(optionGrid);
     wrap.appendChild(localLinksHint);
-    function refreshLoginOnlyOptions() {
-      var display = loginSel.value === 'in' ? '' : 'none';
-      forceFreshWrap.style.display = display;
-      forceVisibleWrap.style.display = display;
-    }
-    loginSel.addEventListener('change', refreshLoginOnlyOptions);
-    refreshLoginOnlyOptions();
     wrap.appendChild(buildDisclosure('What do these options do?', [
       el('ul', {}, [
         el('li', {}, ['BLE source: uses fresh live events from BLE on TEST/QA links.']),
