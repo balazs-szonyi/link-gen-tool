@@ -56,8 +56,19 @@ async function main() {
     const u = req.url();
     if (/\/api\/sb\/v1\//i.test(u)) {
       let hdrs = {};
+      let status = null;
+      let responseHeaders = {};
+      let body = null;
       try { hdrs = await req.allHeaders(); } catch (e) { /* ignore */ }
-      apiHits.push({ url: u, headers: hdrs });
+      try {
+        const response = await req.response();
+        if (response) {
+          status = response.status();
+          responseHeaders = await response.allHeaders();
+          if (/\/context-details(?:[?#]|$)/i.test(u)) body = await response.text();
+        }
+      } catch (e) { /* diagnostic fields stay empty */ }
+      apiHits.push({ url: u, headers: hdrs, status, responseHeaders, body });
     }
   });
 
@@ -163,8 +174,15 @@ async function main() {
     try { return new URL(h.url).hostname === ALPHA_HOST; } catch (e) { return false; }
   });
   log('...of which redirected to ' + ALPHA_HOST + ': ' + alphaHits.length);
+  log('ALPHA response statuses: ' + JSON.stringify([...new Set(alphaHits.map((h) => h.status))]));
+  const alphaContextDetails = alphaHits.find((h) => /\/context-details(?:[?#]|$)/i.test(h.url));
+  if (alphaContextDetails) log('ALPHA context-details response: ' + String(alphaContextDetails.body).slice(0, 2000));
   if (!alphaHits.length) {
     throw new Error('No /api/sb/v1/* request was redirected to ' + ALPHA_HOST + ' - the redirect rule did not take effect.');
+  }
+  const failedAlphaHits = alphaHits.filter((h) => h.status == null || h.status < 200 || h.status >= 300);
+  if (failedAlphaHits.length) {
+    throw new Error('ALPHA requests were redirected but did not succeed. Statuses: ' + JSON.stringify(failedAlphaHits.map((h) => h.status)));
   }
   log('PASS: at least one /api/sb/v1/* request was redirected to the ALPHA host.');
 
@@ -178,6 +196,23 @@ async function main() {
   } else {
     log('NOTE: could not parse the applied stc from the status text - skipping the header-value assertion (non-fatal, the host-redirect assertion above already validates the core mechanism).');
   }
+
+  const alphaApiRuntimeMarker = await page.evaluate(() =>
+    window.obgClientEnvironmentConfig?.startupContext?.activeExperiments?.includes('bleSource') === true
+  );
+  if (!alphaApiRuntimeMarker) {
+    throw new Error('The runtime bleSource marker was not restored after reload, so Sportsbook Tool cannot report "using ALPHA API".');
+  }
+  log('PASS: runtime activeExperiments contains bleSource, so Sportsbook Tool can report "using ALPHA API".');
+
+  await page.addScriptTag({ url: 'https://betssongroup.github.io/sportsbook/qa/sportsbook-tool/sportsbookTool.min.js' });
+  const sportsbookToolEnvironment = page.locator('#environment');
+  await sportsbookToolEnvironment.waitFor({ state: 'attached', timeout: 15000 });
+  const sportsbookToolEnvironmentText = (await sportsbookToolEnvironment.textContent() || '').trim();
+  if (!/using ALPHA API/i.test(sportsbookToolEnvironmentText)) {
+    throw new Error('Sportsbook Tool did not report ALPHA API. Environment text: ' + sportsbookToolEnvironmentText);
+  }
+  log('PASS: Sportsbook Tool environment reads "' + sportsbookToolEnvironmentText + '".');
 
   const bodyText = await page.locator('body').innerText().catch(() => '');
   log('Body text length after override + reload: ' + bodyText.length);
