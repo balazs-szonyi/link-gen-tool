@@ -40,10 +40,30 @@ async function main() {
     });
     if (!standalone) throw new Error('Standalone extension window did not open.');
     await standalone.locator('#lgt-panel').waitFor({ state: 'visible', timeout: 10000 });
-    await standalone.waitForTimeout(500);
+
+    await context.route('https://d-cf.btsgrplayground.net/**', async route => {
+      await route.fulfill({ status: 200, contentType: 'text/html', body: '<!doctype html><title>Sportsbook fixture</title>' });
+    });
+    const sportsbookPage = await context.newPage();
+    await sportsbookPage.goto('https://d-cf.btsgrplayground.net/action-launcher-test', { waitUntil: 'domcontentloaded' });
+    await sportsbookPage.locator('#lgt-panel').waitFor({ state: 'attached', timeout: 10000 });
+
+    const standaloneClosed = standalone.waitForEvent('close');
+    const inPage = await worker.evaluate(async () => {
+      const tabs = await chrome.tabs.query({});
+      const target = tabs.find(tab => tab.url && tab.url.startsWith('https://d-cf.btsgrplayground.net/'));
+      if (!target) throw new Error('Sportsbook fixture tab not found: ' + JSON.stringify(tabs.map(tab => tab.url)));
+      return LgtActionLauncher.launch(chrome, target);
+    });
+    if (inPage.mode !== 'toggled') throw new Error('Expected existing sportsbook panel to toggle, got ' + JSON.stringify(inPage));
+    await sportsbookPage.locator('#lgt-panel').waitFor({ state: 'visible', timeout: 10000 });
+    await standaloneClosed;
+    if (context.pages().some(page => page.url() === standaloneUrl)) throw new Error('Standalone popup remained open beside the sportsbook panel.');
+
+    await sportsbookPage.waitForTimeout(500);
     if (pageErrors.length) throw new Error('Standalone page error(s): ' + pageErrors.join(' | '));
 
-    console.log('PASS: blank-page fallback opens a visible standalone Link Gen Tool window.');
+    console.log('PASS: sportsbook panel replaces the blank-page standalone popup without duplication.');
   } finally {
     await context.close();
   }

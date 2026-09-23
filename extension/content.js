@@ -2112,6 +2112,10 @@
       panel.style.display = '';
       try { sessionStorage.setItem(PANEL_OPEN_KEY, '1'); } catch (e) {}
     };
+    panel.__lgtHide = function () {
+      panel.style.display = 'none';
+      try { sessionStorage.setItem(PANEL_OPEN_KEY, '0'); } catch (e) {}
+    };
     panel.__lgtToggle = function () {
       var willShow = panel.style.display === 'none';
       panel.style.display = willShow ? '' : 'none';
@@ -4145,10 +4149,17 @@ const result = await fetchFreshBleContext(brand, device, loggedInChk.checked, ''
   var pendingToggle = Number(globalThis.__lgtToggleQueue || 0);
   // Register this listener before constructing the relatively large panel so
   // a toolbar click immediately after document_idle cannot be lost.
-  chrome.runtime.onMessage.addListener(function (msg) {
-    if (!msg || msg.type !== 'lgt-toggle-panel') return;
-    if (panelEl && panelEl.__lgtToggle) panelEl.__lgtToggle();
-    else pendingToggle += 1;
+  chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+    if (!msg) return;
+    if (msg.type === 'lgt-toggle-panel') {
+      if (panelEl && panelEl.__lgtToggle) panelEl.__lgtToggle();
+      else pendingToggle += 1;
+      sendResponse({ ok: true });
+    } else if (msg.type === 'lgt-hide-panel') {
+      if (panelEl && panelEl.__lgtHide) panelEl.__lgtHide();
+      else pendingToggle = 0;
+      sendResponse({ ok: true });
+    }
   });
   Capture.start();
   panelEl = buildPanel();
