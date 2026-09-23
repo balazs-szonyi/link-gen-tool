@@ -1988,6 +1988,8 @@
       'background:var(--lgt-secondary-bg);color:var(--lgt-fg);font-weight:600;cursor:pointer}'
       , '@media (forced-colors: active){#lgt-panel,#lgt-local-links-panel{--lgt-bg:Canvas;--lgt-fg:CanvasText;--lgt-tab-bg:Canvas;--lgt-input-bg:Canvas;--lgt-input-border:ButtonText;--lgt-secondary-bg:ButtonFace;--lgt-muted:GrayText;--lgt-scroll-track:Canvas;--lgt-scroll-thumb:ButtonText}#lgt-panel button,#lgt-local-links-panel button{border:1px solid ButtonText;forced-color-adjust:auto}}'
       , '@media (prefers-reduced-motion: reduce){#lgt-panel *,#lgt-local-links-panel *{scroll-behavior:auto;transition:none!important;animation:none!important}}'
+      , 'body.lgt-standalone{margin:0;min-block-size:100vh;background:#101320}'
+      , 'body.lgt-standalone #lgt-panel{position:static;inline-size:100%;max-block-size:none;min-block-size:100vh;box-sizing:border-box;border-radius:0;box-shadow:none}'
     ].join('');
     document.head.appendChild(style);
 
@@ -2020,6 +2022,7 @@
     }, ['_']);
     var closeBtn = el('button', {
       class: 'lgt-close lgt-icon-button', type: 'button', title: 'Close', 'aria-label': 'Close Link Gen Tool', onclick: function () {
+        if (document.body && document.body.classList.contains('lgt-standalone')) { window.close(); return; }
         panel.style.display = 'none';
         try { sessionStorage.setItem(PANEL_OPEN_KEY, '0'); } catch (e) {}
       }

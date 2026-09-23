@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "Link Gen Tool",
-  "version": "1.22.27",
+  "version": "1.22.28",
   "description": "Generate environment-correct Betsson sportsbook QA links and capture live-login session context directly in Chrome.",
-  "permissions": ["storage", "webRequest", "webNavigation", "debugger", "tabs", "declarativeNetRequest", "declarativeNetRequestFeedback", "scripting"],
+  "permissions": ["activeTab", "storage", "webRequest", "webNavigation", "debugger", "tabs", "declarativeNetRequest", "declarativeNetRequestFeedback", "scripting"],
   "host_permissions": [
     "*://*.sbplayground1.net/*",
     "*://*.playground.net/*",
