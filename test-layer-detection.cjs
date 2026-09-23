@@ -157,7 +157,12 @@ async function main() {
       {}
     );
     texts = await waitForRows((t) => t.length === 1 && /Mismatch/.test(t[0]), 10000);
-    const detailText = await panel.locator('.lgt-build-detail').first().innerText();
+    const mismatchAlert = panel.locator('.lgt-build-alert');
+    assert.equal((await mismatchAlert.innerText()).trim(), 'Runtime and network evidence conflict.');
+    const mismatchDisclosure = panel.locator('.lgt-build-disclosure').first();
+    assert.equal(await mismatchDisclosure.evaluate((node) => node.open), false);
+    assert.equal((await mismatchDisclosure.locator('summary').innerText()).trim(), 'Show mismatch details');
+    const detailText = await panel.locator('.lgt-build-detail').first().textContent();
     assert.match(detailText, /version: runtime=v8\.2\.3\.4918-re0ade7b vs network=v8\.1\.15\.4896-hc2cb4ed/);
     // The row's headline must show the NETWORK-confirmed version, not the
     // raw runtime marker value, even for a genuinely unexplained Mismatch
@@ -170,7 +175,12 @@ async function main() {
     // "PROD" in another) depending on which bucket a row lands in.
     assert.match(texts[0], /v8\.1\.15\.4896-hc2cb4ed/);
     assert.doesNotMatch(texts[0], /v8\.2\.3\.4918-re0ade7b/);
-    console.log('PASS: disagreeing runtime vs network version for the same brand+layer renders Mismatch with conflict detail, and the headline consistently shows the network-confirmed value (not the raw runtime marker) - the same selection rule used for override-explained Confirmed rows.');
+    await mismatchDisclosure.locator('summary').focus();
+    await page.keyboard.press('Enter');
+    assert.equal(await mismatchDisclosure.evaluate((node) => node.open), true);
+    await page.waitForTimeout(3500);
+    assert.equal(await panel.locator('.lgt-build-disclosure').first().evaluate((node) => node.open), true);
+    console.log('PASS: disagreeing runtime vs network version renders a concise always-visible warning and a collapsed native detail disclosure; Enter opens it and an unchanged polling rerender preserves its open state.');
 
     // Scenario 4: Unclassified - a network hit with NO runtime marker in
     // that frame at all must not get an assumed layer label.
@@ -181,7 +191,10 @@ async function main() {
     );
     texts = await waitForRows((t) => t.length === 1 && /Unclassified/.test(t[0]), 10000);
     assert.doesNotMatch(texts[0], /MFE|Fabric|NodeJS/);
-    console.log('PASS: network-only evidence with no runtime marker renders Unclassified with no assumed layer label.');
+    const unclassifiedDisclosure = panel.locator('.lgt-build-disclosure').first();
+    assert.equal(await unclassifiedDisclosure.evaluate((node) => node.open), false);
+    assert.equal((await unclassifiedDisclosure.locator('summary').innerText()).trim(), 'Why Unclassified?');
+    console.log('PASS: network-only evidence with no runtime marker renders Unclassified with no assumed layer label, and changed row content resets the disclosure to collapsed.');
 
     // Scenario 5: bleSource=1 request to an ALPHA/PROD host must never be
     // usable as environment evidence (isBleExcludedRequest guard).
@@ -236,7 +249,10 @@ async function main() {
       {}
     );
     texts = await waitForRows((t) => t.length === 1 && /Partially verified/.test(t[0]), 10000);
-    const partialDetail = await panel.locator('.lgt-build-detail').first().innerText();
+    const partialDisclosure = panel.locator('.lgt-build-disclosure').first();
+    assert.equal(await partialDisclosure.evaluate((node) => node.open), false);
+    assert.equal((await partialDisclosure.locator('summary').innerText()).trim(), 'Why Partially verified?');
+    const partialDetail = await panel.locator('.lgt-build-detail').first().textContent();
     assert.match(partialDetail, /no network confirmation seen for this layer yet/);
     console.log('PASS: Partially verified rows include a specific reason (missing network confirmation) instead of a blank detail.');
 
@@ -253,7 +269,7 @@ async function main() {
       {}
     );
     texts = await waitForRows((t) => t.length === 1 && /Mismatch/.test(t[0]), 10000);
-    let bundleMismatchDetail = await panel.locator('.lgt-build-detail').first().innerText();
+    let bundleMismatchDetail = await panel.locator('.lgt-build-detail').first().textContent();
     assert.match(bundleMismatchDetail, /environment: runtime=PROD vs network=ALPHA/);
     // Even in this baseline/unexplained Mismatch, the headline must show
     // the network-confirmed ALPHA build, not the raw pinned PROD runtime
@@ -280,12 +296,35 @@ async function main() {
     );
     texts = await waitForRows((t) => t.length === 1 && /Confirmed/.test(t[0]), 10000);
     assert.match(texts[0], /Betsson.*MFE.*v8\.2\.5\.4941-reba6fd9.*ALPHA.*Confirmed/s);
-    const bundleOverrideDetail = await panel.locator('.lgt-build-detail').first().innerText();
+    const confirmedDisclosure = panel.locator('.lgt-build-disclosure').first();
+    assert.equal(await confirmedDisclosure.evaluate((node) => node.open), false);
+    assert.equal((await confirmedDisclosure.locator('summary').innerText()).trim(), 'Why Confirmed?');
+    const bundleOverrideDetail = await panel.locator('.lgt-build-detail').first().textContent();
     assert.match(bundleOverrideDetail, /Bundle Override active \(target ALPHA\).*runtime marker still reports the base build v8\.1\.16\.4855-rb8bfa90\/PROD.*network evidence v8\.2\.5\.4941-reba6fd9\/ALPHA reflects what is actually running/s);
     await setBundleOverrideTarget(null);
     console.log('PASS: with an active Bundle Override targeting ALPHA recorded for this tab, the SAME runtime=PROD/network=ALPHA split is recognized as the known pinned-startup-context pattern and renders Confirmed (network values shown) with an explanatory detail instead of Mismatch.');
 
-    console.log('ALL PASS: brand+layer detection engine (Confirmed/Mismatch/Unclassified, multi-row, bleSource exclusion, hybrid-layer flagging, partial-reason detail, Bundle Override-aware classification).');
+    // The long BLE explanation is also a native disclosure. It is compact
+    // by default, works from the keyboard, and deliberately does not store
+    // its open state: a real page reload resets it to collapsed.
+    await panel.locator('.lgt-tab').filter({ hasText: 'BLE Data' }).click();
+    let bleHelp = panel.locator('.lgt-ble-help');
+    await bleHelp.waitFor({ state: 'visible', timeout: 5000 });
+    assert.equal(await bleHelp.evaluate((node) => node.open), false);
+    assert.equal((await bleHelp.locator('summary').innerText()).trim(), 'How BLE Data works & limitations');
+    assert.equal(await bleHelp.locator('li').count(), 5);
+    await bleHelp.locator('summary').focus();
+    await page.keyboard.press('Space');
+    assert.equal(await bleHelp.evaluate((node) => node.open), true);
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 });
+    panel = page.locator('#lgt-panel');
+    await panel.waitFor({ state: 'visible', timeout: 10000 });
+    bleHelp = panel.locator('.lgt-ble-help');
+    await bleHelp.waitFor({ state: 'visible', timeout: 5000 });
+    assert.equal(await bleHelp.evaluate((node) => node.open), false);
+    console.log('PASS: BLE help is collapsed by default, exposes five concise points, opens with Space, and resets to collapsed after page reload.');
+
+    console.log('ALL PASS: brand+layer detection engine and compact native disclosure UX.');
   } finally {
     await context.close();
   }
