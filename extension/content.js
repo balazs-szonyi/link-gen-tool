@@ -1970,6 +1970,9 @@
       '#lgt-panel .lgt-build-disclosure{margin-top:3px}',
       '#lgt-panel .lgt-build-detail{width:100%}',
       '#lgt-panel .lgt-build-alert{width:100%;margin-top:2px;color:#ff9c9c;font-size:10px;font-weight:600}',
+      '#lgt-panel .lgt-alert{margin-top:6px;font-size:10px;font-weight:600}',
+      '#lgt-panel .lgt-alert.warning{color:#e2a03f}',
+      '#lgt-panel .lgt-alert.danger{color:#ff9c9c}',
       '#lgt-local-links-panel{position:fixed;inline-size:min(360px,calc(100vw - 2rem));max-block-size:88dvh;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;background:var(--lgt-bg);color:var(--lgt-fg);',
       'font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;border-radius:10px;',
       'box-shadow:0 8px 30px rgba(0,0,0,.4);z-index:2147483646;padding:14px;box-sizing:border-box}',
@@ -2983,11 +2986,11 @@ const hasKey = await hasLoggedInCustomerKey(brand, bleSource ? 'prod' : environm
     wrap.appendChild(customerWrap);
     wrap.appendChild(el('label', { class: 'lgt-checkbox-row' }, [localLinksChk, ' Local links']));
     wrap.appendChild(localLinksHint);
-    var bleWrap = el('label', { class: 'lgt-checkbox-row' }, [bleChk, ' BLE source (fresh live events on test/qa)']);
+    var bleWrap = el('label', { class: 'lgt-checkbox-row' }, [bleChk, ' BLE source']);
     wrap.appendChild(bleWrap);
-    var forceFreshWrap = el('label', { class: 'lgt-checkbox-row' }, [forceFreshChk, ' Force fresh live-login (skip 30-min cache; logged-in only, when no test customer exists)']);
+    var forceFreshWrap = el('label', { class: 'lgt-checkbox-row' }, [forceFreshChk, ' Force fresh live-login']);
     wrap.appendChild(forceFreshWrap);
-    var forceVisibleWrap = el('label', { class: 'lgt-checkbox-row' }, [forceVisibleChk, ' Show login tab (force visible; overrides the remembered silent default for this brand)']);
+    var forceVisibleWrap = el('label', { class: 'lgt-checkbox-row' }, [forceVisibleChk, ' Show login tab']);
     wrap.appendChild(forceVisibleWrap);
     var srSpoofChk = el('input', { type: 'checkbox' });
     srSpoofChk.checked = srSpoofSettingCache;
@@ -2998,7 +3001,7 @@ const hasKey = await hasLoggedInCustomerKey(brand, bleSource ? 'prod' : environm
       obj[SR_SPOOF_SETTING_KEY] = srSpoofSettingCache;
       chrome.storage.local.set(obj);
     });
-    var srSpoofWrap = el('label', { class: 'lgt-checkbox-row' }, [srSpoofChk, ' Sportradar Statistics fix (auto-applies on any matching page load/reload, no click needed; spoofs Origin/Referer + CORS so licensed widgets render)']);
+    var srSpoofWrap = el('label', { class: 'lgt-checkbox-row' }, [srSpoofChk, ' Sportradar Statistics fix']);
     wrap.appendChild(srSpoofWrap);
     var oddinFixChk = el('input', { type: 'checkbox' });
     oddinFixChk.checked = oddinFixSettingCache;
@@ -3009,8 +3012,17 @@ const hasKey = await hasLoggedInCustomerKey(brand, bleSource ? 'prod' : environm
       obj[ODDIN_FIX_SETTING_KEY] = oddinFixSettingCache;
       chrome.storage.local.set(obj);
     });
-    var oddinFixWrap = el('label', { class: 'lgt-checkbox-row' }, [oddinFixChk, ' Oddin Statistics fix (Firestorm TEST/QA only; retries ALPHA→PROD Referer once; no CORS changes)']);
+    var oddinFixWrap = el('label', { class: 'lgt-checkbox-row' }, [oddinFixChk, ' Oddin Statistics fix']);
     wrap.appendChild(oddinFixWrap);
+    wrap.appendChild(buildDisclosure('What do these options do?', [
+      el('ul', {}, [
+        el('li', {}, ['BLE source: uses fresh live events from BLE on TEST/QA links.']),
+        el('li', {}, ['Force fresh live-login: skips the 30-minute cache for logged-in generation when no test customer exists.']),
+        el('li', {}, ['Show login tab: forces the login flow to stay visible instead of using the remembered silent setting for this brand.']),
+        el('li', {}, ['Sportradar Statistics fix: automatically spoofs Origin/Referer and CORS on matching page loads so licensed widgets can render.']),
+        el('li', {}, ['Oddin Statistics fix: Firestorm TEST/QA only; retries the Referer from ALPHA to PROD once and does not change CORS.'])
+      ])
+    ], 'lgt-generate-help'));
     wrap.appendChild(genBtnRow);
     wrap.appendChild(credResolveArea);
     wrap.appendChild(log);
@@ -3047,7 +3059,7 @@ const hasKey = await hasLoggedInCustomerKey(brand, bleSource ? 'prod' : environm
     var info = el('div', { class: 'lgt-log' }, [
       'Detected: ' + (detected.brand || 'unknown brand') + ' / ' + detected.environment
     ]);
-    var status = el('div', { class: 'lgt-log' }, ['Passive capture running (network-level - always on, independent of this panel). Log in normally, or use Auto-login below.']);
+    var status = el('div', { class: 'lgt-log' }, ['Passive capture is running. Log in normally or use Auto-login.']);
     var result = el('div', { class: 'lgt-result', style: 'display:none' });
     var copyBtn = el('button', { class: 'secondary', style: 'display:none' }, ['Copy stc/ctx (paste-ready)']);
     var builtForKey = null; // 'stc|ctx' already rendered, so a repeat
@@ -3218,6 +3230,12 @@ const ok = await attemptAutoLogin(detected.brand, cred.username, cred.password, 
     wrap.appendChild(autoBtn);
     wrap.appendChild(pickerArea);
     wrap.appendChild(status);
+    wrap.appendChild(buildDisclosure('How Live Login capture works', [
+      el('ul', {}, [
+        el('li', {}, ['Network-level passive capture stays active independently of whether this panel is open.']),
+        el('li', {}, ['Once both session headers are captured, Desktop, Mobile, and Brand page links are built automatically.'])
+      ])
+    ], 'lgt-live-login-help'));
     wrap.appendChild(copyBtn);
     wrap.appendChild(result);
     return wrap;
@@ -3229,7 +3247,7 @@ const ok = await attemptAutoLogin(detected.brand, cred.username, cred.password, 
     var labelIn = el('input', { type: 'text', placeholder: 'Label (e.g. "shared QA user")' });
     var userIn = el('input', { type: 'text', placeholder: 'Username' });
     var passIn = el('input', { type: 'password', placeholder: 'Password' });
-    var newBrandMatrixLabel = el('label', {}, ['Applies to brands (optional - check all that this login works for)']);
+    var newBrandMatrixLabel = el('label', {}, ['Applies to brands (optional)']);
     var newBrandMatrix = buildBrandMatrix([]);
 
     function render(creds) {
@@ -3477,7 +3495,11 @@ const ok = await attemptAutoLogin(detected.brand, cred.username, cred.password, 
     // source computeDetectionRows itself uses) is what makes that gap
     // visible instead of silently trusting the URL-based label.
     var lastDetectedRuntimeEnv = null;
-    var hostRealityNote = el('div', { class: 'lgt-hint', style: 'color:#b45309;display:none' }, ['']);
+    var hostRealityDetail = el('div', {}, ['']);
+    var hostRealityNote = el('div', { style: 'display:none' }, [
+      el('div', { class: 'lgt-alert warning' }, ['\u26a0 Page runtime does not match the URL environment.']),
+      buildDisclosure('Show environment mismatch details', [hostRealityDetail], 'lgt-host-reality-details')
+    ]);
     var targetEnvBadge = el('div', { class: 'lgt-hint' }, ['']);
     function refreshTargetEnv(resetToPageEnvironment) {
       var crossLayer = modeSel.value !== 'standard';
@@ -3528,13 +3550,15 @@ const ok = await attemptAutoLogin(detected.brand, cred.username, cred.password, 
     // page's own entry script and nothing ever mounts). Rather than leave
     // that half-broken, the tool now detects this case up front and warns
     // instead of letting the user hit a blank page.
-    var sandboxWarning = el('div', { class: 'lgt-hint', style: 'color:#e2a03f;margin-top:6px;display:none' }, [
-      '\u26a0 This tab looks like one of the tool\u2019s own standalone sandbox ' +
-      'links, not a real embedded brand page. Bundle Override cannot work ' +
-      'here - the sandbox link is a single monolithic app bundle, not a ' +
-      'separately-overridable widget, and overriding it produces a blank ' +
-      'page. Open the brand\u2019s real domain instead (see the "Brand page" ' +
-      'link on the Generate tab) and apply the override there.'
+    var sandboxWarning = el('div', { style: 'display:none' }, [
+      el('div', { class: 'lgt-alert warning' }, ['\u26a0 Bundle Override is unavailable on this standalone sandbox page.']),
+      buildDisclosure('Why is it unavailable?', [
+        el('ul', {}, [
+          el('li', {}, ['The sandbox uses one monolithic app bundle instead of a separately overridable sportsbook widget.']),
+          el('li', {}, ['Redirecting that entry bundle produces a blank page.']),
+          el('li', {}, ['Open the real domain from Generate\u2019s Brand page link, then apply the override there.'])
+        ])
+      ], 'lgt-sandbox-help')
     ]);
     var applyDisabledBySandboxGuard = !!detected.isSandboxHost;
     if (applyDisabledBySandboxGuard) sandboxWarning.style.display = '';
@@ -3580,7 +3604,7 @@ const ok = await attemptAutoLogin(detected.brand, cred.username, cred.password, 
         if (diverging.length) {
           var seen = {};
           var envs = diverging.map(function (row) { return row.runtimeEnvironment.toUpperCase(); }).filter(function (e) { return seen[e] ? false : (seen[e] = true); });
-          hostRealityNote.textContent = '\u26A0 Host/Backend above are labeled ' + hostEnv.toUpperCase() + ' from the URL only - the page\u2019s own runtime marker actually reports ' +
+          hostRealityDetail.textContent = 'Host/Backend are labeled ' + hostEnv.toUpperCase() + ' from the URL only, while the page\u2019s runtime marker reports ' +
             envs.join('/') + ' on this browser/network right now (e.g. no true ' + hostEnv.toUpperCase() + ' edge access from here). Hybrid mode never touches backend/API requests, only the ' +
             'bundle\u2019s .js/config.json files, so applying an override now produces a REAL "' + envs.join('/') + ' native content + your chosen target bundle" combination, ' +
             'not literally "' + hostEnv.toUpperCase() + ' + target" - the network-level redirect itself is unaffected and still correctly targets what you pick below.';
@@ -3677,20 +3701,15 @@ const ok = await attemptAutoLogin(detected.brand, cred.username, cred.password, 
     wrap.appendChild(sandboxWarning);
     wrap.appendChild(el('div', { style: 'display:flex;gap:6px;margin-top:6px' }, [applyBtn, disableBtn]));
     wrap.appendChild(status);
-    wrap.appendChild(el('div', { class: 'lgt-hint', style: 'margin-top:8px' }, [
-      'Standard preserves the existing same-layer DNR behavior. Hybrid runs directly in this normal Chrome tab; no CLI, token, Playwright, or separate profile is required. Full-runtime stays disabled until target-context bootstrap is available. ' +
-      'Pins this brand\u2019s sportsbook bundle (main-*.js and other listed entry files) on THIS tab ' +
-      'to the selected environment. It defaults to the page\u2019s own environment, ' +
-      'or you can deliberately choose the other environment in the same layer ' +
-      '(QA\u2194TEST or ALPHA\u2194PROD). Mixing layers ' +
-      'loads a broken build with no error. Only works on a page where the ' +
-      'sportsbook widget is embedded in a real brand page (real brand ' +
-      'domain, or an iframe test host embedding it the same way) - NOT on ' +
-      'the tool\u2019s own standalone "Generate" tab sandbox links (see ' +
-      'warning above if detected). Apply automatically reloads the page after ' +
-      'the redirect rules are installed. Avoid running the standalone "Sportsbook Bundle ' +
-      'Override Tool" extension at the same time in the same tab.'
-    ]));
+    wrap.appendChild(buildDisclosure('How Bundle Override works & limitations', [
+      el('ul', {}, [
+        el('li', {}, ['Standard pins sportsbook entry bundles to this page\u2019s environment or its same-layer partner (QA\u2194TEST or ALPHA\u2194PROD).']),
+        el('li', {}, ['Hybrid combines the selected bundle with the page backend directly in this Chrome tab; no CLI, token, Playwright, or separate profile is needed.']),
+        el('li', {}, ['Full-runtime remains unavailable until target-context bootstrap is supported. Mixing layers outside Hybrid can silently load a broken build.']),
+        el('li', {}, ['Works only where a real brand page or equivalent iframe host embeds the sportsbook widget, not on standalone Generate sandbox links.']),
+        el('li', {}, ['Apply reloads automatically after installing redirects. Do not run the standalone Sportsbook Bundle Override Tool on the same tab at the same time.'])
+      ])
+    ], 'lgt-bundle-help'));
 
     chrome.storage.local.get([BUNDLE_STATE_KEY], function (res) {
       var saved = res && res[BUNDLE_STATE_KEY];
@@ -4027,9 +4046,13 @@ const result = await fetchFreshBleContext(brand, device, loggedInChk.checked, ''
     wrap.appendChild(futureLabel);
     wrap.appendChild(el('div', { class: 'lgt-row' }, [applyBtn, stopBtn]));
     wrap.appendChild(status);
-    wrap.appendChild(el('div', { class: 'lgt-hint', style: 'margin-top:8px' }, [
-      'Replaces BSS bonus responses and converts the fixture to the sportsbook BonusWidget format used by globalbonuses/bonuses GET fetch/XHR endpoints on this tab and origin. Other endpoints and non-matching JSON schemas pass through unchanged. This is a local browser override; it never creates or assigns a real bonus.'
-    ]));
+    wrap.appendChild(buildDisclosure('How Bonus Mock works & limitations', [
+      el('ul', {}, [
+        el('li', {}, ['Replaces matching BSS bonus responses on this tab and origin, converting the fixture to the sportsbook BonusWidget format.']),
+        el('li', {}, ['Only globalbonuses/bonuses GET fetch/XHR responses with the expected JSON shape are changed; everything else passes through.']),
+        el('li', {}, ['This is a local browser override. It never creates or assigns a real bonus.'])
+      ])
+    ], 'lgt-bonus-help'));
 
     pollWhileExtensionValid(refreshStatus, 1000);
     refreshStatus();
@@ -4185,9 +4208,15 @@ const result = await fetchFreshBleContext(brand, device, loggedInChk.checked, ''
     wrap.appendChild(oddsInput);
     wrap.appendChild(el('div', { class: 'lgt-row' }, [applyBtn, stopBtn]));
     wrap.appendChild(status);
-    wrap.appendChild(el('div', { class: 'lgt-hint', style: 'margin-top:8px' }, [
-      'Local browser-side override only - it does not modify the backend/settlement state, and never creates or voids a real coupon. It marks the selected leg(s) of the chosen REAL coupon as Void in the coupon-history GET response on this tab/origin, optionally recalculates totalOdds/payout, and deliberately leaves boostedOdds/bonusBetType unchanged - reproducing the stale Price Boost badge bug seen after a real trading-side void. IMPORTANT: after Apply, do NOT do a full browser reload (F5) while on a coupon-detail deep link (a URL containing couponDetail=...) - this QA app has a known race that can falsely redirect you to a logged-out home page. Instead, go back to the plain Bet History list (no couponDetail param) and switch between the Open/Settled tabs there, or re-open the coupon detail from that list - either triggers a fresh in-app request without a full page reload.'
-    ]));
+    wrap.appendChild(el('div', { class: 'lgt-alert danger' }, ['\u26a0 After Apply, do not press F5 on a coupon-detail deep link.']));
+    wrap.appendChild(buildDisclosure('How Bet Void works & safe navigation', [
+      el('ul', {}, [
+        el('li', {}, ['This local browser override never changes backend or settlement state and never creates or voids a real coupon.']),
+        el('li', {}, ['It marks selected legs of a real coupon as Void in coupon-history responses, can recalculate totalOdds/payout, and deliberately keeps boostedOdds/bonusBetType unchanged to reproduce the stale Price Boost badge bug.']),
+        el('li', {}, ['A full reload on a couponDetail URL can trigger a known QA race and falsely redirect to a logged-out home page.']),
+        el('li', {}, ['Return to the plain Bet History list and switch Open/Settled, or reopen the coupon from that list, to trigger a safe fresh in-app request.'])
+      ])
+    ], 'lgt-bet-void-help'));
 
     pollWhileExtensionValid(refreshStatus, 1000);
     refreshStatus();
