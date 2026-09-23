@@ -1471,11 +1471,10 @@ handleMessage('lgt-bundle-start', async function (msg, sender) {
       return { ok: false, error: 'cross-layer bundle override requires an authorized Cross-Layer Lab session (' + currentEnv + ' -> ' + targetEnv + ')' };
     }
   }
-  // Keep the requested URL as the source for a narrow navigation scope.
-  // Real-brand Sportsbook routes share their /sportsbook prefix so header
-  // menu navigation and query normalization survive; generated playground
-  // links retain only their exact origin+pathname. Leaving that scope still
-  // triggers stale cleanup in webNavigation.onBeforeNavigate above.
+  // Validate the requested reload URL, then keep the resulting override for
+  // the lifetime of this tab. Site-level navigation (including Horse Racing,
+  // Casino, and a later return to Sportsbook) must not silently disable an
+  // override; only the explicit Disable action or closing the tab does that.
   var expectedUrl = sender.tab.url || null;
   if (sender.tab.url) {
     if (msg.expectedUrl) {

@@ -88,15 +88,19 @@ test('URL and origin scopes retain reloads, remove only their own departing rule
   await dnr.navigate(1, 'https://www.test.betsson.co/'); assert.equal(mock.state.rules.length, 0);
 });
 
-test('sportsbook path-prefix scope survives menu routes and query loss, then clears outside sportsbook', async () => {
+test('tab scope survives every navigation until explicit Stop or tab removal', async () => {
   const mock = makeChrome(); const { dnr } = manager(mock);
-  const scope = { kind: 'path-prefix', origin: 'https://www.test.betsson.com', pathPrefix: '/en/sportsbook' };
+  const scope = { kind: 'tab' };
   await dnr.apply('bundle', 1, { scope }, build(1));
   await dnr.navigate(1, 'https://www.test.betsson.com/en/sportsbook/live/tennis');
   assert.equal(mock.state.rules.length, 1);
-  await dnr.navigate(1, 'https://www.test.betsson.com/en/sportsbook');
+  await dnr.navigate(1, 'https://www.test.betsson.com/en/horse-racing');
   assert.equal(mock.state.rules.length, 1);
   await dnr.navigate(1, 'https://www.test.betsson.com/en/casino');
+  assert.equal(mock.state.rules.length, 1);
+  await dnr.navigate(1, 'about:blank');
+  assert.equal(mock.state.rules.length, 1);
+  await dnr.stop('bundle', 1);
   assert.equal(mock.state.rules.length, 0);
 });
 

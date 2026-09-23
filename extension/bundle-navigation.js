@@ -1,4 +1,4 @@
-/* Shared route scoping for bundle overrides and diagnostic URL parameters. */
+/* Shared tab-lifetime scoping for bundle overrides and diagnostic URL parameters. */
 (function (root, factory) {
   var api = factory();
   if (typeof module === 'object' && module.exports) module.exports = api;
@@ -12,21 +12,16 @@
   }
 
   function scopeForUrl(value) {
-    var url = new URL(value);
-    var segments = normalizedPath(url.pathname).split('/').filter(Boolean);
-    var sportsbookIndex = segments.findIndex(function (segment) { return segment.toLowerCase() === 'sportsbook'; });
-    if (sportsbookIndex !== -1) {
-      return {
-        kind: 'path-prefix',
-        origin: url.origin,
-        pathPrefix: '/' + segments.slice(0, sportsbookIndex + 1).join('/')
-      };
-    }
-    return { kind: 'page', origin: url.origin, pathname: normalizedPath(url.pathname) };
+    // Validate the source URL, but intentionally do not bind the override to
+    // it. Once enabled, the user owns the lifecycle explicitly through the
+    // Disable button (or by closing the tab), not through site routing.
+    new URL(value);
+    return { kind: 'tab' };
   }
 
   function matches(scope, value) {
     try {
+      if (scope && scope.kind === 'tab') return true;
       var url = new URL(value);
       var pathname = normalizedPath(url.pathname);
       if (!scope || scope.origin !== url.origin) return false;

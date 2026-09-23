@@ -25,18 +25,21 @@ async function main() {
     await page.locator('#lgt-panel').waitFor({ state: 'attached', timeout: 10000 });
     await page.evaluate(expectedUrl => {
       sessionStorage.setItem('__lgtBundleDiagnosticsV1', JSON.stringify({ expectedUrl }));
-      history.pushState({}, '', '/en/sportsbook');
+      history.pushState({}, '', '/en/horse-racing');
     }, initial);
-    await page.waitForURL(url => url.pathname === '/en/sportsbook' &&
+    await page.waitForURL(url => url.pathname === '/en/horse-racing' &&
       url.searchParams.get('exposeObgState') === 'true' &&
       url.searchParams.get('exposeObgRt') === 'true' &&
       url.searchParams.get('sealStore') === 'false');
 
-    await page.evaluate(() => history.pushState({}, '', '/en/casino'));
-    await page.waitForURL(url => url.pathname === '/en/casino');
-    await page.waitForFunction(() => sessionStorage.getItem('__lgtBundleDiagnosticsV1') === null);
-    if (new URL(page.url()).search) throw new Error('Diagnostics leaked outside the sportsbook route family: ' + page.url());
-    console.log('PASS: SPA sportsbook navigation preserves diagnostics and leaving sportsbook clears the marker.');
+    // A full document navigation without the query must restore it as well.
+    await page.goto('https://www.test.betsson.com/en/sportsbook', { waitUntil: 'domcontentloaded' });
+    await page.waitForURL(url => url.pathname === '/en/sportsbook' &&
+      url.searchParams.get('exposeObgState') === 'true' &&
+      url.searchParams.get('exposeObgRt') === 'true' &&
+      url.searchParams.get('sealStore') === 'false');
+    await page.waitForFunction(() => sessionStorage.getItem('__lgtBundleDiagnosticsV1') !== null);
+    console.log('PASS: SPA and full same-tab navigation preserve bundle diagnostics across Horse Racing and Sportsbook.');
   } finally {
     await context.close();
   }
