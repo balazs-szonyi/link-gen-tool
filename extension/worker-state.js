@@ -101,6 +101,18 @@
       if (scope?.kind === 'url') return scope.value === url;
       if (scope?.kind === 'origin') return scope.value === new URL(url).origin;
       if (scope?.kind === 'hostname') return scope.value === new URL(url).hostname;
+      if (scope?.kind === 'page') {
+        const current = new URL(url);
+        const normalize = value => value && value.length > 1 ? value.replace(/\/+$/, '') : (value || '/');
+        return scope.origin === current.origin && normalize(scope.pathname) === normalize(current.pathname);
+      }
+      if (scope?.kind === 'path-prefix') {
+        const current = new URL(url);
+        const normalize = value => value && value.length > 1 ? value.replace(/\/+$/, '') : (value || '/');
+        const prefix = normalize(scope.pathPrefix);
+        const pathname = normalize(current.pathname);
+        return scope.origin === current.origin && (pathname === prefix || pathname.startsWith(prefix + '/'));
+      }
     } catch (_) { /* malformed URL fails closed */ }
     return false;
   }
