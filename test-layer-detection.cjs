@@ -304,6 +304,23 @@ async function main() {
     await setBundleOverrideTarget(null);
     console.log('PASS: with an active Bundle Override targeting ALPHA recorded for this tab, the SAME runtime=PROD/network=ALPHA split is recognized as the known pinned-startup-context pattern and renders Confirmed (network values shown) with an explanatory detail instead of Mismatch.');
 
+    // Bundle has three separate explanation contexts: the general help,
+    // the standalone-sandbox limitation, and a live URL/runtime mismatch.
+    // Each must stay compact while its short actionable warning remains
+    // visible. The seeded PROD runtime on this QA URL triggers the latter.
+    await panel.locator('.lgt-tab').filter({ hasText: 'Bundle' }).click();
+    const bundleHelp = panel.locator('.lgt-bundle-help');
+    assert.equal(await bundleHelp.evaluate((node) => node.open), false);
+    assert.equal((await bundleHelp.locator('summary').innerText()).trim(), 'How Bundle Override works & limitations');
+    const sandboxHelp = panel.locator('.lgt-sandbox-help');
+    assert.equal(await sandboxHelp.evaluate((node) => node.open), false);
+    assert.equal((await sandboxHelp.locator('summary').innerText()).trim(), 'Why is it unavailable?');
+    const hostRealityHelp = panel.locator('.lgt-host-reality-details');
+    await hostRealityHelp.waitFor({ state: 'visible', timeout: 7000 });
+    assert.equal(await hostRealityHelp.evaluate((node) => node.open), false);
+    assert.match(await panel.locator('#lgt-body-bundle').innerText(), /Page runtime does not match the URL environment/);
+    console.log('PASS: Bundle general, sandbox, and live environment explanations are collapsed while concise warnings remain visible.');
+
     // The long BLE explanation is also a native disclosure. It is compact
     // by default, works from the keyboard, and deliberately does not store
     // its open state: a real page reload resets it to collapsed.
@@ -324,7 +341,28 @@ async function main() {
     assert.equal(await bleHelp.evaluate((node) => node.open), false);
     console.log('PASS: BLE help is collapsed by default, exposes five concise points, opens with Space, and resets to collapsed after page reload.');
 
-    console.log('ALL PASS: brand+layer detection engine and compact native disclosure UX.');
+    // Audit the other tabs that contain persistent explanatory copy. All
+    // help starts collapsed, while controls retain short scan-friendly
+    // labels and Bet Void keeps its safety-critical warning visible.
+    await panel.locator('.lgt-tab').filter({ hasText: 'Generate' }).click();
+    const generateHelp = panel.locator('.lgt-generate-help');
+    assert.equal(await generateHelp.evaluate((node) => node.open), false);
+    const generateText = await panel.locator('#lgt-body-generate').innerText();
+    assert.match(generateText, /BLE source\s+Force fresh live-login\s+Show login tab/s);
+    assert.doesNotMatch(generateText, /skip 30-min cache|spoofs Origin\/Referer/);
+
+    await panel.locator('.lgt-tab').filter({ hasText: 'Live Login' }).click();
+    assert.equal(await panel.locator('.lgt-live-login-help').evaluate((node) => node.open), false);
+
+    await panel.locator('.lgt-tab').filter({ hasText: 'Bonus Mock' }).click();
+    assert.equal(await panel.locator('.lgt-bonus-help').evaluate((node) => node.open), false);
+
+    await panel.locator('.lgt-tab').filter({ hasText: 'Bet Void' }).click();
+    assert.equal(await panel.locator('.lgt-bet-void-help').evaluate((node) => node.open), false);
+    assert.match(await panel.locator('#lgt-body-bet-void').innerText(), /do not press F5 on a coupon-detail deep link/i);
+    console.log('PASS: Generate, Live Login, Bonus Mock, and Bet Void use compact collapsed help; the critical Bet Void F5 warning stays visible.');
+
+    console.log('ALL PASS: brand+layer detection engine and full-tool compact native disclosure UX.');
   } finally {
     await context.close();
   }
