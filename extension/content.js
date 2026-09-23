@@ -3747,7 +3747,7 @@ const ok = await attemptAutoLogin(detected.brand, cred.username, cred.password, 
         // more useful for the tester than replacing it with a generic
         // message on every 3s poll tick.
         if (!/^Active/.test(status.textContent)) {
-          status.textContent = 'Active - override is active on this tab (reload if you just applied it).';
+          status.textContent = 'Active - override is active on this tab.';
         }
       });
     }
@@ -3781,7 +3781,13 @@ const result = await fetchFreshBleContext(brand, device, loggedInChk.checked, ''
               location.replace(bootstrapUrl);
               return;
             }
-            status.textContent = 'Active - ' + device + ' context ' + result.stc + ' -> ' + alphaHost + '. Reload the page if it was already loaded.';
+            status.textContent = 'Active - ' + device + ' context ' + result.stc + ' -> ' + alphaHost + '. Reloading the page...';
+            // The DNR rules are fully installed before the background
+            // responds, so this reload's very first sportsbook requests
+            // are already redirected. Panel-open and active-tab state live
+            // in sessionStorage, while the override lives in session DNR;
+            // both therefore survive this same-tab reload.
+            location.reload();
           });
 
 } catch (err) {
@@ -3825,7 +3831,8 @@ const result = await fetchFreshBleContext(brand, device, loggedInChk.checked, ''
       'continues on the equivalent working PROD shell while keeping ALPHA ' +
       'BLE data active. Since the live-event list itself gets ' +
       'redirected too, you don\u2019t need to manually navigate with a ' +
-      'borrowed eventId - just Apply, reload, and browse the live section ' +
+      'borrowed eventId - Apply reloads the page automatically, then you ' +
+      'can browse the live section ' +
       'normally. Does NOT restore Match/Visual/Statistics tabs (those use a ' +
       'separate realtime channel, a known, unrelated gap - see README).'
     ]));
