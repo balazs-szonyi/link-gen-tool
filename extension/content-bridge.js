@@ -4,7 +4,13 @@
 (function () {
   'use strict';
   if (globalThis.__lgtToggleQueue == null) globalThis.__lgtToggleQueue = 0;
-  chrome.runtime.onMessage.addListener(function (message) {
-    if (message?.type === 'lgt-toggle-panel') globalThis.__lgtToggleQueue += 1;
+  chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
+    if (message?.type === 'lgt-toggle-panel') {
+      globalThis.__lgtToggleQueue += 1;
+      sendResponse({ ok: true });
+    } else if (message?.type === 'lgt-hide-panel') {
+      globalThis.__lgtToggleQueue = 0;
+      sendResponse({ ok: true });
+    }
   });
 })();
