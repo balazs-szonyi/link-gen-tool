@@ -322,6 +322,22 @@
     return 'https://www.' + prefix + domain;
   }
 
+  function customerLanguageCode(customerKey) {
+    var match = /^logged-(?:in|out)-([a-z]{2})(?:-|$)/i.exec(customerKey || '');
+    return match ? match[1].toLowerCase() : '';
+  }
+
+  // Result links should open the actual Sportsbook section, not the brand
+  // homepage. Preserve the generated customer's locale whenever its key
+  // exposes one; special live-capture customers without a standard key use
+  // the brand's own locale redirect from the unprefixed /sportsbook route.
+  function realSportsbookUrl(brandKey, environment, customerKey) {
+    var origin = realBrandOrigin(brandKey, environment);
+    if (!origin) return null;
+    var languageCode = customerLanguageCode(customerKey);
+    return origin + (languageCode ? '/' + languageCode : '') + '/sportsbook';
+  }
+
 
   // ---------------------------------------------------------------------
   // Settings - small persisted extension-wide toggles, chrome.storage.local
@@ -2675,7 +2691,7 @@
           log.textContent = 'Customer: ' + links.customerLabel;
           setRowContainer(desktopRowContainer, 'Desktop', links.desktop, brand, environment);
           setRowContainer(mobileRowContainer, 'Mobile', links.mobile, brand, environment);
-          setRowContainer(brandRowContainer, 'Brand page', realBrandOrigin(brand, environment), brand, environment);
+          setRowContainer(brandRowContainer, 'Brand page', realSportsbookUrl(brand, environment, links.customerKey), brand, environment);
           localLinksPanel.render(links.localLinks, brand, environment);
           if (localLinksChk.checked) localLinksPanel.show();
           setBtnBusy(false);
@@ -2727,7 +2743,7 @@ const links = await generateLink({ brand: brand, environment: environment, logge
               var m = spliceContext(links.mobile, stcMobile, ctxMobile);
               setRowContainer(mobileRowContainer, 'Mobile (live-login' + suffix + ')', m, brand, environment);
             }
-            setRowContainer(brandRowContainer, 'Brand page', realBrandOrigin(brand, environment), brand, environment);
+            setRowContainer(brandRowContainer, 'Brand page', realSportsbookUrl(brand, environment, links.customerKey), brand, environment);
             localLinksPanel.render(links.localLinks, brand, environment);
             if (localLinksChk.checked) localLinksPanel.show();
             if (bleSourceWanted) {

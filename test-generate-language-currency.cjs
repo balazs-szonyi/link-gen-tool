@@ -175,6 +175,12 @@ async function main() {
     await panel.getByRole('button', { name: 'Generate', exact: true }).click();
     await panel.getByText(/Turkish \(TR\).*New Turkish Lira \(TRY\).*Logged Out/).waitFor();
     assert(requestedContextKeys.includes('logged-out-tr-try-tgc'), 'Generate did not request the exact TR/TRY context key');
+    const bets10BrandPage = panel.locator('.lgt-link-row').filter({ hasText: 'Brand page' });
+    assert.strictEqual(
+      await bets10BrandPage.locator('.lgt-link-url').textContent(),
+      'https://www.test.bets10.com/tr/sportsbook',
+      'Brand page must open the selected locale\'s Sportsbook section instead of the brand homepage'
+    );
     if (process.env.LGT_SCREENSHOT) {
       await panel.screenshot({ path: process.env.LGT_SCREENSHOT });
       console.log(`Screenshot: ${process.env.LGT_SCREENSHOT}`);
