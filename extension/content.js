@@ -3350,8 +3350,12 @@ const hasKey = await hasLoggedInCustomerKey(brand, bleSource ? 'prod' : environm
         }
       }, ['Copy']));
       row.appendChild(el('button', {
-        class: 'secondary', onclick: function () {
-          window.open(link, '_blank');
+        class: 'secondary', onclick: async function () {
+          try {
+            await sendExtensionMessage({ type: 'lgt-open-link', url: link });
+          } catch (error) {
+            console.error('[link-gen-tool] Failed to open generated link:', error);
+          }
         }
       }, ['Open']));
     } else {

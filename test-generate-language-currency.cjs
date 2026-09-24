@@ -188,6 +188,14 @@ async function main() {
 
     const bleForBets10 = panel.getByText('BLE source', { exact: true }).locator('input');
     await bleForBets10.check();
+    await panel.locator('.lgt-context-options').waitFor({ state: 'visible' });
+    await panel.locator('.lgt-context-options').evaluate((node) => new Promise((resolve) => {
+      if (node.getAttribute('aria-busy') === 'false') { resolve(); return; }
+      const observer = new MutationObserver(() => {
+        if (node.getAttribute('aria-busy') === 'false') { observer.disconnect(); resolve(); }
+      });
+      observer.observe(node, { attributes: true, attributeFilter: ['aria-busy'] });
+    }));
     await panel.locator('#lgt-gen-language').selectOption('tr');
     await panel.locator('#lgt-gen-currency').selectOption('TRY');
     await panel.getByRole('button', { name: 'Generate', exact: true }).click();
@@ -227,7 +235,36 @@ async function main() {
     await panel.getByText(/Swedish \(SV\).*Swedish Krona \(SEK\).*Logged Out/).waitFor();
     assert(requestedContextKeys.includes('logged-out-sv-sek-ksa-beta'), 'Customer profile suffix was not preserved');
 
-    console.log('PASS: logged-out Language/Currency controls, context generation, persistence and Sandbox fallback work.');
+    // Exercise the actual Open action, not only the displayed URL. Keep it
+    // last because opening an active tab deliberately changes Chrome's
+    // active-tab state, which is outside the locale-generation assertions.
+    await panel.locator('#lgt-gen-brand').selectOption('arcticbet');
+    await panel.locator('.lgt-context-options[aria-busy="false"]').waitFor();
+    const finalBle = panel.getByText('BLE source', { exact: true }).locator('input');
+    if (await finalBle.isChecked()) {
+      await finalBle.uncheck();
+      await panel.locator('.lgt-context-options[aria-busy="false"]').waitFor();
+    }
+    await panel.locator('#lgt-gen-language').waitFor({ state: 'visible' });
+    await panel.locator('#lgt-gen-language').selectOption('en');
+    await panel.locator('#lgt-gen-currency').selectOption('EUR');
+    await panel.getByRole('button', { name: 'Generate', exact: true }).click();
+    const finalBrandPage = panel.locator('.lgt-link-row').filter({ hasText: 'Brand page' });
+    await context.route('https://www.test.arcticbet.com/**', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'text/html', body: '<!doctype html><title>ArcticBet Sportsbook target</title>' });
+    });
+    const openedBrandPagePromise = context.waitForEvent('page');
+    await finalBrandPage.getByRole('button', { name: 'Open', exact: true }).click();
+    const openedBrandPage = await openedBrandPagePromise;
+    await openedBrandPage.waitForLoadState('domcontentloaded');
+    assert.strictEqual(
+      openedBrandPage.url(),
+      'https://www.test.arcticbet.com/en/sportsbook',
+      'Open must navigate to the exact Sportsbook URL displayed in the Brand page row'
+    );
+    await openedBrandPage.close();
+
+    console.log('PASS: locale context generation, persistence, Sandbox fallback, and exact Brand page Open navigation work.');
   } finally {
     await context.close();
   }

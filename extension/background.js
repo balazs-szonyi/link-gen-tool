@@ -2194,6 +2194,18 @@ handleMessage('lgt-detection-rows', async function (msg, sender) {
   return { ok: true, rows: computeDetectionRows(snapshot, tabId) };
 });
 
+// Open generated result URLs from the extension process rather than the
+// host page's window.open implementation. This keeps the visible/copy/open
+// URL as one exact value even on brand shells that intercept page-level
+// navigation helpers.
+handleMessage('lgt-open-link', async function (msg) {
+  if (!msg.url) throw new Error('missing url');
+  const url = new URL(msg.url);
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error('unsupported url protocol');
+  const tab = await chromeCall(chrome.tabs, 'create', { url: url.href, active: true });
+  return { ok: true, tabId: tab.id, url: url.href };
+});
+
 // Opens a NEW tab for the given generated link with Sportradar spoofing
 // already active before the page starts loading (unlike "Embed here",
 // this acts on a brand-new tab it creates itself, not the current one -
