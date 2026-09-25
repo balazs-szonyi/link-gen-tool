@@ -630,6 +630,7 @@ var BRAND_DOMAINS = {
   betsolid: 'betsolid.com',
   betsson: 'betsson.com',
   betssonco: 'betsson.co',
+  betssonpe: 'betsson.pe',
   betssonarcb: 'betsson.bet.ar',
   betssonbr: 'betsson.bet.br',
   betssondk: 'betsson.dk',
@@ -1708,6 +1709,14 @@ var BUNDLE_OBSERVE_SANDBOX_RE = /\/assets\/(main|chunk|polyfills|runtime|vendor)
 // d-cf.<env>.sbplayground1.net host, where the hostname carries no brand.
 var BUNDLE_OBSERVE_SANDBOX_CONFIG_RE = /\/dist\/([a-z]+)\/config\/([0-9a-fA-F-]{36})\/([0-9a-fA-F-]{36})\/([^/]+)\/config\.json(?:\?|$)/i;
 
+// A Bundle Override can intentionally serve a config from a different
+// environment through the page's own host (for example, /dist/qa/config on
+// test.betsson.gr). In that case the path identifies the artifact that is
+// actually running; the hostname only identifies the page environment.
+function sandboxConfigArtifactEnvironment(configMatch, hostEnv) {
+  return String((configMatch && configMatch[1]) || hostEnv || '').trim().toLowerCase();
+}
+
 // Same label-scan approach as detectBrandAndEnvFromPlaygroundHost() above,
 // but not restricted to known playground suffixes - the bundle CDN host
 // can be a brand-owned domain (e.g. d-cf.btsplayground.net) that isn't in
@@ -1727,27 +1736,6 @@ function genericSandboxInfoFromHostname(hostname) {
   return { brand: null, environment: envLabelFromHostname(hostname) };
 }
 
-// Resolve the environment of a dist-shape bundle from the artifact version
-// recorded in the URL, not from the hostname serving it. A real ALPHA brand
-// page can legitimately proxy a `/dist/prod/...` artifact through its own
-// `www.alpha.*` host; hostname-only detection therefore labels a PROD build
-// as ALPHA. Comparing the brand/device/version against both indexers in the
-// same layer identifies the build itself. Multiple matches are retained as
-// an honest "shared build" result instead of guessing.
-async function resolveDistBundleEnvironments(hostEnv, brandId, device, version) {
-  var environments = bundleEnvironmentsInLayer(hostEnv);
-  const matches=await Promise.all(environments.map(async function(environment_1) {
-		try {
-			const indexerData=await fetchBundleIndexer(environment_1);
-			var deviceEntry=indexerData&&indexerData[brandId]&&indexerData[brandId][device];
-			return deviceEntry&&String(deviceEntry.version)===String(version)? environment_1:null;
-		} catch {
-			return null;
-		}
-	}));
-	return matches.filter(function(environment_2) { return !!environment_2; });
-}
-
 // Brand key -> GUID map, needed ONLY to restrict the reverse-lookup below
 // to the one relevant brand (see resolveSandboxBundleInfo comment) - a
 // duplicate of content.js's own `BRANDS` map (kept in sync manually; small
@@ -1762,6 +1750,7 @@ var BUNDLE_BRAND_GUIDS = {
   betsmith: 'abbae10d-550b-4bb1-8f61-183b76f4e06f',
   betsolid: '092219ad-a482-428a-b1a0-47fa005d339d',
   betsson: '6a6d80b9-16ac-4387-a413-244d93a74deb',
+  betssonpe: '6a6d80b9-16ac-4387-a413-244d93a74deb',
   betssonarcb: '46df28af-e0f4-48d6-a3b3-3183b2586c44',
   betssonbr: '599869ba-7757-41ab-9b74-887dbf5c3705',
   betssondk: 'ce5be96a-8e97-4d71-8b04-b4a0dd30cfaa',
@@ -1903,29 +1892,25 @@ async function observeBuildRequest(details) {
   if (isBleExcludedRequest(details.url, hostEnv)) return;
   const match = BUNDLE_OBSERVE_RE.exec(details.url);
   if (match) {
+    const artifactEnv = normalizeEnv(match[1]);
     const observation = {
       layer: 'mfe', brandId: match[2], brand: bundleBrandKeyFromGuid(match[2]), version: match[3], device: match[4],
-      host: hostname, hostEnv, artifactEnv: null, artifactEnvs: [], artifactResolutionPending: true, url: details.url, ts: Date.now()
+      host: hostname, hostEnv, artifactEnv, artifactEnvs: artifactEnv ? [artifactEnv] : [],
+      artifactResolutionPending: false, url: details.url, ts: Date.now()
     };
-    const token = await detection.observe(details, 'mfe', observation);
-    let artifactEnvs = [];
-    try { artifactEnvs = await resolveDistBundleEnvironments(hostEnv, observation.brandId, observation.device, observation.version); }
-    catch (error) { console.warn('[link-gen-tool] artifact lookup failed:', error); }
-    await detection.enrich(details, 'mfe', token, current => {
-      current.artifactEnvs = artifactEnvs;
-      current.artifactEnv = artifactEnvs.length === 1 ? artifactEnvs[0] : null;
-      current.artifactResolutionPending = false;
-    });
+    await detection.observe(details, 'mfe', observation);
     return;
   }
   const config = BUNDLE_OBSERVE_SANDBOX_CONFIG_RE.exec(details.url);
   if (config) {
     const brandId = config[2].toLowerCase();
+    const artifactEnv = sandboxConfigArtifactEnvironment(config, hostEnv);
     const token = await detection.observe(details, 'iframe', {
       layer: 'iframe', brandId, brand: bundleBrandKeyFromGuid(brandId), version: config[4], device: null,
-      headerVersion: null, host: hostname, hostEnv, url: details.url, ts: Date.now()
+      headerVersion: null, host: hostname, hostEnv, artifactEnv,
+      artifactEnvs: artifactEnv ? [artifactEnv] : [], url: details.url, ts: Date.now()
     });
-    const found = await resolveSandboxConfigInfo(hostEnv, brandId, config[3].toLowerCase(), config[4]);
+    const found = await resolveSandboxConfigInfo(artifactEnv || hostEnv, brandId, config[3].toLowerCase(), config[4]);
     if (found) await detection.enrich(details, 'iframe', token, current => {
       current.version = found.version; current.device = found.device; current.matchedBrandId = found.brandId;
       current.brand = current.brand || bundleBrandKeyFromGuid(found.brandId);
@@ -1985,6 +1970,29 @@ handleMessage('lgt-layer-marker', async function (msg, sender) {
 function normalizeVersion(value) { return String(value == null ? '' : value).trim().replace(/^v/i, ''); }
 function normalizeEnv(value) { return String(value == null ? '' : value).trim().toLowerCase(); }
 
+function uniqueDetectionMessages(values) {
+  return values.filter(function (value, index, all) { return value && all.indexOf(value) === index; });
+}
+
+function networkArtifactEnvironment(net) {
+  if (!net) return '';
+  if (net.artifactEnv) return normalizeEnv(net.artifactEnv);
+  var artifactEnvs = uniqueDetectionMessages((net.artifactEnvs || []).map(normalizeEnv));
+  return artifactEnvs.length === 1 ? artifactEnvs[0] : '';
+}
+
+function classifyRequestedEnvironment(requestedEnv, loadedEnv, overrideActive, overrideTargetEnv) {
+  if (!requestedEnv || !loadedEnv) return null;
+  if (requestedEnv === loadedEnv) return 'match';
+  if (overrideActive && overrideTargetEnv === loadedEnv) return 'overridden';
+  return 'mismatch';
+}
+
+function overrideTargetObservationWarning(overrideActive, overrideTargetEnv, loadedEnv) {
+  if (!overrideActive || !overrideTargetEnv || !loadedEnv || overrideTargetEnv === loadedEnv) return '';
+  return 'override target: active=' + overrideTargetEnv.toUpperCase() + ' vs loaded=' + loadedEnv.toUpperCase();
+}
+
 // The confidence classifier - brand+layer+device is ALWAYS the unit of
 // comparison; a common chunk hash or version shared by unrelated brands
 // never causes cross-brand mixing because every network observation is
@@ -1994,6 +2002,9 @@ function computeDetectionRows(snapshot, tabId) {
   var runtimeByFrame = snapshot.runtimeByFrame || {};
   var networkByFrame = snapshot.networkByFrame || {};
   var docByFrame = snapshot.docByFrame || {};
+  var requestedEnv = normalizeEnv((docByFrame[0] && docByFrame[0].env) || snapshot.requestedEnvironment);
+  var overrideActive = snapshot.bundleOverrideActive === true;
+  var overrideTargetEnv = overrideActive ? normalizeEnv(snapshot.bundleTargetEnv) : '';
   var frameIds = Object.keys(Object.assign({}, runtimeByFrame, networkByFrame));
   var rows = [];
 
@@ -2012,13 +2023,30 @@ function computeDetectionRows(snapshot, tabId) {
       Object.keys(networkLayers).forEach(function (layer) {
         var net = networkLayers[layer];
         var brandKey = net.matchedBrandId ? bundleBrandKeyFromGuid(net.matchedBrandId) : (net.brand || (doc && doc.brand));
+        var loadedEnv = networkArtifactEnvironment(net);
+        var environmentStatus = classifyRequestedEnvironment(requestedEnv, loadedEnv, overrideActive, overrideTargetEnv);
+        var status = environmentStatus || 'unclassified';
+        var detailParts = ['Network hit with no runtime layer marker in this frame.'];
+        if (status === 'mismatch') detailParts.unshift('URL environment ' + requestedEnv.toUpperCase() + ' differs from loaded bundle ' + loadedEnv.toUpperCase() + '.');
+        if (status === 'overridden') detailParts.unshift('Link Gen Bundle Override active (target ' + overrideTargetEnv.toUpperCase() + '): URL requests ' + requestedEnv.toUpperCase() + ', and the loaded ' + loadedEnv.toUpperCase() + ' bundle confirms the intentional override.');
+        var evidenceWarnings = uniqueDetectionMessages([
+          overrideTargetObservationWarning(overrideActive, overrideTargetEnv, loadedEnv)
+        ]);
+        if (evidenceWarnings.length) detailParts.push(evidenceWarnings[0]);
         rows.push({
-          tabId: tabId, frameId: frameId, layer: null, status: 'unclassified',
+          tabId: tabId, frameId: frameId, layer: null, status: status,
           brand: brandKey, brandId: net.matchedBrandId || net.brandId,
           device: net.device || null,
           version: net.version || net.headerVersion || null,
-          environment: net.artifactEnv || (net.artifactEnvs && net.artifactEnvs.length === 1 ? net.artifactEnvs[0] : null) || net.hostEnv || (doc && doc.env) || null,
-          detail: 'Network hit with no runtime layer marker in this frame.'
+          environment: loadedEnv || null,
+          requestedEnvironment: requestedEnv || null,
+          loadedEnvironment: loadedEnv || null,
+          overrideActive: overrideActive,
+          overrideTargetEnvironment: overrideTargetEnv || null,
+          runtimeEnvironment: null,
+          networkEnvironment: loadedEnv || null,
+          evidenceWarnings: evidenceWarnings,
+          detail: detailParts.join(' ')
         });
       });
       return;
@@ -2036,7 +2064,8 @@ function computeDetectionRows(snapshot, tabId) {
       var runtimeVersion = runtime ? normalizeVersion(runtime.version) : '';
       var networkVersion = net ? normalizeVersion(net.version || net.headerVersion) : '';
       var runtimeEnv = runtime ? normalizeEnv(runtime.environment) : '';
-      var networkEnv = net ? normalizeEnv(net.artifactEnv || (net.artifactEnvs && net.artifactEnvs.length === 1 ? net.artifactEnvs[0] : '') || net.hostEnv || (layer === 'nodejs' && doc ? doc.env : '')) : '';
+      var networkEnv = networkArtifactEnvironment(net);
+      var loadedEnv = networkEnv || (layer === 'nodejs' ? runtimeEnv : '');
 
       // A Bundle Override the user (or the Bundle tab) deliberately applied
       // on THIS tab causes one specific, fully-deterministic divergence:
@@ -2047,53 +2076,48 @@ function computeDetectionRows(snapshot, tabId) {
       // pattern here means it is explained instead of raised as an
       // unexplained Mismatch - see bundleOverrideExplainsEnvDivergence.
       var overrideExplainsEnvDivergence = !!(runtime && net &&
-        bundleOverrideExplainsEnvDivergence(snapshot.bundleTargetEnv, runtimeEnv, networkEnv));
+        overrideActive && bundleOverrideExplainsEnvDivergence(overrideTargetEnv, runtimeEnv, networkEnv));
 
-      var conflicts = [];
-      if (runtimeBrandKey && networkBrandKey && runtimeBrandKey !== networkBrandKey) conflicts.push('brand: runtime=' + runtimeBrandKey + ' vs network=' + networkBrandKey);
+      var evidenceWarnings = [];
+      if (runtimeBrandKey && networkBrandKey && runtimeBrandKey !== networkBrandKey) evidenceWarnings.push('brand: runtime=' + runtimeBrandKey + ' vs network=' + networkBrandKey);
+      var overrideObservationWarning = overrideTargetObservationWarning(overrideActive, overrideTargetEnv, loadedEnv);
+      if (overrideObservationWarning) evidenceWarnings.push(overrideObservationWarning);
       if (!overrideExplainsEnvDivergence) {
-        if (runtimeVersion && networkVersion && runtimeVersion !== networkVersion) conflicts.push('version: runtime=v' + runtimeVersion + ' vs network=v' + networkVersion);
-        if (runtimeEnv && networkEnv && runtimeEnv !== networkEnv) conflicts.push('environment: runtime=' + runtimeEnv.toUpperCase() + ' vs network=' + networkEnv.toUpperCase());
+        if (runtimeVersion && networkVersion && runtimeVersion !== networkVersion) evidenceWarnings.push('version: runtime=v' + runtimeVersion + ' vs network=v' + networkVersion);
+        if (runtimeEnv && networkEnv && runtimeEnv !== networkEnv) evidenceWarnings.push('environment evidence: runtime=' + runtimeEnv.toUpperCase() + ' vs network=' + networkEnv.toUpperCase());
       }
 
-      // Confirmed: both runtime and network evidence exist for this
-      // brand+layer+device, and version+environment are each present on
-      // BOTH sides with no conflict. Partially verified: the layer is
-      // recognized (a runtime marker exists) but some value only has one
-      // reliable source (missing on either side, or network evidence
-      // absent entirely). Mismatch takes priority over both whenever any
-      // conflict was recorded above.
-      var status;
-      if (conflicts.length) {
-        status = 'mismatch';
-      } else if (runtime && net && runtimeVersion && networkVersion && runtimeEnv && networkEnv) {
-        status = 'confirmed';
-      } else {
-        status = 'partial';
-      }
+      // The primary status answers one question only: does the bundle that
+      // actually loaded match the environment requested by the top-level
+      // URL? Runtime/network metadata disagreements are separate evidence
+      // warnings. A Link Gen override is "Overridden" only after its live
+      // per-tab target is independently observed in the loaded artifact.
+      var status = classifyRequestedEnvironment(requestedEnv, loadedEnv, overrideActive, overrideTargetEnv) || 'partial';
 
       // Partial's own detail: which specific piece of evidence is still
       // missing, so a user doesn't have to guess (or ask) why a row
-      // hasn't reached Confirmed - most commonly this self-resolves a
+      // hasn't reached a final comparison result. Most commonly this self-resolves a
       // few seconds after page load (the network side needs a moment to
       // catch up with the runtime marker), but if it never resolves this
       // pinpoints exactly which side/value is missing.
       var partialReasons = [];
       if (status === 'partial') {
+        if (!requestedEnv) partialReasons.push('top-level URL environment is unknown');
+        if (!loadedEnv) partialReasons.push('loaded bundle environment has not been observed yet');
         if (!runtime) partialReasons.push('no runtime layer marker seen in this frame yet');
         if (!net) partialReasons.push('no network confirmation seen for this layer yet');
         if (runtime && net) {
           if (!runtimeVersion) partialReasons.push('runtime marker has no version');
           if (!networkVersion) partialReasons.push('network evidence has no version');
           if (!runtimeEnv) partialReasons.push('runtime marker has no environment');
-          if (!networkEnv) partialReasons.push('network evidence has no environment');
+          if (!networkEnv) partialReasons.push('network evidence has no artifact environment');
         }
       }
 
       // The row's headline version/environment ALWAYS prefers network
       // evidence over the runtime marker whenever network evidence
-      // exists - consistently, in EVERY status (Confirmed, Partially
-      // verified, AND Mismatch alike). This used to only apply when an
+      // exists - consistently, in EVERY status (Matches URL, Overridden,
+      // Partially verified, AND Mismatch alike). This used to only apply when an
       // active Bundle Override explained the split, and fell back to
       // showing the raw runtime value for an unexplained Mismatch - which
       // produced a real, reported anomaly: the same underlying fact (the
@@ -2103,29 +2127,39 @@ function computeDetectionRows(snapshot, tabId) {
       // Bundle Override left 34/34 redirected requests returning 200 with
       // real ALPHA content, yet the runtime marker read back
       // byte-for-byte identical to its un-overridden value) was DISPLAYED
-      // inconsistently - as "ALPHA" in the explained/Confirmed case (since
+      // inconsistently - as "ALPHA" in the explained-override case (since
       // network was substituted in) and as "PROD" in an unexplained
       // Mismatch case (since runtime was shown raw), even though in both
       // cases runtime itself never said anything but the pinned base
       // value. Network evidence is a direct observation of which files
       // were actually requested and loaded, so it is the more meaningful
-      // "what's really running" signal in every case - the Confirmed vs
-      // Mismatch STATUS is what tells the user whether that value is
-      // trusted/explained or flagged as a real, unexplained conflict; the
+      // "what's really running" signal in every case. The primary status
+      // tells the user whether that value matches the URL, was intentionally
+      // overridden, or is a real unexplained mismatch; the
       // headline value itself no longer flips between two different
       // selection rules depending on which bucket a row lands in.
       var bundleOverrideNote = overrideExplainsEnvDivergence
-        ? ('Bundle Override active (target ' + snapshot.bundleTargetEnv.toUpperCase() + '): runtime marker still reports the base build v' +
+        ? ('Bundle Override active (target ' + overrideTargetEnv.toUpperCase() + '): runtime marker still reports the base build v' +
           runtimeVersion + '/' + runtimeEnv.toUpperCase() + ' - this brand\'s startup context stays pinned to its base environment even once overridden; network evidence v' +
           networkVersion + '/' + networkEnv.toUpperCase() + ' reflects what is actually running and is shown here.')
         : null;
+      var environmentNote = status === 'mismatch'
+        ? ('URL environment ' + requestedEnv.toUpperCase() + ' differs from loaded bundle ' + loadedEnv.toUpperCase() + '.')
+        : (status === 'overridden'
+          ? ('Link Gen Bundle Override active (target ' + overrideTargetEnv.toUpperCase() + '): URL requests ' + requestedEnv.toUpperCase() + ', and the loaded ' + loadedEnv.toUpperCase() + ' bundle confirms the intentional override.')
+          : null);
+      var detailParts = uniqueDetectionMessages([environmentNote].concat(partialReasons, evidenceWarnings, bundleOverrideNote ? [bundleOverrideNote] : []));
 
       frameRows.push({
         tabId: tabId, frameId: frameId, layer: layer, status: status,
         brand: brandKey, brandId: (runtime && runtime.brandId) || (net && (net.matchedBrandId || net.brandId)) || null,
         device: net && net.device || null,
         version: (networkVersion || runtimeVersion) || null,
-        environment: (networkEnv || runtimeEnv) || null,
+        environment: (loadedEnv || runtimeEnv) || null,
+        requestedEnvironment: requestedEnv || null,
+        loadedEnvironment: loadedEnv || null,
+        overrideActive: overrideActive,
+        overrideTargetEnvironment: overrideTargetEnv || null,
         // Raw, unmerged sides - kept alongside the headline fields above
         // (not shown in the header itself) so other UI (the Bundle tab's
         // "Host: <env>" label, which is a URL/hostname heuristic, not a
@@ -2138,14 +2172,15 @@ function computeDetectionRows(snapshot, tabId) {
         // any Bundle Override).
         runtimeEnvironment: runtimeEnv || null,
         networkEnvironment: networkEnv || null,
-        detail: conflicts.join('; ') || partialReasons.join('; ') || bundleOverrideNote || null
+        evidenceWarnings: evidenceWarnings,
+        detail: detailParts.join(' ') || null
       });
     });
 
-    // Two layers in the SAME frame that both reach Confirmed on the exact
+    // Two layers in the SAME frame that reach the same final status on the exact
     // same brand+version+environment+device are not two independently
     // swappable architectures - some brands run a genuinely hybrid
-      // runtime (e.g. an mFE app layered on top of the OBGA/"Fabric"
+    // runtime (e.g. an mFE app layered on top of the OBGA/"Fabric"
     // context, which the mFE app deliberately also populates for
     // backward compatibility with older tooling). Since the numbers are
     // identical, showing two rows is just noise - merge them into ONE
@@ -2156,12 +2191,13 @@ function computeDetectionRows(snapshot, tabId) {
     frameRows.forEach(function (row, i) {
       if (consumed[i]) return;
       consumed[i] = true;
-      if (row.status !== 'confirmed') { mergedFrameRows.push(row); return; }
+      if (['match', 'overridden', 'mismatch'].indexOf(row.status) === -1) { mergedFrameRows.push(row); return; }
       var group = [row];
       frameRows.forEach(function (other, j) {
-        if (consumed[j] || other.status !== 'confirmed' || other.layer === row.layer) return;
+        if (consumed[j] || other.status !== row.status || other.layer === row.layer) return;
         if (other.brand === row.brand && other.version === row.version &&
-            other.environment === row.environment && other.device === row.device) {
+            other.environment === row.environment && other.device === row.device &&
+            other.requestedEnvironment === row.requestedEnvironment) {
           group.push(other);
           consumed[j] = true;
         }
@@ -2170,14 +2206,21 @@ function computeDetectionRows(snapshot, tabId) {
       mergedFrameRows.push({
         tabId: row.tabId, frameId: row.frameId, layer: null,
         layers: group.map(function (r) { return r.layer; }),
-        status: 'confirmed', brand: row.brand, brandId: row.brandId,
+        status: row.status, brand: row.brand, brandId: row.brandId,
         device: row.device, version: row.version, environment: row.environment,
+        requestedEnvironment: row.requestedEnvironment,
+        loadedEnvironment: row.loadedEnvironment,
+        overrideActive: row.overrideActive,
+        overrideTargetEnvironment: row.overrideTargetEnvironment,
+        runtimeEnvironment: row.runtimeEnvironment,
+        networkEnvironment: row.networkEnvironment,
+        evidenceWarnings: uniqueDetectionMessages(group.reduce(function (all, r) { return all.concat(r.evidenceWarnings || []); }, [])),
         // A plain hybrid merge has nothing left to explain (both layers
         // simply agree), but if any layer in the group carried a Bundle
-        // Override note (the only detail a 'confirmed' row can ever have),
-        // that is real, actionable state - not merge-implementation
+        // Override note, that is real, actionable state - not
+        // merge-implementation
         // trivia - so it must survive the merge, not get discarded.
-        detail: group.map(function (r) { return r.detail; }).filter(Boolean)[0] || null
+        detail: uniqueDetectionMessages(group.map(function (r) { return r.detail; }).filter(Boolean)).join(' ') || null
       });
     });
 
@@ -2190,8 +2233,129 @@ function computeDetectionRows(snapshot, tabId) {
 handleMessage('lgt-detection-rows', async function (msg, sender) {
   const tabId = senderTabId(sender);
   const snapshot = await detection.snapshot(tabId);
-  snapshot.bundleTargetEnv = bundleTargetEnvFromRules((await dnr.status('bundle', tabId)).rules);
+  const bundleStatus = await dnr.status('bundle', tabId);
+  snapshot.requestedEnvironment = sender.tab && sender.tab.url ? envLabelFromHostname(new URL(sender.tab.url).hostname) : null;
+  snapshot.bundleOverrideActive = bundleStatus.rules.length > 0 && bundleStatus.metadata && bundleStatus.metadata.status === 'active';
+  snapshot.bundleTargetEnv = snapshot.bundleOverrideActive
+    ? normalizeEnv(bundleStatus.metadata.targetEnv || bundleTargetEnvFromRules(bundleStatus.rules))
+    : null;
   return { ok: true, rows: computeDetectionRows(snapshot, tabId) };
+});
+
+function validateConfiguredBrandPageRequest(msg) {
+  var brand = String(msg.brand || '');
+  var environment = String(msg.environment || '');
+  var expectedBrandId = BUNDLE_BRAND_GUIDS[brand];
+  var brandDomain = BRAND_DOMAINS[brand];
+  if (!expectedBrandId || !brandDomain) throw new Error('unknown brand');
+  if (msg.brandId !== expectedBrandId) throw new Error('brand identifier mismatch');
+  if (!BUNDLE_ENV_LAYERS[environment]) throw new Error('unknown environment');
+
+  var target = new URL(msg.url || '');
+  var expectedHost = 'www.' + (environment === 'prod' ? '' : environment + '.') + brandDomain;
+  if (target.protocol !== 'https:' || target.hostname.toLowerCase() !== expectedHost.toLowerCase()) {
+    throw new Error('Brand page URL does not match the selected brand/environment');
+  }
+
+  var bleData = msg.bleData || null;
+  if (bleData) {
+    if (environment !== 'test' && environment !== 'qa') {
+      throw new Error('BLE data can only be configured for TEST or QA Brand pages');
+    }
+    // betsson.pe shares the canonical Betsson sportsbook GUID and
+    // btsplayground host. Do not duplicate that suffix in the detection map
+    // or every generic Betsson playground URL would become ambiguous.
+    var suffix = brand === 'betssonpe' ? PLAYGROUND_HOST_SUFFIX.betsson : PLAYGROUND_HOST_SUFFIX[brand];
+    var expectedAlphaHost = suffix ? 'd-cf.alpha.' + suffix : null;
+    if (!expectedAlphaHost || bleData.alphaHost !== expectedAlphaHost) {
+      throw new Error('invalid ALPHA BLE host');
+    }
+    if (typeof bleData.stc !== 'string' || !bleData.stc || typeof bleData.ctx !== 'string' || !bleData.ctx) {
+      throw new Error('missing BLE desktop context');
+    }
+  }
+  return { brand: brand, environment: environment, brandId: expectedBrandId, target: target, bleData: bleData };
+}
+
+async function waitForBlankTabNavigation(tabId) {
+  var current = await chromeCall(chrome.tabs, 'get', tabId);
+  if (current.status !== 'complete') {
+    await new Promise(function (resolve, reject) {
+      var timeoutId = setTimeout(function () {
+        chrome.tabs.onUpdated.removeListener(onUpdated);
+        reject(new Error('Timed out preparing the Brand page tab'));
+      }, 5000);
+      function onUpdated(updatedTabId, changeInfo) {
+        if (updatedTabId !== tabId || changeInfo.status !== 'complete') return;
+        clearTimeout(timeoutId);
+        chrome.tabs.onUpdated.removeListener(onUpdated);
+        resolve();
+      }
+      chrome.tabs.onUpdated.addListener(onUpdated);
+    });
+  }
+  // Querying the committed main frame provides an ordering barrier after
+  // webNavigation.onBeforeNavigate, whose cleanup cancels in-flight Apply.
+  if (chrome.webNavigation && chrome.webNavigation.getFrame) {
+    await chrome.webNavigation.getFrame({ tabId: tabId, frameId: 0 });
+  }
+}
+
+// A Brand page's bundle and BLE data source are tab-scoped DNR state, not
+// URL parameters. Create an inactive blank tab, install every requested
+// rule before its first real navigation, then reveal it. Any partial setup
+// is removed and the blank tab is closed if a step fails.
+handleMessage('lgt-open-configured-brand-page', async function (msg, sender) {
+  var request = validateConfiguredBrandPageRequest(msg);
+  var createOptions = { url: 'about:blank', active: false };
+  if (sender.tab && sender.tab.windowId != null) createOptions.windowId = sender.tab.windowId;
+  var tab = await chromeCall(chrome.tabs, 'create', createOptions);
+  var bundleStarted = false;
+  var bleStarted = false;
+  try {
+    await waitForBlankTabNavigation(tab.id);
+    var bundleResult = await startBundleOverrideRule(
+      tab.id,
+      request.environment,
+      request.brandId,
+      request.environment,
+      request.target.origin,
+      request.target.href
+    );
+    bundleStarted = true;
+    await workerStore.update('bundleMatches', tab.id, () => ({ matched: [] }));
+
+    if (request.bleData) {
+      await startBleDataOverrideRule(
+        tab.id,
+        request.target.hostname,
+        request.bleData.alphaHost,
+        request.bleData.stc,
+        request.bleData.ctx,
+        request.target.origin
+      );
+      bleStarted = true;
+    }
+
+    await chromeCall(chrome.tabs, 'update', tab.id, { url: request.target.href, active: true });
+    return {
+      ok: true,
+      tabId: tab.id,
+      url: request.target.href,
+      bundleEnv: request.environment,
+      bundleRuleCount: bundleResult.ruleCount,
+      bleData: !!request.bleData
+    };
+  } catch (error) {
+    if (bleStarted) {
+      try { await stopBleDataOverrideRule(tab.id); } catch (ignoredBleCleanupError) {}
+    }
+    if (bundleStarted) {
+      try { await stopBundleOverrideRule(tab.id); } catch (ignoredBundleCleanupError) {}
+    }
+    try { await chromeCall(chrome.tabs, 'remove', tab.id); } catch (ignoredTabCleanupError) {}
+    throw error;
+  }
 });
 
 // Open generated result URLs from the extension process rather than the

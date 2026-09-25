@@ -80,6 +80,7 @@
     betsolid: '092219ad-a482-428a-b1a0-47fa005d339d',
     betsson: '6a6d80b9-16ac-4387-a413-244d93a74deb',
     betssonco: '6a6d80b9-16ac-4387-a413-244d93a74deb',
+    betssonpe: '6a6d80b9-16ac-4387-a413-244d93a74deb',
     betssonarcb: '46df28af-e0f4-48d6-a3b3-3183b2586c44',
     betssonbr: '599869ba-7757-41ab-9b74-887dbf5c3705',
     betssondk: 'ce5be96a-8e97-4d71-8b04-b4a0dd30cfaa',
@@ -109,16 +110,19 @@
   };
 
   var BRAND_LABELS = {
-    betssonco: 'betsson.co'
+    betssonco: 'betsson.co',
+    betssonpe: 'betsson.pe'
   };
 
   var BRAND_LOCAL_KEYS = {
-    betssonco: 'betsson'
+    betssonco: 'betsson',
+    betssonpe: 'betsson'
   };
 
   var BRAND_CONTEXT_PREFIXES = {
     betsson: 'Default',
-    betssonco: 'Betsson.co'
+    betssonco: 'Betsson.co',
+    betssonpe: 'Default'
   };
 
   var BRAND_DOMAINS = {
@@ -131,6 +135,7 @@
     betsolid: 'betsolid.com',
     betsson: 'betsson.com',
     betssonco: 'betsson.co',
+    betssonpe: 'betsson.pe',
     betssonarcb: 'betsson.bet.ar',
     betssonbr: 'betsson.bet.br',
     betssondk: 'betsson.dk',
@@ -662,10 +667,22 @@
       return base + '/' + stc + '/' + ctx + '/?exposeObgState=true&exposeObgRt=true&sealStore=false';
     }
 
+    function launchContextFor(device) {
+      var ctxNode = contextFor(contexts, device);
+      var customerContext = ctxNode.customerContext || {};
+      var stc = customerContext.staticContextId;
+      var ctx = customerContext.userContextId;
+      return stc && ctx ? { stc: stc, ctx: ctx } : null;
+    }
+
     return {
       desktop: buildFor('desktop'),
       mobile: buildFor('mobile'),
-      localLinks: buildLocalLinksFromContext(resp, opts)
+      localLinks: buildLocalLinksFromContext(resp, opts),
+      brandPageContexts: {
+        desktop: launchContextFor('desktop'),
+        mobile: launchContextFor('mobile')
+      }
     };
   }
 
@@ -1031,6 +1048,16 @@
     rizk: 'rizkplayground.net',
     spelklubben: 'spelklubbenplayground.net'
   };
+
+  // betsson.pe is a real-domain alias of the shared Betsson sportsbook
+  // brand/GUID and therefore uses btsplayground.net too. Keep the alias out
+  // of PLAYGROUND_HOST_SUFFIX itself: duplicate suffix entries would make a
+  // generic btsplayground URL auto-detect as whichever alias happens to be
+  // iterated last instead of the canonical Betsson brand.
+  function playgroundHostSuffixForBrand(brand) {
+    if (brand === 'betssonpe') return PLAYGROUND_HOST_SUFFIX.betsson;
+    return PLAYGROUND_HOST_SUFFIX[brand] || null;
+  }
 
   function detectBrandAndEnv() {
     var host = location.hostname.toLowerCase();
@@ -1797,6 +1824,21 @@
     handle.addEventListener('pointerup', stopDragging);
     handle.addEventListener('pointercancel', stopDragging);
     handle.addEventListener('lostpointercapture', function () { pointerId = null; });
+
+    // A panel that was dragged on a large monitor can otherwise end up
+    // partially outside the viewport when the window moves to a smaller
+    // laptop display. Keep only explicitly-moved panels clamped; the default
+    // top/right anchored position remains fully CSS-driven.
+    function clampToViewport() {
+      if (panel.dataset.lgtMoved !== '1' || panel.style.display === 'none') return;
+      var rect = panel.getBoundingClientRect();
+      var maxX = Math.max(0, window.innerWidth - panel.offsetWidth);
+      var maxY = Math.max(0, window.innerHeight - panel.offsetHeight);
+      panel.style.left = Math.max(0, Math.min(maxX, rect.left)) + 'px';
+      panel.style.top = Math.max(0, Math.min(maxY, rect.top)) + 'px';
+    }
+    window.addEventListener('resize', clampToViewport);
+    return function () { window.removeEventListener('resize', clampToViewport); };
   }
 
   var LOCAL_LINKS_MIN_VIEWPORT = 780;
@@ -1826,7 +1868,7 @@
     title.setAttribute('aria-label', 'Local links panel header');
     panel.appendChild(title);
     panel.appendChild(content);
-    makeDraggable(panel, title);
+    var dragCleanup = makeDraggable(panel, title);
     panel.addEventListener('pointerdown', function () {
       panel.style.zIndex = '2147483647';
       mainPanel.style.zIndex = '2147483646';
@@ -1912,6 +1954,7 @@
       setOnUnsupported: function (cb) { onUnsupported = cb; },
       destroy: function () {
         window.removeEventListener('resize', onResize);
+        if (dragCleanup) dragCleanup();
         if (panel.parentNode) panel.parentNode.removeChild(panel);
       }
     };
@@ -1920,6 +1963,7 @@
   var PANEL_OPEN_KEY = 'lgt-panel-open';
   var PANEL_COLLAPSED_KEY = 'lgt-panel-collapsed';
   var ACTIVE_TAB_KEY = 'lgt-active-tab';
+  var UI_PREFERENCES_KEY = 'lgt-ui-preferences-v1';
 
   var THEME_KEY = 'lgt-theme';
 
@@ -1944,47 +1988,68 @@
       '#lgt-panel::-webkit-scrollbar-track,#lgt-local-links-panel::-webkit-scrollbar-track,#lgt-panel .lgt-brand-matrix::-webkit-scrollbar-track{background:var(--lgt-scroll-track);border-radius:10px}',
       '#lgt-panel::-webkit-scrollbar-thumb,#lgt-local-links-panel::-webkit-scrollbar-thumb,#lgt-panel .lgt-brand-matrix::-webkit-scrollbar-thumb{background:var(--lgt-scroll-thumb);border:2px solid var(--lgt-scroll-track);border-radius:10px}',
       '#lgt-panel::-webkit-scrollbar-thumb:hover,#lgt-local-links-panel::-webkit-scrollbar-thumb:hover,#lgt-panel .lgt-brand-matrix::-webkit-scrollbar-thumb:hover{background:var(--lgt-scroll-thumb-hover)}',
-      '#lgt-panel{position:fixed;top:20px;right:20px;inline-size:min(380px,calc(100vw - 2rem));max-block-size:88dvh;overflow:auto;',
+      '#lgt-panel{position:fixed;top:8px;right:8px;inline-size:min(380px,calc(100dvw - 16px));max-block-size:calc(100dvh - 16px);overflow:hidden;display:flex;flex-direction:column;',
       // Fixed px (not rem): rem is relative to the HOST page's <html>
       // font-size, which some sportsbook pages reset (e.g. to 10px for
       // their own rem-scaling), silently shrinking this panel's text.
       'overscroll-behavior:contain;scrollbar-gutter:stable;background:var(--lgt-bg);color:var(--lgt-fg);font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;',
-      'border:1px solid rgba(123,141,184,.14);border-radius:12px;box-shadow:0 12px 38px rgba(0,0,0,.48);z-index:2147483647;padding:14px;box-sizing:border-box}',
-      '#lgt-panel h3{margin:0 0 10px;font-size:16px;display:flex;justify-content:space-between;align-items:center;letter-spacing:-.01em}',
-      '#lgt-panel .lgt-header-actions{display:flex;align-items:center;gap:10px;flex:none}',
-      '#lgt-panel .lgt-tabs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin:12px 0}',
-      '#lgt-panel .lgt-tab{min-block-size:34px;text-align:center;padding:7px 5px;border:1px solid transparent;border-radius:7px;background:var(--lgt-tab-bg);color:var(--lgt-fg);cursor:pointer;font:inherit}',
-      '#lgt-panel .lgt-tab:last-child{grid-column:1/-1}',
+      'border:1px solid rgba(123,141,184,.14);border-radius:10px;box-shadow:0 12px 38px rgba(0,0,0,.48);z-index:2147483647;padding:10px;box-sizing:border-box}',
+      '#lgt-panel [hidden]{display:none!important}',
+      '#lgt-panel h3{margin:0 0 6px;font-size:15px;min-block-size:28px;display:flex;justify-content:space-between;align-items:center;gap:8px;letter-spacing:-.01em;flex:none}',
+      '#lgt-panel h3 > span:first-child{min-inline-size:0;white-space:nowrap}',
+      '#lgt-panel .lgt-header-actions{display:flex;align-items:center;gap:5px;flex:none}',
+      '#lgt-panel .lgt-content{display:grid;grid-template-rows:auto auto minmax(0,1fr);flex:1 1 auto;min-block-size:0}',
+      // Keep the scrollbar outside the shared content edges. Its measured
+      // width is added back by JS so controls stay aligned with the tabs
+      // instead of acquiring a larger visual inset on the right.
+      '#lgt-panel .lgt-content > [role=tabpanel]{grid-row:3;min-block-size:0;inline-size:calc(100% + var(--lgt-tab-scrollbar-width,0px));margin-inline-end:var(--lgt-tab-scrollbar-offset,0px);box-sizing:border-box;overflow-y:scroll;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:var(--lgt-scroll-thumb) transparent}',
+      '#lgt-panel .lgt-tabs{grid-row:2;display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:4px;margin:6px 0}',
+      '#lgt-panel .lgt-tab{min-block-size:30px;margin:0;text-align:center;padding:5px 3px;border:1px solid transparent;border-radius:6px;background:var(--lgt-tab-bg);color:var(--lgt-fg);cursor:pointer;font:inherit;font-size:11px}',
+      '#lgt-panel .lgt-tab-core{grid-column:span 3}',
+      '#lgt-panel .lgt-tab-more{grid-column:span 4}',
       '#lgt-panel .lgt-tab.active{background:var(--lgt-accent);color:var(--lgt-accent-fg);font-weight:600}',
-      '#lgt-panel label{display:block;margin:9px 0 4px;color:var(--lgt-muted);font-size:10px;text-transform:uppercase;letter-spacing:.025em}',
-      '#lgt-panel select,#lgt-panel input{width:100%;min-block-size:34px;box-sizing:border-box;padding:7px 9px;border-radius:6px;border:1px solid var(--lgt-input-border);background:var(--lgt-input-bg);color:var(--lgt-fg);font:inherit}',
+      '#lgt-panel label{display:block;margin:6px 0 2px;color:var(--lgt-muted);font-size:10px;text-transform:uppercase;letter-spacing:.025em}',
+      '#lgt-panel select,#lgt-panel input{width:100%;min-block-size:30px;box-sizing:border-box;padding:5px 8px;border-radius:6px;border:1px solid var(--lgt-input-border);background:var(--lgt-input-bg);color:var(--lgt-fg);font:inherit}',
       // Checkbox rows (BLE source / Force fresh): without this, the
       // generic "select,input{width:100%}" rule above stretches the
       // checkbox itself to fill the whole row (inputs match it too),
       // which is what was pushing the label text out of a clean
       // left-aligned line. Pin the checkbox to its natural size and lay
       // the row out as a simple left-aligned flex row instead.
-      '#lgt-panel input[type=checkbox]{width:auto;flex:0 0 auto;margin:0;accent-color:var(--lgt-accent)}',
-      '#lgt-panel .lgt-checkbox-row{display:flex;align-items:center;justify-content:flex-start;gap:8px;',
+      '#lgt-panel input[type=checkbox]{width:16px;min-block-size:16px;block-size:16px;flex:0 0 auto;margin:0;accent-color:var(--lgt-accent)}',
+      '#lgt-panel .lgt-checkbox-row{display:flex;align-items:center;justify-content:flex-start;gap:7px;min-block-size:24px;',
       'text-transform:none;margin:0;text-align:left;letter-spacing:0;font-size:11px;color:var(--lgt-fg)}',
-      '#lgt-panel .lgt-option-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 12px;margin-top:10px}',
-      '#lgt-panel .lgt-option-grid .lgt-checkbox-row{min-block-size:20px}',
-      '#lgt-panel button{margin-top:10px;width:100%;min-block-size:34px;padding:8px;border:none;border-radius:7px;background:var(--lgt-accent);color:var(--lgt-accent-fg);font:inherit;font-weight:600;cursor:pointer}',
-      '#lgt-panel button.secondary{background:var(--lgt-secondary-bg);color:var(--lgt-fg);margin-top:6px}',
-      '#lgt-panel .lgt-row{display:flex;gap:8px}',
+      '#lgt-panel .lgt-option-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 10px;margin-top:6px}',
+      '#lgt-panel button{margin-top:6px;width:100%;min-block-size:30px;padding:6px;border:none;border-radius:6px;background:var(--lgt-accent);color:var(--lgt-accent-fg);font:inherit;font-weight:600;cursor:pointer}',
+      '#lgt-panel button.secondary{background:var(--lgt-secondary-bg);color:var(--lgt-fg);margin-top:4px}',
+      '#lgt-panel .lgt-row{display:flex;gap:6px}',
       '#lgt-panel .lgt-row > *{flex:1}',
-      '#lgt-panel .lgt-result{margin-top:10px;background:rgba(11,14,24,.36);border:1px solid var(--lgt-input-border);border-radius:8px;padding:7px 9px;font-size:11px}',
+      '#lgt-panel .lgt-context-options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:6px}',
+      '#lgt-panel .lgt-customer-field,#lgt-panel .lgt-context-status{grid-column:1/-1}',
+      '#lgt-panel .lgt-result{margin-top:6px;background:rgba(11,14,24,.36);border:1px solid var(--lgt-input-border);border-radius:7px;padding:6px 8px;font-size:11px}',
       '#lgt-panel .lgt-result > div:last-child .lgt-link-row{border-bottom:0}',
       '#lgt-panel .lgt-link-row{display:grid;grid-template-columns:66px minmax(0,1fr) 48px 48px;gap:6px;align-items:center;min-block-size:34px;border-bottom:1px solid rgba(123,141,184,.1)}',
       '#lgt-panel .lgt-link-label{font-weight:700;color:var(--lgt-fg)}',
       '#lgt-panel .lgt-link-url{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#aebee4}',
       '#lgt-panel .lgt-link-row button{min-block-size:28px;margin:0;padding:5px 4px;font-size:10px}',
-      '#lgt-panel .lgt-log{margin-top:8px;font-size:11px;color:var(--lgt-muted);white-space:pre-wrap}',
-      '#lgt-panel .lgt-context-status{margin-top:6px;padding:3px 0;background:transparent;font-size:10px;line-height:1.35;color:var(--lgt-muted)}',
+      '#lgt-panel .lgt-brand-link-row{grid-template-columns:66px minmax(0,1fr) 104px;border-bottom:0}',
+      '#lgt-panel .lgt-brand-launch-summary{padding:1px 0 4px 72px;color:var(--lgt-muted);font-size:10px;line-height:1.3}',
+      '#lgt-panel .lgt-brand-launch-summary.error{color:#ff8e8e}',
+      '#lgt-panel .lgt-log{margin-top:5px;font-size:11px;color:var(--lgt-muted);white-space:pre-wrap}',
+      '#lgt-panel .lgt-context-status{margin-top:4px;padding:2px 0;background:transparent;font-size:10px;line-height:1.3;color:var(--lgt-muted)}',
       '#lgt-panel .lgt-context-status.warning{color:#f4a340;border:1px solid #8a5718}',
       '#lgt-panel .lgt-context-status.error{color:#ff8e8e;border:1px solid #873838}',
       '#lgt-panel .lgt-close,#lgt-panel .lgt-min,#lgt-panel .lgt-theme-toggle{cursor:pointer;color:var(--lgt-muted)}',
       '#lgt-panel .lgt-icon-button,#lgt-local-links-panel .lgt-icon-button{min-inline-size:1.75rem;min-block-size:1.75rem;padding:2px;border:0;background:transparent;color:inherit;font:inherit;line-height:1;border-radius:4px}',
+      '#lgt-panel .lgt-more-tools-toggle{position:relative;display:flex;align-items:center;gap:5px;width:auto;min-block-size:28px;margin:0;padding:3px 6px;background:transparent;color:var(--lgt-muted);font-size:10px;font-weight:600;border:1px solid transparent;overflow:visible}',
+      '#lgt-panel .lgt-more-tools-toggle:hover{background:var(--lgt-tab-bg);color:var(--lgt-fg)}',
+      '#lgt-panel .lgt-more-tools-toggle[aria-pressed=true]{color:var(--lgt-fg);border-color:var(--lgt-accent)}',
+      '#lgt-panel .lgt-more-tools-switch{inline-size:20px;block-size:12px;border-radius:999px;background:var(--lgt-secondary-bg);position:relative;flex:none}',
+      '#lgt-panel .lgt-more-tools-switch::after{content:"";position:absolute;inline-size:8px;block-size:8px;inset-block-start:2px;inset-inline-start:2px;border-radius:50%;background:var(--lgt-muted);transition:translate .15s ease,background .15s ease}',
+      '#lgt-panel .lgt-more-tools-toggle[aria-pressed=true] .lgt-more-tools-switch{background:var(--lgt-accent)}',
+      '#lgt-panel .lgt-more-tools-toggle[aria-pressed=true] .lgt-more-tools-switch::after{translate:8px 0;background:var(--lgt-accent-fg)}',
+      '#lgt-panel .lgt-more-tools-help{position:absolute;z-index:2;inset-block-start:calc(100% + 4px);inset-inline-end:0;inline-size:220px;box-sizing:border-box;padding:6px 8px;border:1px solid var(--lgt-input-border);border-radius:6px;background:var(--lgt-input-bg);color:var(--lgt-fg);box-shadow:0 6px 18px rgba(0,0,0,.35);font-size:10px;font-weight:400;line-height:1.35;text-align:start;white-space:normal;opacity:0;visibility:hidden;pointer-events:none;transition:opacity .12s ease}',
+      '#lgt-panel .lgt-more-tools-toggle:is(:hover,:focus-visible) .lgt-more-tools-help{opacity:1;visibility:visible;pointer-events:auto}',
       '#lgt-panel :is(button,select,input):focus-visible,#lgt-local-links-panel :is(button,select,input):focus-visible{outline:2px solid var(--lgt-accent);outline-offset:2px}',
       '#lgt-panel .lgt-min{font-weight:700}',
       // Collapsed ("_"-minimized): only the header stays visible, the
@@ -2021,11 +2086,12 @@
       // Automatic per brand/layer detection header - always visible above
       // the tabs, on every tab (unlike the Bundle tab's own controls).
       // See buildDetectionHeader().
-      '#lgt-panel .lgt-build-strip{background:var(--lgt-tab-bg);border:1px solid var(--lgt-input-border);border-radius:8px;padding:7px 8px;margin-bottom:0;font-size:11px}',
-      '#lgt-panel .lgt-build-row{display:flex;align-items:flex-start;flex-direction:column;gap:5px;padding:1px 0}',
+      '#lgt-panel .lgt-build-strip{grid-row:1;background:var(--lgt-tab-bg);border:1px solid var(--lgt-input-border);border-radius:7px;padding:6px 7px;margin-bottom:0;font-size:10px}',
+      '#lgt-panel .lgt-build-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start;gap:6px;padding:1px 0}',
       '#lgt-panel .lgt-build-row + .lgt-build-row{border-top:1px solid var(--lgt-border,rgba(255,255,255,.08));margin-top:2px;padding-top:4px}',
       '#lgt-panel .lgt-build-badge{padding:2px 7px;border-radius:9px;font-weight:700;white-space:nowrap;font-size:10px}',
-      '#lgt-panel .lgt-build-badge.confirmed{background:#1e7e34;color:#fff}',
+      '#lgt-panel .lgt-build-badge.match{background:#1e7e34;color:#fff}',
+      '#lgt-panel .lgt-build-badge.overridden{background:#2656a3;color:#fff}',
       '#lgt-panel .lgt-build-badge.partial{background:#c77900;color:#fff}',
       '#lgt-panel .lgt-build-badge.mismatch{background:#a02020;color:#fff}',
       '#lgt-panel .lgt-build-badge.unclassified{background:#555;color:#fff}',
@@ -2036,8 +2102,8 @@
       // behaviour without custom ARIA or event handlers; the explicit
       // chevron replaces the hidden browser marker with an equally clear
       // directional cue that fits the panel's existing visual language.
-      '#lgt-panel .lgt-disclosure{width:100%;box-sizing:border-box;margin-top:6px;border:1px solid var(--lgt-border,rgba(255,255,255,.12));border-radius:6px;background:var(--lgt-input-bg)}',
-      '#lgt-panel .lgt-disclosure summary{display:flex;align-items:center;gap:6px;padding:6px 8px;cursor:pointer;list-style:none;color:var(--lgt-fg);font-size:11px;font-weight:600;border-radius:5px}',
+      '#lgt-panel .lgt-disclosure{width:100%;box-sizing:border-box;margin-top:5px;border:1px solid var(--lgt-border,rgba(255,255,255,.12));border-radius:6px;background:var(--lgt-input-bg)}',
+      '#lgt-panel .lgt-disclosure summary{display:flex;align-items:center;gap:6px;padding:5px 7px;cursor:pointer;list-style:none;color:var(--lgt-fg);font-size:11px;font-weight:600;border-radius:5px}',
       '#lgt-panel .lgt-disclosure summary::-webkit-details-marker{display:none}',
       '#lgt-panel .lgt-disclosure summary::before{content:"\u25b6";display:inline-block;color:var(--lgt-muted);font-size:9px;transform-origin:center;transition:transform .15s ease}',
       '#lgt-panel .lgt-disclosure[open] summary::before{transform:rotate(90deg)}',
@@ -2049,6 +2115,8 @@
       '#lgt-panel .lgt-build-disclosure{margin:6px -1px -1px}',
       '#lgt-panel .lgt-build-detail{width:100%}',
       '#lgt-panel .lgt-build-alert{width:100%;margin-top:2px;color:#ff9c9c;font-size:10px;font-weight:600}',
+      '#lgt-panel .lgt-build-override{width:100%;margin-top:2px;color:#82b1ff;font-size:10px;font-weight:600}',
+      '#lgt-panel .lgt-build-evidence-warning{width:100%;margin-top:2px;color:#ffc46b;font-size:10px;font-weight:600}',
       '#lgt-panel .lgt-alert{margin-top:6px;font-size:10px;font-weight:600}',
       '#lgt-panel .lgt-alert.warning{color:#e2a03f}',
       '#lgt-panel .lgt-alert.danger{color:#ff9c9c}',
@@ -2072,6 +2140,7 @@
       'background:var(--lgt-secondary-bg);color:var(--lgt-fg);font-weight:600;cursor:pointer}'
       , '@media (forced-colors: active){#lgt-panel,#lgt-local-links-panel{--lgt-bg:Canvas;--lgt-fg:CanvasText;--lgt-tab-bg:Canvas;--lgt-input-bg:Canvas;--lgt-input-border:ButtonText;--lgt-secondary-bg:ButtonFace;--lgt-muted:GrayText;--lgt-scroll-track:Canvas;--lgt-scroll-thumb:ButtonText}#lgt-panel button,#lgt-local-links-panel button{border:1px solid ButtonText;forced-color-adjust:auto}}'
       , '@media (prefers-reduced-motion: reduce){#lgt-panel *,#lgt-local-links-panel *{scroll-behavior:auto;transition:none!important;animation:none!important}}'
+      , '@media (pointer:coarse){#lgt-panel .lgt-tab,#lgt-panel select,#lgt-panel input:not([type=checkbox]),#lgt-panel button:not(.lgt-icon-button){min-block-size:42px}#lgt-panel .lgt-checkbox-row{min-block-size:42px}#lgt-panel .lgt-icon-button{min-inline-size:42px;min-block-size:42px}}'
       , 'body.lgt-standalone{margin:0;min-block-size:100vh;background:#101320}'
       , 'body.lgt-standalone #lgt-panel{position:static;inline-size:100%;max-block-size:none;min-block-size:100vh;box-sizing:border-box;border:0;border-radius:0;box-shadow:none}'
     ].join('');
@@ -2080,6 +2149,18 @@
     var panel = el('div', { id: 'lgt-panel', role: 'dialog', 'aria-label': 'Link Gen Tool', style: 'display:none' });
     var localLinksPanel = buildLocalLinksPanel(panel);
     var titleText = el('span', {}, ['Link Gen Tool ', el('span', { style: 'opacity:.5;font-weight:400;font-size:10px' }, [VERSION])]);
+    var showMoreTools = false;
+    var moreToolsHelpId = 'lgt-more-tools-help';
+    var moreToolsBtn = el('button', {
+      class: 'lgt-more-tools-toggle', type: 'button',
+      'aria-label': 'More tools', 'aria-describedby': moreToolsHelpId, 'aria-pressed': 'false'
+    }, [
+      el('span', { class: 'lgt-more-tools-switch', 'aria-hidden': 'true' }),
+      el('span', { 'aria-hidden': 'true' }, ['More']),
+      el('span', { id: moreToolsHelpId, class: 'lgt-more-tools-help', role: 'tooltip' }, [
+        'These tools are under development and may not work reliably.'
+      ])
+    ]);
     var themeBtn = el('button', {
       class: 'lgt-theme-toggle lgt-icon-button', type: 'button', title: 'Toggle dark/light mode', 'aria-label': 'Toggle dark/light mode',
       onclick: function () {
@@ -2111,18 +2192,22 @@
         try { sessionStorage.setItem(PANEL_OPEN_KEY, '0'); } catch (e) {}
       }
     }, ['x']);
-    var headerActions = el('div', { class: 'lgt-header-actions' }, [themeBtn, minBtn, closeBtn]);
+    var headerActions = el('div', { class: 'lgt-header-actions' }, [moreToolsBtn, themeBtn, minBtn, closeBtn]);
     var title = el('h3', {}, [titleText, headerActions]);
-    makeDraggable(panel, title);
+    var mainDragCleanup = makeDraggable(panel, title);
     var tabs = el('div', { class: 'lgt-tabs', role: 'tablist', 'aria-label': 'Link Gen Tool sections' });
-    var tabA = el('button', { class: 'lgt-tab active', type: 'button', role: 'tab', id: 'lgt-tab-generate', 'aria-controls': 'lgt-body-generate', 'aria-selected': 'true' }, ['Generate']);
-    var tabB = el('button', { class: 'lgt-tab', type: 'button', role: 'tab', id: 'lgt-tab-live-login', 'aria-controls': 'lgt-body-live-login', 'aria-selected': 'false' }, ['Live Login']);
-    var tabC = el('button', { class: 'lgt-tab', type: 'button', role: 'tab', id: 'lgt-tab-credentials', 'aria-controls': 'lgt-body-credentials', 'aria-selected': 'false' }, ['Credentials']);
-    var tabD = el('button', { class: 'lgt-tab', type: 'button', role: 'tab', id: 'lgt-tab-bundle', 'aria-controls': 'lgt-body-bundle', 'aria-selected': 'false' }, ['Bundle']);
-    var tabE = el('button', { class: 'lgt-tab', type: 'button', role: 'tab', id: 'lgt-tab-ble', 'aria-controls': 'lgt-body-ble', 'aria-selected': 'false' }, ['BLE Data']);
-    var tabF = el('button', { class: 'lgt-tab', type: 'button', role: 'tab', id: 'lgt-tab-bonus-mock', 'aria-controls': 'lgt-body-bonus-mock', 'aria-selected': 'false' }, ['Bonus Mock']);
-    var tabG = el('button', { class: 'lgt-tab', type: 'button', role: 'tab', id: 'lgt-tab-bet-void', 'aria-controls': 'lgt-body-bet-void', 'aria-selected': 'false' }, ['Bet Void']);
-    tabs.appendChild(tabA); tabs.appendChild(tabB); tabs.appendChild(tabC); tabs.appendChild(tabD); tabs.appendChild(tabE); tabs.appendChild(tabF); tabs.appendChild(tabG);
+    var tabA = el('button', { class: 'lgt-tab lgt-tab-core active', type: 'button', role: 'tab', id: 'lgt-tab-generate', 'aria-controls': 'lgt-body-generate', 'aria-selected': 'true' }, ['Generate']);
+    var tabB = el('button', { class: 'lgt-tab lgt-tab-more', type: 'button', role: 'tab', id: 'lgt-tab-live-login', 'aria-controls': 'lgt-body-live-login', 'aria-selected': 'false', hidden: 'hidden' }, ['Live Login']);
+    var tabC = el('button', { class: 'lgt-tab lgt-tab-core', type: 'button', role: 'tab', id: 'lgt-tab-credentials', 'aria-controls': 'lgt-body-credentials', 'aria-selected': 'false' }, ['Credentials']);
+    var tabD = el('button', { class: 'lgt-tab lgt-tab-core', type: 'button', role: 'tab', id: 'lgt-tab-bundle', 'aria-controls': 'lgt-body-bundle', 'aria-selected': 'false' }, ['Bundle']);
+    var tabE = el('button', { class: 'lgt-tab lgt-tab-core', type: 'button', role: 'tab', id: 'lgt-tab-ble', 'aria-controls': 'lgt-body-ble', 'aria-selected': 'false' }, ['BLE Data']);
+    var tabF = el('button', { class: 'lgt-tab lgt-tab-more', type: 'button', role: 'tab', id: 'lgt-tab-bonus-mock', 'aria-controls': 'lgt-body-bonus-mock', 'aria-selected': 'false', hidden: 'hidden' }, ['Bonus Mock']);
+    var tabG = el('button', { class: 'lgt-tab lgt-tab-more', type: 'button', role: 'tab', id: 'lgt-tab-bet-void', 'aria-controls': 'lgt-body-bet-void', 'aria-selected': 'false', hidden: 'hidden' }, ['Bet Void']);
+    // DOM order deliberately matches visual and keyboard order: stable tools
+    // first, optional tools second. CSS gives the first group four equal
+    // columns and the second group three equal columns.
+    tabs.appendChild(tabA); tabs.appendChild(tabD); tabs.appendChild(tabE); tabs.appendChild(tabC);
+    tabs.appendChild(tabB); tabs.appendChild(tabF); tabs.appendChild(tabG);
 
     var bodyA = buildModeA(localLinksPanel);
     var bodyB = buildModeB();
@@ -2142,34 +2227,72 @@
     bodyA.__lgtGoToCredentials = function () { tabC.click(); };
 
     var pairs = [
-      ['gen', tabA, bodyA], ['livelogin', tabB, bodyB], ['creds', tabC, bodyC],
-      ['bundle', tabD, bodyD], ['ble', tabE, bodyE], ['bonusmock', tabF, bodyF], ['betvoid', tabG, bodyG]
+      ['gen', tabA, bodyA, false], ['bundle', tabD, bodyD, false],
+      ['ble', tabE, bodyE, false], ['creds', tabC, bodyC, false],
+      ['livelogin', tabB, bodyB, true], ['bonusmock', tabF, bodyF, true], ['betvoid', tabG, bodyG, true]
     ];
-    pairs.forEach(function (pair) {
-      pair[1].addEventListener('click', function () {
-        pairs.forEach(function (p) {
-          p[1].classList.toggle('active', p === pair);
-          p[1].setAttribute('aria-selected', p === pair ? 'true' : 'false');
-          p[2].style.display = p === pair ? '' : 'none';
-        });
-        // Remembers which tab was open so a page reload (whether triggered
-        // by this tool's own Stop/Reload buttons, or the tester's own F5)
-        // reopens the same tab instead of silently falling back to
-        // Generate - previously every reload lost the tester's place,
-        // which was especially confusing right after using Bet Void/Bonus
-        // Mock's Apply, since the next thing to do is reload and re-check
-        // that same tab.
-        try { sessionStorage.setItem(ACTIVE_TAB_KEY, pair[0]); } catch (e) {}
+
+    function activatePair(pair, persist) {
+      if (!pair || pair[1].hidden) return false;
+      pairs.forEach(function (p) {
+        var active = p === pair;
+        p[1].classList.toggle('active', active);
+        p[1].setAttribute('aria-selected', active ? 'true' : 'false');
+        p[1].tabIndex = active ? 0 : -1;
+        p[2].style.display = active ? '' : 'none';
       });
+      if (persist !== false) {
+        try { sessionStorage.setItem(ACTIVE_TAB_KEY, pair[0]); } catch (e) {}
+      }
+      return true;
+    }
+
+    function visiblePairs() {
+      return pairs.filter(function (pair) { return !pair[1].hidden; });
+    }
+
+    function saveUiPreferences(partial) {
+      chrome.storage.local.get([UI_PREFERENCES_KEY], function (res) {
+        var next = Object.assign({}, res && res[UI_PREFERENCES_KEY], partial);
+        var value = {};
+        value[UI_PREFERENCES_KEY] = next;
+        chrome.storage.local.set(value);
+      });
+    }
+
+    function setMoreToolsVisible(visible, persist) {
+      showMoreTools = !!visible;
+      moreToolsBtn.setAttribute('aria-pressed', showMoreTools ? 'true' : 'false');
+      pairs.forEach(function (pair) {
+        if (!pair[3]) return;
+        pair[1].hidden = !showMoreTools;
+        pair[2].hidden = !showMoreTools;
+        if (!showMoreTools) pair[2].style.display = 'none';
+      });
+
+      var activePair = pairs.filter(function (pair) { return pair[1].classList.contains('active'); })[0];
+      if (!showMoreTools && activePair && activePair[3]) activatePair(pairs[0], true);
+      if (persist) saveUiPreferences({ showMoreTools: showMoreTools });
+    }
+
+    moreToolsBtn.addEventListener('click', function () {
+      setMoreToolsVisible(!showMoreTools, true);
+    });
+
+    pairs.forEach(function (pair) {
+      pair[1].addEventListener('click', function () { activatePair(pair, true); });
       pair[1].addEventListener('keydown', function (event) {
         if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return;
         event.preventDefault();
-        var index = pairs.indexOf(pair);
-        var next = event.key === 'ArrowRight' ? (index + 1) % pairs.length : (index + pairs.length - 1) % pairs.length;
-        pairs[next][1].focus();
-        pairs[next][1].click();
+        var available = visiblePairs();
+        var index = available.indexOf(pair);
+        var next = event.key === 'ArrowRight' ? (index + 1) % available.length : (index + available.length - 1) % available.length;
+        available[next][1].focus();
+        activatePair(available[next], true);
       });
     });
+    setMoreToolsVisible(false, false);
+    activatePair(pairs[0], false);
 
     // Wrapped in one element so minimizing can hide tabs + all three tab
     // bodies with a single CSS rule (see ".lgt-collapsed .lgt-content"
@@ -2188,12 +2311,36 @@
     panel.appendChild(title);
     panel.appendChild(content);
     (document.body || document.documentElement).appendChild(panel);
-    panel.__lgtSwitchToLiveLogin = function () { tabB.click(); };
-    panel.__lgtSwitchToCredentials = function () { tabC.click(); };
+
+    function syncTabScrollbarOffset() {
+      var activeBody = pairs.filter(function (pair) { return pair[2].style.display !== 'none'; })[0];
+      var body = activeBody && activeBody[2];
+      if (!body || !body.offsetWidth) return;
+      var scrollbarWidth = Math.max(0, body.offsetWidth - body.clientWidth);
+      panel.style.setProperty('--lgt-tab-scrollbar-width', scrollbarWidth + 'px');
+      panel.style.setProperty('--lgt-tab-scrollbar-offset', -scrollbarWidth + 'px');
+    }
+    var layoutObserver = typeof ResizeObserver === 'function' ? new ResizeObserver(syncTabScrollbarOffset) : null;
+    if (layoutObserver) layoutObserver.observe(panel);
+    requestAnimationFrame(syncTabScrollbarOffset);
+    panel.__lgtLayoutCleanup = function () {
+      if (layoutObserver) layoutObserver.disconnect();
+    };
+    panel.__lgtSwitchToLiveLogin = function () {
+      // Auto-login resume is functional even when optional tools are hidden.
+      // Reveal them for this panel instance without silently changing the
+      // user's persisted preference.
+      if (!showMoreTools) setMoreToolsVisible(true, false);
+      activatePair(pairs.filter(function (pair) { return pair[0] === 'livelogin'; })[0], true);
+    };
+    panel.__lgtSwitchToCredentials = function () {
+      activatePair(pairs.filter(function (pair) { return pair[0] === 'creds'; })[0], true);
+    };
     panel.__lgtAutoLoginBtn = bodyB.__lgtAutoLoginBtn;
     panel.__lgtLocalLinksPanel = localLinksPanel;
     panel.__lgtShow = function () {
       panel.style.display = '';
+      requestAnimationFrame(syncTabScrollbarOffset);
       try { sessionStorage.setItem(PANEL_OPEN_KEY, '1'); } catch (e) {}
     };
     panel.__lgtHide = function () {
@@ -2203,6 +2350,7 @@
     panel.__lgtToggle = function () {
       var willShow = panel.style.display === 'none';
       panel.style.display = willShow ? '' : 'none';
+      if (willShow) requestAnimationFrame(syncTabScrollbarOffset);
       try { sessionStorage.setItem(PANEL_OPEN_KEY, willShow ? '1' : '0'); } catch (e) {}
     };
     // Restore panel open/collapsed state after a same-tab reload -
@@ -2211,15 +2359,25 @@
     // exactly where the user left it without leaking that state to
     // unrelated tabs/sites (unlike a chrome.storage.local flag, which
     // would be shared globally across every open tab).
+    var savedTabId = null;
     try {
       if (sessionStorage.getItem(PANEL_COLLAPSED_KEY) === '1') panel.classList.add('lgt-collapsed');
       if (sessionStorage.getItem(PANEL_OPEN_KEY) === '1') panel.style.display = '';
-      var savedTabId = sessionStorage.getItem(ACTIVE_TAB_KEY);
+      savedTabId = sessionStorage.getItem(ACTIVE_TAB_KEY);
       if (savedTabId) {
         var savedPair = pairs.filter(function (p) { return p[0] === savedTabId; })[0];
-        if (savedPair) savedPair[1].click();
+        if (savedPair && !savedPair[3]) activatePair(savedPair, false);
       }
     } catch (e) {}
+    chrome.storage.local.get([UI_PREFERENCES_KEY], function (res) {
+      var prefs = res && res[UI_PREFERENCES_KEY];
+      var storedMoreTools = !!(prefs && prefs.showMoreTools);
+      setMoreToolsVisible(storedMoreTools, false);
+      var savedPair = savedTabId && pairs.filter(function (pair) { return pair[0] === savedTabId; })[0];
+      if (savedPair && (!savedPair[3] || storedMoreTools)) activatePair(savedPair, false);
+      else if (savedPair && savedPair[3]) activatePair(pairs[0], true);
+    });
+    panel.__lgtMainDragCleanup = mainDragCleanup;
     return panel;
   }
 
@@ -2304,6 +2462,7 @@
     // repeat click for the SAME selection is allowed to keep the other
     // device's existing row untouched.
     var lastRenderedResultKey = null;
+    var retainedBrandDesktopContext = null;
     function resultKeyFor(brand, environment, loggedIn, bleSource, customerKey) {
       return brand + '|' + environment + '|' + (loggedIn ? '1' : '0') + '|' +
         (bleSource ? '1' : '0') + '|' + (customerKey || 'default');
@@ -2311,6 +2470,7 @@
     function ensureFreshResultFor(key) {
       if (key === lastRenderedResultKey) return;
       lastRenderedResultKey = key;
+      retainedBrandDesktopContext = null;
       [desktopRowContainer, mobileRowContainer, brandRowContainer].forEach(function (c) {
         c.innerHTML = '';
         c.style.display = 'none';
@@ -2323,11 +2483,97 @@
       result.style.display = '';
     }
 
+    function bleSourceEnabled() {
+      return (envSel.value === 'test' || envSel.value === 'qa') && bleChk.checked;
+    }
+
+    function configuredBrandSummary(environment, useBleSource) {
+      return environment.toUpperCase() + ' bundle · ' +
+        (environment === 'alpha' || environment === 'prod'
+          ? 'native BLE data'
+          : (useBleSource ? 'ALPHA BLE data' : 'BDE data'));
+    }
+
+    function setBrandPageContainer(link, rowBrand, rowEnvironment, useBleSource, launchContext) {
+      brandRowContainer.innerHTML = '';
+      var block = el('div', {});
+      var row = el('div', { class: 'lgt-link-row lgt-brand-link-row' });
+      row.appendChild(el('div', { class: 'lgt-link-label' }, ['Brand page']));
+      row.appendChild(el('div', { class: 'lgt-link-url', title: link || 'Not available' }, [link || 'Not available']));
+
+      var alphaSuffix = playgroundHostSuffixForBrand(rowBrand);
+      var unavailableReason = null;
+      if (!link) unavailableReason = 'Brand page is not available.';
+      else if (useBleSource && !launchContext) unavailableReason = 'Generate Desktop first for BLE Brand page.';
+      else if (useBleSource && !alphaSuffix) unavailableReason = 'This brand has no supported ALPHA BLE host.';
+
+      var openButtonAttrs = {
+        class: 'secondary',
+        type: 'button',
+        title: unavailableReason || 'Open with the selected standard bundle and data source',
+        onclick: async function () {
+          if (openButton.disabled) return;
+          openButton.disabled = true;
+          openButton.textContent = 'Opening…';
+          try {
+            await sendExtensionMessage({
+              type: 'lgt-open-configured-brand-page',
+              url: link,
+              brand: rowBrand,
+              brandId: BRANDS[rowBrand],
+              environment: rowEnvironment,
+              bleData: useBleSource ? {
+                alphaHost: 'd-cf.alpha.' + alphaSuffix,
+                stc: launchContext.stc,
+                ctx: launchContext.ctx
+              } : null
+            });
+            log.textContent = 'Opened configured Brand page: ' + configuredBrandSummary(rowEnvironment, useBleSource) + '.';
+            openButton.disabled = false;
+            openButton.textContent = 'Open configured';
+          } catch (error) {
+            log.textContent = 'Brand page open failed: ' + friendlyErrorMessage(error);
+            openButton.disabled = false;
+            openButton.textContent = 'Open configured';
+          }
+        }
+      };
+      if (unavailableReason) openButtonAttrs.disabled = 'disabled';
+      var openButton = el('button', openButtonAttrs, ['Open configured']);
+      row.appendChild(openButton);
+      block.appendChild(row);
+      block.appendChild(el('div', {
+        class: 'lgt-brand-launch-summary' + (unavailableReason ? ' error' : ''),
+        'aria-live': 'polite'
+      }, [unavailableReason || ('Open applies: ' + configuredBrandSummary(rowEnvironment, useBleSource))]));
+      brandRowContainer.appendChild(block);
+      brandRowContainer.style.display = '';
+      result.style.display = '';
+    }
+
+    function revealGeneratedResultsIfNeeded() {
+      requestAnimationFrame(function () {
+        if (result.style.display === 'none' || wrap.style.display === 'none') return;
+        var viewportRect = wrap.getBoundingClientRect();
+        var resultRect = result.getBoundingClientRect();
+        var bottomGap = 6;
+        if (resultRect.bottom <= viewportRect.bottom - bottomGap) return;
+
+        var availableHeight = Math.max(0, wrap.clientHeight - bottomGap * 2);
+        var delta = resultRect.height > availableHeight
+          ? resultRect.top - viewportRect.top - bottomGap
+          : resultRect.bottom - viewportRect.bottom + bottomGap;
+        if (delta <= 1) return;
+        var reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        wrap.scrollTo({ top: wrap.scrollTop + delta, behavior: reduceMotion ? 'auto' : 'smooth' });
+      });
+    }
+
     // Customer selects the base profile/jurisdiction. Language and currency
     // are loaded from the brand metadata endpoint and then applied to that
     // base profile when the exact user-context key is built.
     var customerSelect = el('select', { id: 'lgt-gen-customer', name: 'customer' });
-    var customerWrap = el('div', { class: 'lgt-field', style: 'display:none' }, [
+    var customerWrap = el('div', { class: 'lgt-field lgt-customer-field', style: 'display:none' }, [
       el('label', { for: 'lgt-gen-customer' }, ['Customer']),
       customerSelect
     ]);
@@ -2366,7 +2612,7 @@
     var pendingRestoreLocaleScope = null;
 
     function effectiveApiEnvironment() {
-      return bleChk.checked ? 'prod' : envSel.value;
+      return bleSourceEnabled() ? 'prod' : envSel.value;
     }
 
     function localeScope() {
@@ -2595,7 +2841,11 @@
     }
 
     brandSel.addEventListener('change', function () { saveGenState({ brand: brandSel.value }); refreshContextOptions(); });
-    envSel.addEventListener('change', function () { saveGenState({ environment: envSel.value }); refreshContextOptions(); });
+    envSel.addEventListener('change', function () {
+      saveGenState({ environment: envSel.value });
+      if (typeof refreshBleOptionVisibility === 'function') refreshBleOptionVisibility();
+      refreshContextOptions();
+    });
     loginSel.addEventListener('change', function () { saveGenState({ loginState: loginSel.value }); refreshContextOptions(); });
     bleChk.addEventListener('change', function () { saveGenState({ bleSource: bleChk.checked }); refreshContextOptions(); });
     forceFreshChk.addEventListener('change', function () { saveGenState({ forceFresh: forceFreshChk.checked }); });
@@ -2628,6 +2878,8 @@
       refreshContextOptions();
       if (typeof refreshCredBadge === 'function') refreshCredBadge();
       if (typeof refreshGenerateButtonMode === 'function') refreshGenerateButtonMode();
+      if (typeof refreshLiveLoginOptionVisibility === 'function') refreshLiveLoginOptionVisibility();
+      if (typeof refreshBleOptionVisibility === 'function') refreshBleOptionVisibility();
     });
 
     function selectedGeneratedCustomerKey() {
@@ -2672,7 +2924,7 @@
         var brand = brandSel.value;
         var environment = envSel.value;
         var loggedIn = loginSel.value === 'in';
-        var bleSource = bleChk.checked;
+        var bleSource = bleSourceEnabled();
         var forceFresh = forceFreshChk.checked;
         var baseCustomerKey = selectedBaseCustomerKey();
         var generatedCustomerKey = loggedIn ? baseCustomerKey : selectedGeneratedCustomerKey();
@@ -2691,10 +2943,18 @@
           log.textContent = 'Customer: ' + links.customerLabel;
           setRowContainer(desktopRowContainer, 'Desktop', links.desktop, brand, environment);
           setRowContainer(mobileRowContainer, 'Mobile', links.mobile, brand, environment);
-          setRowContainer(brandRowContainer, 'Brand page', realSportsbookUrl(brand, environment, links.customerKey), brand, environment);
+          retainedBrandDesktopContext = links.brandPageContexts ? links.brandPageContexts.desktop : null;
+          setBrandPageContainer(
+            realSportsbookUrl(brand, environment, links.customerKey),
+            brand,
+            environment,
+            bleSource,
+            bleSource ? retainedBrandDesktopContext : null
+          );
           localLinksPanel.render(links.localLinks, brand, environment);
           if (localLinksChk.checked) localLinksPanel.show();
           setBtnBusy(false);
+          revealGeneratedResultsIfNeeded();
         }
 
         // BLE source (?bleSource=1) only makes sense together with a
@@ -2736,6 +2996,7 @@ const links = await generateLink({ brand: brand, environment: environment, logge
             links.localLinks = spliceLocalLinkEntry(links.localLinks, brand, 'desktop', stcDesktop, ctxDesktop);
             links.localLinks = spliceLocalLinkEntry(links.localLinks, brand, 'mobile', stcMobile, ctxMobile);
             if (stcDesktop && ctxDesktop) {
+              retainedBrandDesktopContext = { stc: stcDesktop, ctx: ctxDesktop };
               var d = spliceContext(links.desktop, stcDesktop, ctxDesktop);
               setRowContainer(desktopRowContainer, 'Desktop (live-login' + suffix + ')', d, brand, environment);
             }
@@ -2743,13 +3004,20 @@ const links = await generateLink({ brand: brand, environment: environment, logge
               var m = spliceContext(links.mobile, stcMobile, ctxMobile);
               setRowContainer(mobileRowContainer, 'Mobile (live-login' + suffix + ')', m, brand, environment);
             }
-            setRowContainer(brandRowContainer, 'Brand page', realSportsbookUrl(brand, environment, links.customerKey), brand, environment);
+            setBrandPageContainer(
+              realSportsbookUrl(brand, environment, links.customerKey),
+              brand,
+              environment,
+              bleSourceWanted,
+              bleSourceWanted ? retainedBrandDesktopContext : null
+            );
             localLinksPanel.render(links.localLinks, brand, environment);
             if (localLinksChk.checked) localLinksPanel.show();
             if (bleSourceWanted) {
               log.textContent += ' (BLE source applied: logged in for real on prod - prod always serves live BLE events - rendered on the ' + environment + ' frontend with bleSource=1.)';
             }
             setBtnBusy(false);
+            revealGeneratedResultsIfNeeded();
 
 } catch (err) {
             log.textContent = 'Error building final link: ' + friendlyErrorMessage(err);
@@ -3233,7 +3501,7 @@ return renderLinks(await generateLink({ brand: brand, environment: environment, 
       var brand = brandSel.value;
       var environment = envSel.value;
       var loggedIn = loginSel.value === 'in';
-      var bleSource = bleChk.checked;
+      var bleSource = bleSourceEnabled();
       var token = ++genModeToken;
       if (!loggedIn) { applyGenButtonMode(false); return; }
       (async () => {
@@ -3289,8 +3557,8 @@ const hasKey = await hasLoggedInCustomerKey(brand, bleSource ? 'prod' : environm
     wrap.appendChild(contextOptionsArea);
     var localLinksWrap = el('label', { class: 'lgt-checkbox-row' }, [localLinksChk, ' Local links']);
     var bleWrap = el('label', { class: 'lgt-checkbox-row' }, [bleChk, ' BLE source']);
-    var forceFreshWrap = el('label', { class: 'lgt-checkbox-row lgt-live-login-option' }, [forceFreshChk, ' Force fresh live-login']);
-    var forceVisibleWrap = el('label', { class: 'lgt-checkbox-row lgt-live-login-option' }, [forceVisibleChk, ' Show login tab']);
+    var forceFreshWrap = el('label', { class: 'lgt-checkbox-row lgt-live-login-option', hidden: 'hidden' }, [forceFreshChk, ' Force fresh live-login']);
+    var forceVisibleWrap = el('label', { class: 'lgt-checkbox-row lgt-live-login-option', hidden: 'hidden' }, [forceVisibleChk, ' Show login tab']);
     var srSpoofChk = el('input', { type: 'checkbox' });
     srSpoofChk.checked = srSpoofSettingCache;
     srSpoofChkRef = srSpoofChk;
@@ -3319,13 +3587,33 @@ const hasKey = await hasLoggedInCustomerKey(brand, bleSource ? 'prod' : environm
       forceFreshWrap,
       forceVisibleWrap
     ]);
+    var forceFreshHelp = el('li', { class: 'lgt-live-login-help-option', hidden: 'hidden' }, [
+      'Force fresh live-login: skips the 30-minute cache for logged-in generation when no test customer exists.'
+    ]);
+    var forceVisibleHelp = el('li', { class: 'lgt-live-login-help-option', hidden: 'hidden' }, [
+      'Show login tab: forces the login flow to stay visible instead of using the remembered silent setting for this brand.'
+    ]);
+    var bleHelp = el('li', {}, ['BLE source: uses fresh ALPHA BLE events on TEST/QA Brand pages and generated links.']);
+    function refreshBleOptionVisibility() {
+      var visible = envSel.value === 'test' || envSel.value === 'qa';
+      bleWrap.hidden = !visible;
+      bleHelp.hidden = !visible;
+    }
+    function refreshLiveLoginOptionVisibility() {
+      var visible = loginSel.value === 'in';
+      [forceFreshWrap, forceVisibleWrap, forceFreshHelp, forceVisibleHelp].forEach(function (node) {
+        node.hidden = !visible;
+      });
+    }
+    loginSel.addEventListener('change', refreshLiveLoginOptionVisibility);
     wrap.appendChild(optionGrid);
     wrap.appendChild(localLinksHint);
     wrap.appendChild(buildDisclosure('What do these options do?', [
       el('ul', {}, [
-        el('li', {}, ['BLE source: uses fresh live events from BLE on TEST/QA links.']),
-        el('li', {}, ['Force fresh live-login: skips the 30-minute cache for logged-in generation when no test customer exists.']),
-        el('li', {}, ['Show login tab: forces the login flow to stay visible instead of using the remembered silent setting for this brand.']),
+        bleHelp,
+        el('li', {}, ['Brand page “Open configured” applies the selected standard bundle and data source to the new tab. Bundle and BLE state cannot be copied as part of its URL.']),
+        forceFreshHelp,
+        forceVisibleHelp,
         el('li', {}, ['Sportradar Statistics fix: automatically spoofs Origin/Referer and CORS on matching page loads so licensed widgets can render.']),
         el('li', {}, ['Oddin Statistics fix: Firestorm TEST/QA only; retries the Referer from ALPHA to PROD once and does not change CORS.'])
       ])
@@ -3335,6 +3623,8 @@ const hasKey = await hasLoggedInCustomerKey(brand, bleSource ? 'prod' : environm
     wrap.appendChild(log);
     wrap.appendChild(result);
     refreshGenerateButtonMode();
+    refreshLiveLoginOptionVisibility();
+    refreshBleOptionVisibility();
     return wrap;
   }
 
@@ -3654,7 +3944,7 @@ const ok = await attemptAutoLogin(detected.brand, cred.username, cred.password, 
   // version/environment source (only the runtime layer markers above and
   // the independent network evidence are), so nothing needs a user to
   // click a button to "confirm" it.
-  var STATUS_LABELS = { confirmed: 'Confirmed', partial: 'Partially verified', mismatch: 'Mismatch', unclassified: 'Unclassified' };
+  var STATUS_LABELS = { match: 'Matches URL', overridden: 'Overridden', partial: 'Partially verified', mismatch: 'Mismatch', unclassified: 'Unclassified' };
   // Layer -> user-facing label. Internally we key everything on 'iframe'
   // (network/runtime store keys, classification logic, tests) because
   // that is the identifier the original spec used for whatever exposes
@@ -3712,11 +4002,24 @@ const ok = await attemptAutoLogin(detected.brand, cred.username, cred.password, 
         var line = el('div', { class: 'lgt-build-row' }, [label, badge]);
         wrap.appendChild(line);
         if (row.status === 'mismatch') {
-          wrap.appendChild(el('div', { class: 'lgt-build-alert' }, ['Runtime and network evidence conflict.']));
+          wrap.appendChild(el('div', { class: 'lgt-build-alert' }, [
+            row.requestedEnvironment && row.loadedEnvironment
+              ? ('URL requests ' + row.requestedEnvironment.toUpperCase() + ', but ' + row.loadedEnvironment.toUpperCase() + ' bundle is loaded.')
+              : 'URL and loaded bundle environments do not match.'
+          ]));
+        }
+        if (row.status === 'overridden') {
+          wrap.appendChild(el('div', { class: 'lgt-build-override' }, [
+            'URL requests ' + row.requestedEnvironment.toUpperCase() + '; Link Gen override intentionally loaded ' + row.loadedEnvironment.toUpperCase() + '.'
+          ]));
+        }
+        if (row.evidenceWarnings && row.evidenceWarnings.length) {
+          wrap.appendChild(el('div', { class: 'lgt-build-evidence-warning' }, ['Evidence warning: detection evidence differs.']));
         }
         if (row.detail) {
           var summaryByStatus = {
-            confirmed: 'Why Confirmed?',
+            match: 'Show detection details',
+            overridden: 'Show override details',
             partial: 'Why Partially verified?',
             mismatch: 'Show mismatch details',
             unclassified: 'Why Unclassified?'
@@ -3775,11 +4078,11 @@ const ok = await attemptAutoLogin(detected.brand, cred.username, cred.password, 
     var runtimeTruth = el('div', { class: 'lgt-result' }, ['Host: ?  |  Bundle: ?  |  Backend: ?']);
     // "Host: <env>" above is a URL/hostname heuristic only (see
     // detectBrandAndEnv - it never re-verifies against the page's own
-    // runtime marker). On a real brand domain reachable without true
+    // loaded bundle evidence). On a real brand domain reachable without true
     // environment-specific network access (e.g. no VPN/whitelist for a
     // true ALPHA edge), the domain can nominally be e.g. "alpha.betsson.com"
-    // while the page's OWN runtime marker (and every network request it
-    // makes) genuinely, correctly reports a fallback build (verified live,
+    // while the page's network requests genuinely report a fallback build
+    // (verified live,
     // 2026-09-04: a fresh, un-overridden alpha.betsson.com visit from a
     // non-VPN'd session served 34/34 requests from /dist/prod/... with a
     // runtime marker reading "prod", not "alpha" - a real platform
@@ -3802,14 +4105,14 @@ const ok = await attemptAutoLogin(detected.brand, cred.username, cred.password, 
     // requests to TEST going forward. The functional result is a real
     // "(whatever the page actually natively is)+TEST" combination, not
     // literally "ALPHA+TEST", even though the Host/Backend labels (based
-    // on the URL, not reality) say ALPHA. lastDetectedRuntimeEnv below
+    // on the URL, not reality) say ALPHA. lastDetectedLoadedEnv below
     // (kept in sync from the live per-tab detection engine, the same
     // source computeDetectionRows itself uses) is what makes that gap
     // visible instead of silently trusting the URL-based label.
-    var lastDetectedRuntimeEnv = null;
+    var lastDetectedLoadedEnv = null;
     var hostRealityDetail = el('div', {}, ['']);
     var hostRealityNote = el('div', { style: 'display:none' }, [
-      el('div', { class: 'lgt-alert warning' }, ['\u26a0 Page runtime does not match the URL environment.']),
+      el('div', { class: 'lgt-alert warning' }, ['\u26a0 Loaded bundle does not match the URL environment.']),
       buildDisclosure('Show environment mismatch details', [hostRealityDetail], 'lgt-host-reality-details')
     ]);
     var targetEnvBadge = el('div', { class: 'lgt-hint' }, ['']);
@@ -3833,12 +4136,12 @@ const ok = await attemptAutoLogin(detected.brand, cred.username, cred.password, 
         : 'Unknown layer for this environment.';
       var backendEnv = modeSel.value === 'full-runtime' ? targetEnvSel.value : curEnvSel.value;
       // Both Host and Backend are the SAME URL-derived assumption (see the
-      // comment above hostRealityNote/lastDetectedRuntimeEnv) - append the
+      // comment above hostRealityNote/lastDetectedLoadedEnv) - append the
       // live-detected real environment inline, right in this primary
       // diagnostic line, whenever it disagrees, instead of only in a
       // note underneath that is easy to miss.
-      var realitySuffix = (lastDetectedRuntimeEnv && lastDetectedRuntimeEnv !== curEnvSel.value)
-        ? (' [really ' + lastDetectedRuntimeEnv.toUpperCase() + ' right now]')
+      var realitySuffix = (lastDetectedLoadedEnv && lastDetectedLoadedEnv !== curEnvSel.value)
+        ? (' [loaded bundle ' + lastDetectedLoadedEnv.toUpperCase() + ']')
         : '';
       runtimeTruth.textContent = 'Host: ' + curEnvSel.value.toUpperCase() + realitySuffix +
         '  |  Bundle: ' + (targetEnvSel.value || '?').toUpperCase() +
@@ -3906,18 +4209,18 @@ const ok = await attemptAutoLogin(detected.brand, cred.username, cred.password, 
         if (!res || !res.ok || !res.rows) return;
         var hostEnv = curEnvSel.value;
         var diverging = res.rows.filter(function (row) {
-          return row.runtimeEnvironment && row.runtimeEnvironment !== hostEnv;
+          return row.loadedEnvironment && row.loadedEnvironment !== hostEnv;
         });
-        var newDetected = diverging.length ? diverging[0].runtimeEnvironment : null;
-        if (newDetected !== lastDetectedRuntimeEnv) {
-          lastDetectedRuntimeEnv = newDetected;
-          refreshTargetEnv(false); // updates the Host/Backend line's inline "[really X]" suffix
+        var newDetected = diverging.length ? diverging[0].loadedEnvironment : null;
+        if (newDetected !== lastDetectedLoadedEnv) {
+          lastDetectedLoadedEnv = newDetected;
+          refreshTargetEnv(false); // updates the Host line's inline loaded-bundle suffix
         }
         if (diverging.length) {
           var seen = {};
-          var envs = diverging.map(function (row) { return row.runtimeEnvironment.toUpperCase(); }).filter(function (e) { return seen[e] ? false : (seen[e] = true); });
-          hostRealityDetail.textContent = 'Host/Backend are labeled ' + hostEnv.toUpperCase() + ' from the URL only, while the page\u2019s runtime marker reports ' +
-            envs.join('/') + ' on this browser/network right now (e.g. no true ' + hostEnv.toUpperCase() + ' edge access from here). Hybrid mode never touches backend/API requests, only the ' +
+          var envs = diverging.map(function (row) { return row.loadedEnvironment.toUpperCase(); }).filter(function (e) { return seen[e] ? false : (seen[e] = true); });
+          hostRealityDetail.textContent = 'Host/Backend are labeled ' + hostEnv.toUpperCase() + ' from the URL, while network evidence shows that the page loaded a ' +
+            envs.join('/') + ' sportsbook bundle. Hybrid mode never touches backend/API requests, only the ' +
             'bundle\u2019s .js/config.json files, so applying an override now produces a REAL "' + envs.join('/') + ' native content + your chosen target bundle" combination, ' +
             'not literally "' + hostEnv.toUpperCase() + ' + target" - the network-level redirect itself is unaffected and still correctly targets what you pick below.';
           hostRealityNote.style.display = '';
@@ -4117,7 +4420,7 @@ const ok = await attemptAutoLogin(detected.brand, cred.username, cred.password, 
     void refreshDetectedDevice().catch(function () {});
 
     function alphaHostForBrand(brand) {
-      var suffix = PLAYGROUND_HOST_SUFFIX[brand];
+      var suffix = playgroundHostSuffixForBrand(brand);
       return suffix ? ('d-cf.alpha.' + suffix) : null;
     }
 
@@ -4857,6 +5160,8 @@ const loginOk = await attemptAutoLogin(job.brand, cred.username, cred.password, 
   window.__lgtExtInstance = {
     destroy: function () {
       if (panelEl && panelEl.__lgtLocalLinksPanel) panelEl.__lgtLocalLinksPanel.destroy();
+      if (panelEl && panelEl.__lgtMainDragCleanup) panelEl.__lgtMainDragCleanup();
+      if (panelEl && panelEl.__lgtLayoutCleanup) panelEl.__lgtLayoutCleanup();
       if (panelEl && panelEl.parentNode) panelEl.parentNode.removeChild(panelEl);
       var oldStyle = document.getElementById('lgt-panel-style');
       if (oldStyle && oldStyle.parentNode) oldStyle.parentNode.removeChild(oldStyle);

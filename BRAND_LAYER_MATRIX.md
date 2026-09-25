@@ -11,6 +11,23 @@ Playwright tests deliberately do not do (see `test-layer-detection.cjs`
 for the mocked/offline equivalent that exercises the same classification
 engine without needing live brand access).
 
+## Current status semantics (v1.22.46)
+
+The primary badge compares the environment requested by the top-level URL
+with the bundle environment directly observed in the loaded network artifact:
+
+- **Matches URL** — requested and loaded environments are equal.
+- **Overridden** — they differ, but this extension has an active per-tab
+  override whose target is confirmed by the loaded artifact.
+- **Mismatch** — they differ without such a confirmed Link Gen override.
+- **Partially verified** — one side of the comparison has not been observed yet.
+- **Unclassified** — the build can be observed but its runtime layer cannot.
+
+Runtime-marker versus network version/environment conflicts are shown as a
+separate evidence warning. They do not replace the URL-versus-loaded-bundle
+result. An active override record alone is insufficient for **Overridden**: its
+configured target must also match the loaded artifact.
+
 > **Naming note**: the display label for this layer is **"Fabric"**
 > (matching the dev team's own name and the third-party Sportsbook
 > Tool extension's `(Fabric + mFE)` label), even though it's still keyed
@@ -47,7 +64,7 @@ tests run automatically; live brand tests are manual).
    the runtime markers and for `background.js`'s network confirmation to
    catch up.
 3. Record one row per **brand + layer + device** combination shown,
-   including its status (Confirmed / Partially verified / Mismatch /
+   including its status (Matches URL / Overridden / Partially verified / Mismatch /
    Unclassified).
 4. If a brand shows **no** rows at all after ~20s, it likely has no SB
    integration on that page, or the runtime marker it uses isn't one of
@@ -59,15 +76,16 @@ tests run automatically; live brand tests are manual).
 
 | Brand | Layer(s) observed | Device | Environment | Status | Last verified | Notes |
 |---|---|---|---|---|---|---|
-| Firestorm | Fabric | desktop | QA | Confirmed | _(spec example, not yet independently re-verified)_ | QA-only brand, no real domain (`BRAND_DOMAINS` has no entry) |
-| Betsson | MFE + Fabric | desktop | ALPHA (runtime says PROD) | **Mismatch, or Confirmed if our Bundle Override applied it** | 2026-09-05 | `alpha.betsson.com/en/sportsbook/live/tennis?exposeObgState=true&exposeObgRt=true&sealStore=false` — see "Known observed Mismatch patterns" below; the third-party Sportsbook Tool extension and our own network confirmation both agree on `v8.2.5.4941-reba6fd9 / ALPHA`, but `sbMfeStartupContext`/`obgClientEnvironmentConfig.startupContext` report a stale `v8.1.16.4855-rb8bfa90 / PROD` — a real page-side data split. If reached via this extension's own Bundle Override (Apply → ALPHA), the row auto-resolves to Confirmed with an explanatory note; otherwise it stays Mismatch |
+| Firestorm | Fabric | desktop | QA | Matches URL | _(spec example, not yet independently re-verified)_ | QA-only brand, no real domain (`BRAND_DOMAINS` has no entry) |
+| Betsson | MFE + Fabric | desktop | ALPHA (runtime says PROD) | **Matches URL** | 2026-09-05 | `alpha.betsson.com/en/sportsbook/live/tennis?exposeObgState=true&exposeObgRt=true&sealStore=false` — network evidence confirms ALPHA matches the ALPHA URL; the pinned PROD runtime marker is retained as a separate evidence warning. A cross-environment Link Gen override is **Overridden** only when its target is observed in the loaded artifact. |
 | NordicBet | — | — | — | — | _(pending)_ | Real domain: nordicbet.com |
 | _(remaining ~39 QA-indexer brands)_ | — | — | — | — | _(pending)_ | Populate using the procedure above as brands are tested |
 
-## Known observed Mismatch patterns
+## Known observed evidence patterns
 
 - **`alpha.betsson.com` + `exposeObgState=true&exposeObgRt=true&sealStore=false`
-  (2026-09-04)**: both the MFE and Fabric rows show Mismatch — runtime
+  (2026-09-04)**: the MFE and Fabric rows show **Matches URL** when the
+  ALPHA network artifact is loaded from an ALPHA URL; a separate warning records that runtime
   reports `v8.1.16.4855-rb8bfa90 / PROD`, network reports
   `v8.2.5.4941-reba6fd9 / ALPHA`. Verified independently with a
   standalone Playwright script (no extension) against the same URL: a
@@ -102,7 +120,8 @@ tests run automatically; live brand tests are manual).
     **auto-resolved**. `computeDetectionRows` recognizes this exact
     pattern (`bundleOverrideExplainsEnvDivergence`, added 2026-09-05) via
     a per-tab record of the active override's target env, and renders
-    the row as **Confirmed** using the network-side version/environment
+    the row as **Matches URL** for a same-environment override, or
+    **Overridden** for a cross-environment override, using the network-side version/environment
     (what is actually running), with a `detail` note explaining the
     pinned-runtime-vs-live-network split — instead of Mismatch. This
     mirrors how the third-party Sportsbook Tool's own override already
@@ -142,31 +161,23 @@ tests run automatically; live brand tests are manual).
   - **The page reached ALPHA/TEST content some other way** (a real
     VPN'd/whitelisted session, or an upstream environment-level routing
     decision — i.e. *not* via this extension's own Bundle Override):
-    still correctly surfaced as **Mismatch**, because there is no
-    per-tab override record to explain the split. This is the scenario
-    the original 2026-09-04 screenshot most likely reflects, and it
-    remains a real, actionable signal — either report it to the
-    brand/page owner, or reproduce it with our own Bundle Override
-    applied first to get the auto-resolved Confirmed view instead.
+    is classified strictly from URL versus loaded artifact. Matching
+    environments produce **Matches URL** and retain the marker split as
+    an evidence warning; differing environments produce **Mismatch**.
 
   **Conclusion**: the split itself is a genuine, expected characteristic
   of how these brand pages embed their startup context — not a detection
-  bug. Whether it should *display* as Confirmed (our own override
-  explains it) or Mismatch (no known explanation) now depends on whether
-  the Bundle Override that produced the ALPHA/TEST network traffic was
-  applied through this extension's own Bundle tab. Treat any brand+layer
-  row that stays on Mismatch indefinitely with no Bundle Override active
-  (i.e. does not self-resolve like a `Partially verified` row does once
-  network confirmation catches up, and isn't explained by an active
-  override) as a real signal worth reporting to the brand/page owner, not
-  as a tool defect.
+  bug. The primary badge now answers only whether the URL-requested and
+  loaded environments match. A differing artifact becomes **Overridden**
+  only when this extension's active target is observed; otherwise it stays
+  **Mismatch** and is worth investigating.
 
   **Headline display consistency fix (2026-09-05)**: a real, reported
   inconsistency was found in how the two outcomes above were *displayed*.
   Before this fix, `computeDetectionRows` only substituted the
   network-side version/environment into the row's headline when
   `bundleOverrideExplainsEnvDivergence` was true (the auto-resolved
-  Confirmed case); an otherwise-identical, unexplained Mismatch (e.g. the
+  override-explained case); an otherwise-identical, unexplained Mismatch (e.g. the
   cross-layer hybrid case, or any Mismatch reached without this
   extension's own Bundle Override) instead displayed the raw runtime
   marker value. Since the runtime marker is *always* pinned to its
@@ -174,7 +185,7 @@ tests run automatically; live brand tests are manual).
   the exact same underlying fact — a page's runtime marker never reflects
   which bundle is truly executing — was shown two different ways
   depending on which bucket a row landed in: "ALPHA" in the
-  override-explained Confirmed row, "PROD" in the unexplained Mismatch
+  override-explained row, "PROD" in the unexplained Mismatch
   row. This looked like the tool sometimes could detect an override in
   the runtime and sometimes couldn't, when in truth it never can — only
   the network side ever reflects it.
@@ -186,10 +197,10 @@ tests run automatically; live brand tests are manual).
   runtime marker's differing value is still fully preserved in the
   conflict-detail text for Mismatch rows (`version: runtime=... vs
   network=...`) — only the headline's *selection rule* changed, not what
-  evidence is shown or how Confirmed vs. Mismatch is decided. See
+  evidence is shown or how the primary status is decided. See
   `test-layer-detection.cjs` Scenario 3 and Scenario 8 for the automated
   assertions locking this in (both the baseline unexplained-Mismatch case
-  and the override-explained Confirmed case must show the identical
+  and the override-explained case must show the identical
   network-confirmed headline value).
 
   **Bundle tab "Host" label vs. runtime marker — a separate, related
