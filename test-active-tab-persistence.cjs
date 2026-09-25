@@ -8,6 +8,7 @@ const { chromium } = require('playwright');
 
 async function main() {
   const extensionPath = path.resolve(__dirname, 'extension');
+  const fixtureUrl = 'https://internal.test.sbplayground1.net/active-tab-fixture/';
   const context = await chromium.launchPersistentContext(
     path.join(os.tmpdir(), 'lgt-active-tab-' + Date.now()),
     {
@@ -26,9 +27,13 @@ async function main() {
     if (!serviceWorker) serviceWorker = await context.waitForEvent('serviceworker', { timeout: 15000 });
 
     const page = await context.newPage();
-    await page.goto('https://example.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.route(fixtureUrl, (route) => route.fulfill({
+      contentType: 'text/html',
+      body: '<!doctype html><title>Active tab fixture</title>'
+    }));
+    await page.goto(fixtureUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await serviceWorker.evaluate(async () => {
-      const tabs = await chrome.tabs.query({ url: 'https://example.com/*' });
+      const tabs = await chrome.tabs.query({ url: 'https://internal.test.sbplayground1.net/*' });
       await new Promise((resolve) => {
         chrome.tabs.sendMessage(tabs[0].id, { type: 'lgt-toggle-panel' }, () => resolve());
       });

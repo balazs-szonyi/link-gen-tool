@@ -235,7 +235,7 @@ async function main() {
     await panel.getByText(/Swedish \(SV\).*Swedish Krona \(SEK\).*Logged Out/).waitFor();
     assert(requestedContextKeys.includes('logged-out-sv-sek-ksa-beta'), 'Customer profile suffix was not preserved');
 
-    // Exercise the actual Open action, not only the displayed URL. Keep it
+    // Exercise the actual configured Open action, not only the displayed URL. Keep it
     // last because opening an active tab deliberately changes Chrome's
     // active-tab state, which is outside the locale-generation assertions.
     await panel.locator('#lgt-gen-brand').selectOption('arcticbet');
@@ -254,17 +254,70 @@ async function main() {
       await route.fulfill({ status: 200, contentType: 'text/html', body: '<!doctype html><title>ArcticBet Sportsbook target</title>' });
     });
     const openedBrandPagePromise = context.waitForEvent('page');
-    await finalBrandPage.getByRole('button', { name: 'Open', exact: true }).click();
+    assert.strictEqual(await finalBrandPage.getByRole('button', { name: 'Copy', exact: true }).count(), 0);
+    await finalBrandPage.getByRole('button', { name: 'Open configured', exact: true }).click();
     const openedBrandPage = await openedBrandPagePromise;
+    const openStatus = panel.getByText(/^(Opened configured Brand page|Brand page open failed):/);
+    await openStatus.waitFor({ timeout: 30000 });
+    assert.match(await openStatus.textContent(), /^Opened configured Brand page:/);
+    await openedBrandPage.waitForURL('https://www.test.arcticbet.com/en/sportsbook', { timeout: 30000 });
     await openedBrandPage.waitForLoadState('domcontentloaded');
     assert.strictEqual(
       openedBrandPage.url(),
       'https://www.test.arcticbet.com/en/sportsbook',
-      'Open must navigate to the exact Sportsbook URL displayed in the Brand page row'
+      'Open configured must navigate to the exact Sportsbook URL displayed in the Brand page row'
     );
+    const configuredRules = await context.serviceWorkers()[0].evaluate(async (targetUrl) => {
+      const tabs = await chrome.tabs.query({ url: targetUrl });
+      const tabId = tabs[0] && tabs[0].id;
+      const rules = await chrome.declarativeNetRequest.getSessionRules();
+      return rules.filter((rule) => (rule.condition.tabIds || []).includes(tabId));
+    }, openedBrandPage.url());
+    assert(configuredRules.length > 0, 'Open configured must install the standard TEST bundle before navigation');
     await openedBrandPage.close();
 
-    console.log('PASS: locale context generation, persistence, Sandbox fallback, and exact Brand page Open navigation work.');
+    await finalBle.check();
+    await panel.locator('.lgt-context-options[aria-busy="false"]').waitFor();
+    await panel.getByRole('button', { name: 'Generate', exact: true }).click();
+    await panel.locator('.lgt-brand-launch-summary').filter({ hasText: 'TEST bundle · ALPHA BLE data' }).waitFor();
+    const openedBleBrandPagePromise = context.waitForEvent('page');
+    await finalBrandPage.getByRole('button', { name: 'Open configured', exact: true }).click();
+    const openedBleBrandPage = await openedBleBrandPagePromise;
+    await panel.getByText(/^Opened configured Brand page: TEST bundle · ALPHA BLE data\.$/).waitFor({ timeout: 30000 });
+    await openedBleBrandPage.waitForURL('https://www.test.arcticbet.com/en/sportsbook', { timeout: 30000 });
+    const combinedRules = await context.serviceWorkers()[0].evaluate(async (targetUrl) => {
+      const tabs = await chrome.tabs.query({ url: targetUrl });
+      const tabId = tabs[0] && tabs[0].id;
+      return (await chrome.declarativeNetRequest.getSessionRules())
+        .filter((rule) => (rule.condition.tabIds || []).includes(tabId));
+    }, openedBleBrandPage.url());
+    assert(combinedRules.some((rule) => rule.action.redirect && /d-cf\.alpha\.arcticbetplayground\.net/.test(JSON.stringify(rule.action.redirect))),
+      'Configured BLE launch must redirect sportsbook API traffic to the brand ALPHA host');
+    assert(combinedRules.some((rule) => (rule.action.requestHeaders || []).some((header) => header.header === 'x-sb-static-context-id')),
+      'Configured BLE launch must install the generated desktop context headers');
+    await openedBleBrandPage.close();
+
+    await finalBle.uncheck();
+    await panel.locator('#lgt-gen-brand').selectOption('betssonpe');
+    await panel.locator('#lgt-gen-environment').selectOption('qa');
+    await panel.locator('.lgt-context-options[aria-busy="false"]').waitFor();
+    await panel.locator('#lgt-gen-language').selectOption('en');
+    await panel.locator('#lgt-gen-currency').selectOption('EUR');
+    await panel.getByRole('button', { name: 'Generate', exact: true }).click();
+    const peruBrandPage = panel.locator('.lgt-brand-link-row');
+    await peruBrandPage.getByText('https://www.qa.betsson.pe/en/sportsbook', { exact: true }).waitFor();
+    await context.route('https://www.qa.betsson.pe/**', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'text/html', body: '<!doctype html><title>Betsson Peru Sportsbook target</title>' });
+    });
+    const openedPeruPagePromise = context.waitForEvent('page');
+    await peruBrandPage.getByRole('button', { name: 'Open configured', exact: true }).click();
+    const openedPeruPage = await openedPeruPagePromise;
+    await panel.getByText(/^Opened configured Brand page: QA bundle · BDE data\.$/).waitFor({ timeout: 30000 });
+    await openedPeruPage.waitForURL('https://www.qa.betsson.pe/en/sportsbook', { timeout: 30000 });
+    assert.equal(openedPeruPage.url(), 'https://www.qa.betsson.pe/en/sportsbook');
+    await openedPeruPage.close();
+
+    console.log('PASS: locale context generation, persistence, Sandbox fallback, and configured Brand page navigation (including Betsson Peru) work.');
   } finally {
     await context.close();
   }

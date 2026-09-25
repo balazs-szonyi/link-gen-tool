@@ -49,6 +49,9 @@ async function main() {
     await page.waitForTimeout(500);
 
     async function seed(runtimeMarkers, network, frameDoc) {
+      frameDoc = Object.assign({
+        0: { url: PAGE_URL, hostname: 'd-cf.qa.sbplayground1.net', env: 'qa', brand: null }
+      }, frameDoc);
       await serviceWorker.evaluate(async ({ runtimeMarkers, network, frameDoc }) => {
         const tabs = await chrome.tabs.query({ active: true });
         const tabId = tabs[0].id;
@@ -86,6 +89,11 @@ async function main() {
             condition: { urlFilter: '||bundle-source.example.invalid/', resourceTypes: ['script'], tabIds: [tabId] }
           }] : []
         });
+        await workerStore.update('dnr/bundle', tabId, () => targetEnv ? {
+          targetEnv,
+          status: 'active',
+          scope: { kind: 'tab' }
+        } : null);
       }, targetEnv);
     }
 
@@ -116,8 +124,7 @@ async function main() {
       await new Promise((resolve) => chrome.tabs.sendMessage(tabs[0].id, { type: 'lgt-toggle-panel' }, resolve));
     });
 
-    // Scenario 1: MFE layer Confirmed - runtime marker and network
-    // observation agree on version+environment for the SAME brand.
+    // Scenario 1: the URL requests QA and the observed MFE artifact is QA.
     let panel = page.locator('#lgt-panel');
     function panelRows() { return panel.locator('.lgt-build-row'); }
     await seed(
@@ -128,8 +135,8 @@ async function main() {
     await panel.waitFor({ state: 'visible', timeout: 10000 });
     let texts = await waitForRows((t) => t.length === 1 && /Firestorm/.test(t[0]), 10000);
     assert.match(texts[0], /Firestorm.*MFE.*v8\.2\.3\.4918-re0ade7b.*QA/s);
-    assert.match(texts[0], /Confirmed/);
-    console.log('PASS: matching runtime+network evidence for one brand+layer renders Confirmed.');
+    assert.match(texts[0], /Matches URL/);
+    console.log('PASS: a loaded bundle environment matching the top-level URL renders Matches URL.');
 
     // Scenario 2: same page, second brand/layer (iframe) with a DIFFERENT
     // version stays in its OWN row - no cross-brand/cross-layer mixing.
@@ -140,47 +147,47 @@ async function main() {
       },
       {
         0: { mfe: { brandId: '11111111-1111-1111-1111-111111111111', brand: 'firestorm', device: 'desktop', version: '8.2.3.4918-re0ade7b', hostEnv: 'qa', artifactEnv: 'qa', artifactEnvs: ['qa'], url: PAGE_URL, ts: Date.now() } },
-        1: { iframe: { brandId: '0e5d414b-5234-4050-9fc3-ce1127e18704', brand: 'nordicbet', device: 'mobile', version: '8.2.1.4910-h96b2913', headerVersion: '8.2.1.4910-h96b2913', hostEnv: 'qa', url: PAGE_URL, ts: Date.now() } }
+        1: { iframe: { brandId: '0e5d414b-5234-4050-9fc3-ce1127e18704', brand: 'nordicbet', device: 'mobile', version: '8.2.1.4910-h96b2913', headerVersion: '8.2.1.4910-h96b2913', hostEnv: 'qa', artifactEnv: 'qa', artifactEnvs: ['qa'], url: PAGE_URL, ts: Date.now() } }
       },
       {}
     );
     texts = await waitForRows((t) => t.length === 2, 10000);
-    assert.match(texts[0], /Firestorm.*MFE.*v8\.2\.3\.4918-re0ade7b.*QA.*Confirmed/s);
-    assert.match(texts[1], /Nordicbet.*Fabric.*v8\.2\.1\.4910-h96b2913.*QA.*Confirmed/s);
-    console.log('PASS: MFE and Fabric/OBGA layers on one page render as two independent rows, each Confirmed on its own evidence.');
+    assert.match(texts[0], /Firestorm.*MFE.*v8\.2\.3\.4918-re0ade7b.*QA.*Matches URL/s);
+    assert.match(texts[1], /Nordicbet.*Fabric.*v8\.2\.1\.4910-h96b2913.*QA.*Matches URL/s);
+    console.log('PASS: MFE and Fabric/OBGA rows independently compare their loaded artifacts with the top-level URL.');
 
-    // Scenario 3: Mismatch - runtime and network evidence for the SAME
-    // brand+layer disagree on version.
+    // Scenario 3: version evidence can disagree while the loaded bundle
+    // environment still matches the URL. The primary badge remains about
+    // environment truth, and the version split is a separate warning.
     await seed(
       { 0: { mfe: { brandId: '11111111-1111-1111-1111-111111111111', brandName: 'Firestorm', version: '8.2.3.4918-re0ade7b', environment: 'qa', ts: Date.now() } } },
       { 0: { mfe: { brandId: '11111111-1111-1111-1111-111111111111', brand: 'firestorm', device: 'desktop', version: '8.1.15.4896-hc2cb4ed', hostEnv: 'qa', artifactEnv: 'qa', artifactEnvs: ['qa'], url: PAGE_URL, ts: Date.now() } } },
       {}
     );
-    texts = await waitForRows((t) => t.length === 1 && /Mismatch/.test(t[0]), 10000);
-    const mismatchAlert = panel.locator('.lgt-build-alert');
-    assert.equal((await mismatchAlert.innerText()).trim(), 'Runtime and network evidence conflict.');
-    const mismatchDisclosure = panel.locator('.lgt-build-disclosure').first();
-    assert.equal(await mismatchDisclosure.evaluate((node) => node.open), false);
-    assert.equal((await mismatchDisclosure.locator('summary').innerText()).trim(), 'Show mismatch details');
+    texts = await waitForRows((t) => t.length === 1 && /Firestorm.*v8\.1\.15\.4896-hc2cb4ed.*Matches URL/s.test(t[0]), 10000);
+    assert.equal((await panel.locator('.lgt-build-evidence-warning').innerText()).trim(), 'Evidence warning: detection evidence differs.');
+    const evidenceDisclosure = panel.locator('.lgt-build-disclosure').first();
+    assert.equal(await evidenceDisclosure.evaluate((node) => node.open), false);
+    assert.equal((await evidenceDisclosure.locator('summary').innerText()).trim(), 'Show detection details');
     const detailText = await panel.locator('.lgt-build-detail').first().textContent();
     assert.match(detailText, /version: runtime=v8\.2\.3\.4918-re0ade7b vs network=v8\.1\.15\.4896-hc2cb4ed/);
     // The row's headline must show the NETWORK-confirmed version, not the
-    // raw runtime marker value, even for a genuinely unexplained Mismatch
-    // (no active Bundle Override involved here at all) - this is the
+    // raw runtime marker value, even when runtime and network evidence
+    // disagree (no active Bundle Override involved here at all) - this is the
     // consistency fix: the headline selection rule (prefer network
     // whenever it exists) must be identical regardless of whether the
-    // divergence ends up Confirmed-via-override or a flagged Mismatch, so
+    // URL comparison ends up Matches URL, Overridden, or Mismatch, so
     // the same underlying pinned-runtime-marker fact is never displayed
     // differently (e.g. looking like "ALPHA was detected" in one row and
     // "PROD" in another) depending on which bucket a row lands in.
     assert.match(texts[0], /v8\.1\.15\.4896-hc2cb4ed/);
     assert.doesNotMatch(texts[0], /v8\.2\.3\.4918-re0ade7b/);
-    await mismatchDisclosure.locator('summary').focus();
+    await evidenceDisclosure.locator('summary').focus();
     await page.keyboard.press('Enter');
-    assert.equal(await mismatchDisclosure.evaluate((node) => node.open), true);
+    assert.equal(await evidenceDisclosure.evaluate((node) => node.open), true);
     await page.waitForTimeout(3500);
     assert.equal(await panel.locator('.lgt-build-disclosure').first().evaluate((node) => node.open), true);
-    console.log('PASS: disagreeing runtime vs network version renders a concise always-visible warning and a collapsed native detail disclosure; Enter opens it and an unchanged polling rerender preserves its open state.');
+    console.log('PASS: version evidence conflicts stay separate from the Matches URL environment result and retain an accessible disclosure.');
 
     // Scenario 4: Unclassified - a network hit with NO runtime marker in
     // that frame at all must not get an assumed layer label.
@@ -189,12 +196,12 @@ async function main() {
       { 0: { mfe: { brandId: '11111111-1111-1111-1111-111111111111', brand: 'firestorm', device: 'desktop', version: '8.2.3.4918-re0ade7b', hostEnv: 'qa', artifactEnv: 'qa', artifactEnvs: ['qa'], url: PAGE_URL, ts: Date.now() } } },
       {}
     );
-    texts = await waitForRows((t) => t.length === 1 && /Unclassified/.test(t[0]), 10000);
+    texts = await waitForRows((t) => t.length === 1 && /Unclassified SB build.*Matches URL/s.test(t[0]), 10000);
     assert.doesNotMatch(texts[0], /MFE|Fabric|NodeJS/);
     const unclassifiedDisclosure = panel.locator('.lgt-build-disclosure').first();
     assert.equal(await unclassifiedDisclosure.evaluate((node) => node.open), false);
-    assert.equal((await unclassifiedDisclosure.locator('summary').innerText()).trim(), 'Why Unclassified?');
-    console.log('PASS: network-only evidence with no runtime marker renders Unclassified with no assumed layer label, and changed row content resets the disclosure to collapsed.');
+    assert.equal((await unclassifiedDisclosure.locator('summary').innerText()).trim(), 'Show detection details');
+    console.log('PASS: direct network evidence can establish Matches URL without inventing a runtime layer label.');
 
     // Scenario 5: bleSource=1 request to an ALPHA/PROD host must never be
     // usable as environment evidence (isBleExcludedRequest guard).
@@ -210,8 +217,42 @@ async function main() {
     assert.equal(excluded.alphaWithoutBle, false);
     console.log('PASS: bleSource=1 ALPHA/PROD backend requests are excluded from bundle-environment computation; QA and non-bleSource requests are not.');
 
+    // A TEST brand URL can natively serve a QA config. The path correctly
+    // identifies QA as the loaded artifact, but that is a real mismatch
+    // against the TEST environment requested by the top-level URL.
+    const crossEnvironmentConfig = await serviceWorker.evaluate(() => {
+      const url = 'https://www.test.betsson.gr/dist/qa/config/4bf6590d-0a29-47f5-a705-42b7a04b7878/11111111-1111-1111-1111-111111111111/8.3/config.json';
+      const match = BUNDLE_OBSERVE_SANDBOX_CONFIG_RE.exec(url);
+      const hostEnv = envLabelFromHostname(new URL(url).hostname);
+      return {
+        hostEnv,
+        artifactEnv: sandboxConfigArtifactEnvironment(match, hostEnv),
+      };
+    });
+    assert.deepEqual(crossEnvironmentConfig, { hostEnv: 'test', artifactEnv: 'qa' });
+    const mfePathEvidence = await serviceWorker.evaluate(async () => {
+      const tabs = await chrome.tabs.query({ active: true });
+      await observeBuildRequest({
+        tabId: tabs[0].id,
+        frameId: 0,
+        url: 'https://www.test.betsson.gr/dist/qa/xp/widgets/sportsbook/4bf6590d-0a29-47f5-a705-42b7a04b7878/8.3.0.5227-h7cbe311/desktop/files/main-ABC123.js'
+      });
+      const snapshot = await detection.snapshot(tabs[0].id);
+      return snapshot.networkByFrame[0].mfe.artifactEnv;
+    });
+    assert.equal(mfePathEvidence, 'qa');
+
+    await seed(
+      { 0: { iframe: { brandId: '4bf6590d-0a29-47f5-a705-42b7a04b7878', brandName: 'Betssongr', version: '8.3.0.5227-h7cbe311', environment: 'qa', ts: Date.now() } } },
+      { 0: { iframe: { brandId: '4bf6590d-0a29-47f5-a705-42b7a04b7878', brand: 'betssongr', device: 'desktop', version: '8.3.0.5227-h7cbe311', hostEnv: 'test', artifactEnv: 'qa', artifactEnvs: ['qa'], url: PAGE_URL, ts: Date.now() } } },
+      { 0: { url: 'https://test.betsson.gr/en/sportsbook', hostname: 'test.betsson.gr', env: 'test', brand: 'betssongr' } }
+    );
+    texts = await waitForRows((t) => t.length === 1 && /Betssongr.*Fabric.*QA.*Mismatch/s.test(t[0]), 10000);
+    assert.equal((await panel.locator('.lgt-build-alert').innerText()).trim(), 'URL requests TEST, but QA bundle is loaded.');
+    console.log('PASS: test.betsson.gr loading a native QA Fabric artifact is correctly reported as URL/bundle Mismatch.');
+
     // Scenario 6: hybrid runtime - MFE and iframe markers BOTH present in
-    // the SAME frame and BOTH independently Confirmed on the same
+    // the SAME frame and BOTH independently match the URL on the same
     // brand+version+environment+device. This is a real, observed Betsson
     // QA shape (mFE layered on top of the Fabric/OBGA runtime).
     // Since both layers report the exact same version/environment,
@@ -228,20 +269,20 @@ async function main() {
       {
         0: {
           mfe: { brandId: '11111111-1111-1111-1111-111111111111', brand: 'firestorm', device: 'desktop', version: '8.3.0.4928-b1d00c18', hostEnv: 'qa', artifactEnv: 'qa', artifactEnvs: ['qa'], url: PAGE_URL, ts: Date.now() },
-          iframe: { brandId: '11111111-1111-1111-1111-111111111111', brand: 'firestorm', device: 'desktop', version: '8.3.0.4928-b1d00c18', headerVersion: '8.3.0.4928-b1d00c18', hostEnv: 'qa', url: PAGE_URL, ts: Date.now() }
+          iframe: { brandId: '11111111-1111-1111-1111-111111111111', brand: 'firestorm', device: 'desktop', version: '8.3.0.4928-b1d00c18', headerVersion: '8.3.0.4928-b1d00c18', hostEnv: 'qa', artifactEnv: 'qa', artifactEnvs: ['qa'], url: PAGE_URL, ts: Date.now() }
         }
       },
       {}
     );
-    texts = await waitForRows((t) => t.length === 1 && /Confirmed/.test(t[0]), 10000);
-    assert.match(texts[0], /Firestorm.*MFE \+ Fabric.*v8\.3\.0\.4928-b1d00c18.*QA.*Confirmed/s);
+    texts = await waitForRows((t) => t.length === 1 && /Firestorm.*MFE \+ Fabric.*Matches URL/s.test(t[0]), 10000);
+    assert.match(texts[0], /Firestorm.*MFE \+ Fabric.*v8\.3\.0\.4928-b1d00c18.*QA.*Matches URL/s);
     const hybridDetailCount = await panel.locator('.lgt-build-detail').count();
     assert.strictEqual(hybridDetailCount, 0);
-    console.log('PASS: MFE and the Fabric/OBGA shell both Confirmed in the same frame with matching brand+version+environment are merged into a single hybrid row (label reads "Fabric", not "iframe" - they are the same shell, not two separate layers), with no extra detail text since a merged Confirmed row needs no explanation beyond any other Confirmed row.');
+    console.log('PASS: matching MFE and Fabric rows merge into one compact Matches URL result.');
 
     // Scenario 7: Partially verified - a runtime marker exists but there
     // is no network confirmation for this layer at all yet. The row must
-    // self-explain why it has not reached Confirmed instead of leaving
+    // self-explain why its loaded environment cannot be verified yet.
     // detail blank.
     await seed(
       { 0: { mfe: { brandId: '11111111-1111-1111-1111-111111111111', brandName: 'Firestorm', version: '8.2.3.4918-re0ade7b', environment: 'qa', ts: Date.now() } } },
@@ -256,58 +297,78 @@ async function main() {
     assert.match(partialDetail, /no network confirmation seen for this layer yet/);
     console.log('PASS: Partially verified rows include a specific reason (missing network confirmation) instead of a blank detail.');
 
-    // Scenario 8: a real live pattern (confirmed 2026-09-04 against
-    // alpha.betsson.com) - the runtime marker keeps reporting the layer's
-    // base build (PROD) while the network side correctly reflects an
-    // ALPHA Bundle Override the user deliberately applied. WITHOUT an
-    // active override recorded for this tab, this must still be a
-    // Mismatch (the baseline/safety case - nothing should silently
-    // swallow a real disagreement by default).
+    // Scenario 8: the primary badge compares URL versus loaded artifact,
+    // not runtime marker versus network metadata. An ALPHA artifact on an
+    // ALPHA URL therefore matches even if the runtime marker is pinned to
+    // PROD; the unexplained marker split remains a separate warning.
     await seed(
       { 0: { mfe: { brandId: '6a6d80b9-16ac-4387-a413-244d93a74deb', brandName: 'Betsson', version: '8.1.16.4855-rb8bfa90', environment: 'prod', ts: Date.now() } } },
       { 0: { mfe: { brandId: '6a6d80b9-16ac-4387-a413-244d93a74deb', brand: 'betsson', device: 'desktop', version: '8.2.5.4941-reba6fd9', hostEnv: 'alpha', artifactEnv: 'alpha', artifactEnvs: ['alpha'], url: PAGE_URL, ts: Date.now() } } },
-      {}
+      { 0: { url: 'https://alpha.betsson.com/en/sportsbook', hostname: 'alpha.betsson.com', env: 'alpha', brand: 'betsson' } }
     );
-    texts = await waitForRows((t) => t.length === 1 && /Mismatch/.test(t[0]), 10000);
-    let bundleMismatchDetail = await panel.locator('.lgt-build-detail').first().textContent();
-    assert.match(bundleMismatchDetail, /environment: runtime=PROD vs network=ALPHA/);
-    // Even in this baseline/unexplained Mismatch, the headline must show
-    // the network-confirmed ALPHA build, not the raw pinned PROD runtime
-    // value - the SAME headline selection rule as the override-explained
-    // Confirmed case below. This is the exact anomaly the user reported:
-    // without this, an unexplained Mismatch would show "PROD" while an
-    // override-explained Confirmed row for the identical runtime/network
-    // split shows "ALPHA" - two different displays for the same
-    // underlying always-pinned-runtime-marker fact.
+    texts = await waitForRows((t) => t.length === 1 && /Matches URL/.test(t[0]), 10000);
+    let bundleEvidenceDetail = await panel.locator('.lgt-build-detail').first().textContent();
+    assert.match(bundleEvidenceDetail, /environment evidence: runtime=PROD vs network=ALPHA/);
+    assert.equal(await panel.locator('.lgt-build-evidence-warning').count(), 1);
     assert.match(texts[0], /v8\.2\.5\.4941-reba6fd9.*ALPHA/s);
-    console.log('PASS: without a recorded active Bundle Override, a runtime=PROD/network=ALPHA split for the same brand+layer still renders Mismatch (the safety baseline), and its headline already shows the network-confirmed ALPHA build (not the raw pinned PROD runtime value) - identical headline selection rule as the override-explained Confirmed case below.');
+    console.log('PASS: URL and loaded artifact matching remains Matches URL while unexplained runtime metadata divergence is warned separately.');
 
-    // Now record that a Bundle Override targeting ALPHA is active on this
-    // tab (as background.js itself does after a real Apply) and re-seed
-    // the identical runtime/network split - this must now resolve as
-    // Confirmed, showing the network (actually-running) values, with a
-    // detail note explaining the pinned-runtime-marker behavior instead of
-    // an unexplained conflict.
+    // A same-environment ALPHA override still produces Matches URL. Its
+    // active metadata explains the pinned PROD runtime marker, so the
+    // evidence warning disappears while the detail remains available.
     await setBundleOverrideTarget('alpha');
     await seed(
       { 0: { mfe: { brandId: '6a6d80b9-16ac-4387-a413-244d93a74deb', brandName: 'Betsson', version: '8.1.16.4855-rb8bfa90', environment: 'prod', ts: Date.now() } } },
       { 0: { mfe: { brandId: '6a6d80b9-16ac-4387-a413-244d93a74deb', brand: 'betsson', device: 'desktop', version: '8.2.5.4941-reba6fd9', hostEnv: 'alpha', artifactEnv: 'alpha', artifactEnvs: ['alpha'], url: PAGE_URL, ts: Date.now() } } },
-      {}
+      { 0: { url: 'https://alpha.betsson.com/en/sportsbook', hostname: 'alpha.betsson.com', env: 'alpha', brand: 'betsson' } }
     );
-    texts = await waitForRows((t) => t.length === 1 && /Confirmed/.test(t[0]), 10000);
-    assert.match(texts[0], /Betsson.*MFE.*v8\.2\.5\.4941-reba6fd9.*ALPHA.*Confirmed/s);
-    const confirmedDisclosure = panel.locator('.lgt-build-disclosure').first();
-    assert.equal(await confirmedDisclosure.evaluate((node) => node.open), false);
-    assert.equal((await confirmedDisclosure.locator('summary').innerText()).trim(), 'Why Confirmed?');
+    texts = await waitForRows((t) => t.length === 1 && /Matches URL/.test(t[0]), 10000);
+    assert.match(texts[0], /Betsson.*MFE.*v8\.2\.5\.4941-reba6fd9.*ALPHA.*Matches URL/s);
+    await panel.locator('.lgt-build-detail').filter({ hasText: 'Bundle Override active (target ALPHA)' }).waitFor({ state: 'attached', timeout: 10000 });
+    assert.equal(await panel.locator('.lgt-build-evidence-warning').count(), 0);
     const bundleOverrideDetail = await panel.locator('.lgt-build-detail').first().textContent();
     assert.match(bundleOverrideDetail, /Bundle Override active \(target ALPHA\).*runtime marker still reports the base build v8\.1\.16\.4855-rb8bfa90\/PROD.*network evidence v8\.2\.5\.4941-reba6fd9\/ALPHA reflects what is actually running/s);
+    console.log('PASS: a standard same-environment override stays Matches URL and explains the pinned runtime marker.');
+
+    // A Link Gen-owned cross-environment override is Overridden only when
+    // its active target is also observed in the loaded network artifact.
+    await setBundleOverrideTarget('qa');
+    await seed(
+      { 0: { mfe: { brandId: '4bf6590d-0a29-47f5-a705-42b7a04b7878', brandName: 'Betssongr', version: '8.3.0.5227-h7cbe311', environment: 'qa', ts: Date.now() } } },
+      { 0: { mfe: { brandId: '4bf6590d-0a29-47f5-a705-42b7a04b7878', brand: 'betssongr', device: 'desktop', version: '8.3.0.5227-h7cbe311', hostEnv: 'test', artifactEnv: 'qa', artifactEnvs: ['qa'], url: PAGE_URL, ts: Date.now() } } },
+      { 0: { url: 'https://test.betsson.gr/en/sportsbook', hostname: 'test.betsson.gr', env: 'test', brand: 'betssongr' } }
+    );
+    texts = await waitForRows((t) => t.length === 1 && /Overridden/.test(t[0]), 10000);
+    assert.match(texts[0], /Betssongr.*MFE.*QA.*Overridden/s);
+    assert.equal((await panel.locator('.lgt-build-override').innerText()).trim(), 'URL requests TEST; Link Gen override intentionally loaded QA.');
+    console.log('PASS: an active Link Gen target confirmed by the loaded artifact renders Overridden instead of Mismatch.');
+
+    // Merely having override metadata is not enough. If the artifact that
+    // actually loaded differs from both the URL and the active target, the
+    // result stays Mismatch and explicitly calls out the failed target.
+    await seed(
+      { 0: { mfe: { brandId: '4bf6590d-0a29-47f5-a705-42b7a04b7878', brandName: 'Betssongr', version: '8.4.0.6000-test', environment: 'alpha', ts: Date.now() } } },
+      { 0: { mfe: { brandId: '4bf6590d-0a29-47f5-a705-42b7a04b7878', brand: 'betssongr', device: 'desktop', version: '8.4.0.6000-test', hostEnv: 'test', artifactEnv: 'alpha', artifactEnvs: ['alpha'], url: PAGE_URL, ts: Date.now() } } },
+      { 0: { url: 'https://test.betsson.gr/en/sportsbook', hostname: 'test.betsson.gr', env: 'test', brand: 'betssongr' } }
+    );
+    texts = await waitForRows((t) => t.length === 1 && /Mismatch/.test(t[0]), 10000);
+    assert.doesNotMatch(texts[0], /Overridden/);
+    assert.match(await panel.locator('.lgt-build-detail').first().textContent(), /override target: active=QA vs loaded=ALPHA/);
+    assert.equal(await panel.locator('.lgt-build-evidence-warning').count(), 1);
     await setBundleOverrideTarget(null);
-    console.log('PASS: with an active Bundle Override targeting ALPHA recorded for this tab, the SAME runtime=PROD/network=ALPHA split is recognized as the known pinned-startup-context pattern and renders Confirmed (network values shown) with an explanatory detail instead of Mismatch.');
+    console.log('PASS: active override metadata cannot hide an artifact that failed to load from its configured target.');
 
     // Bundle has three separate explanation contexts: the general help,
     // the standalone-sandbox limitation, and a live URL/runtime mismatch.
     // Each must stay compact while its short actionable warning remains
-    // visible. The seeded PROD runtime on this QA URL triggers the latter.
+    // visible. Seed an ALPHA artifact on this QA fixture URL to trigger
+    // the loaded-bundle warning used by the Bundle tab.
+    await seed(
+      { 0: { mfe: { brandId: '6a6d80b9-16ac-4387-a413-244d93a74deb', brandName: 'Betsson', version: '8.1.16.4855-rb8bfa90', environment: 'prod', ts: Date.now() } } },
+      { 0: { mfe: { brandId: '6a6d80b9-16ac-4387-a413-244d93a74deb', brand: 'betsson', device: 'desktop', version: '8.2.5.4941-reba6fd9', hostEnv: 'alpha', artifactEnv: 'alpha', artifactEnvs: ['alpha'], url: PAGE_URL, ts: Date.now() } } },
+      {}
+    );
+    await waitForRows((t) => t.length === 1 && /Mismatch/.test(t[0]), 10000);
     await panel.locator('.lgt-tab').filter({ hasText: 'Bundle' }).click();
     const bundleHelp = panel.locator('.lgt-bundle-help');
     assert.equal(await bundleHelp.evaluate((node) => node.open), false);
@@ -318,7 +379,7 @@ async function main() {
     const hostRealityHelp = panel.locator('.lgt-host-reality-details');
     await hostRealityHelp.waitFor({ state: 'visible', timeout: 7000 });
     assert.equal(await hostRealityHelp.evaluate((node) => node.open), false);
-    assert.match(await panel.locator('#lgt-body-bundle').innerText(), /Page runtime does not match the URL environment/);
+    assert.match(await panel.locator('#lgt-body-bundle').innerText(), /Loaded bundle does not match the URL environment/);
     console.log('PASS: Bundle general, sandbox, and live environment explanations are collapsed while concise warnings remain visible.');
 
     // The long BLE explanation is also a native disclosure. It is compact
@@ -349,12 +410,13 @@ async function main() {
     assert.equal(await generateHelp.evaluate((node) => node.open), false);
     const generateText = await panel.locator('#lgt-body-generate').innerText();
     assert.match(generateText, /Local links\s+Sportradar Statistics fix\s+BLE source\s+Oddin Statistics fix/s);
-    assert.match(generateText, /Force fresh live-login\s+Show login tab/s);
+    assert.doesNotMatch(generateText, /Force fresh live-login|Show login tab/);
     await panel.locator('#lgt-gen-login-state').selectOption('in');
     const loggedInGenerateText = await panel.locator('#lgt-body-generate').innerText();
     assert.match(loggedInGenerateText, /Force fresh live-login\s+Show login tab/s);
     assert.doesNotMatch(generateText, /skip 30-min cache|spoofs Origin\/Referer/);
 
+    await panel.getByRole('button', { name: 'More tools', exact: true }).click();
     await panel.locator('.lgt-tab').filter({ hasText: 'Live Login' }).click();
     assert.equal(await panel.locator('.lgt-live-login-help').evaluate((node) => node.open), false);
 

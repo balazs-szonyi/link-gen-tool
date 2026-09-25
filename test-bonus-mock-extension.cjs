@@ -43,7 +43,11 @@ async function showPanel(sw, page) {
     await page.locator('#lgt-panel').evaluate((panel) => { panel.style.display = ''; });
   }
   await page.waitForSelector('#lgt-panel', { state: 'visible' });
-  await page.locator('#lgt-panel .lgt-tab').filter({ hasText: 'Bonus Mock' }).click();
+  const bonusTab = page.locator('#lgt-panel .lgt-tab').filter({ hasText: 'Bonus Mock' });
+  if (!await bonusTab.isVisible()) {
+    await page.getByRole('button', { name: 'More tools', exact: true }).click();
+  }
+  await bonusTab.click();
 }
 
 (async () => {
@@ -53,13 +57,18 @@ async function showPanel(sw, page) {
   const context = await chromium.launchPersistentContext(userDataDir, {
     headless: true,
     channel: 'chromium',
-    args: [`--disable-extensions-except=${EXT_PATH}`, `--load-extension=${EXT_PATH}`, '--no-first-run'],
+    args: [
+      `--disable-extensions-except=${EXT_PATH}`,
+      `--load-extension=${EXT_PATH}`,
+      '--no-first-run',
+      '--host-resolver-rules=MAP test.sbplayground1.net 127.0.0.1',
+    ],
   });
   try {
     let sw = context.serviceWorkers()[0];
     if (!sw) sw = await context.waitForEvent('serviceworker', { timeout: 15000 });
     const page = await context.newPage();
-    await page.goto(`http://127.0.0.1:${port}/`);
+    await page.goto(`http://test.sbplayground1.net:${port}/`);
     await showPanel(sw, page);
 
     const panel = page.locator('#lgt-panel');
