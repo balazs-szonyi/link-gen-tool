@@ -475,6 +475,14 @@
         readAll(function (list) {
           cb(list.find(function (c) { return c.id === id; }) || null);
         });
+      },
+      // Bulk import (lgt-credentials-import-v1 file). Brands are derived
+      // from each record's URLs; existing ids/default flag are preserved.
+      importMany: function (records, brandOf, cb) {
+        readAll(function (list) {
+          var res = LgtCredentialImport.merge(list, records, brandOf, uid);
+          writeAll(res.list, function () { cb(res); });
+        });
       }
     };
   })();
@@ -1059,8 +1067,8 @@
     return PLAYGROUND_HOST_SUFFIX[brand] || null;
   }
 
-  function detectBrandAndEnv() {
-    var host = location.hostname.toLowerCase();
+  function detectBrandAndEnv(hostname) {
+    var host = (hostname || location.hostname).toLowerCase();
     var labels = host.split('.');
     var env = 'prod';
     ENV_LABELS.forEach(function (e) {
@@ -3904,12 +3912,41 @@ const ok = await attemptAutoLogin(detected.brand, cred.username, cred.password, 
       }
     }, ['Save credential']);
 
+    var importStatus = el('div', { class: 'lgt-log' }, []);
+    var importFile = el('input', { type: 'file', accept: '.json,application/json', style: 'display:none' });
+    importFile.addEventListener('change', function () {
+      var file = importFile.files && importFile.files[0];
+      if (!file) return;
+      var reader = new FileReader();
+      reader.onload = function () {
+        var parsed = LgtCredentialImport.parse(String(reader.result));
+        importFile.value = '';
+        if (parsed.error) { importStatus.textContent = 'Import failed: ' + parsed.error; return; }
+        var brandOf = function (url) {
+          try {
+            var b = detectBrandAndEnv(new URL(url).hostname).brand;
+            return b && BRANDS[b] ? b : null;
+          } catch (e) { return null; }
+        };
+        Vault.importMany(parsed.records, brandOf, function (res) {
+          importStatus.textContent = 'Imported: ' + res.added + ' added, ' + res.updated + ' updated, ' +
+            res.unassigned + ' new without a brand link, ' + parsed.skipped + ' skipped. Delete the import file now.';
+          Vault.getAll(render);
+        });
+      };
+      reader.readAsText(file);
+    });
+    var importBtn = el('button', { onclick: function () { importFile.click(); } }, ['Import credentials file']);
+
     wrap.appendChild(labelIn);
     wrap.appendChild(userIn);
     wrap.appendChild(passIn);
     wrap.appendChild(newBrandMatrixLabel);
     wrap.appendChild(newBrandMatrix);
     wrap.appendChild(addBtn);
+    wrap.appendChild(importBtn);
+    wrap.appendChild(importFile);
+    wrap.appendChild(importStatus);
     wrap.appendChild(el('label', {}, ['Saved credentials']));
     wrap.appendChild(list);
     wrap.__lgtCredList = list;
